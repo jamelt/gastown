@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -51,6 +55,62 @@ func TestNudgeStdinConflict(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot use --stdin with --message/-m") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestResolveNudgeServiceSenderRequiresBothFlags(t *testing.T) {
+	originalSender := nudgeServiceSenderFlag
+	originalKeyFile := nudgeServiceKeyFileFlag
+	t.Cleanup(func() {
+		nudgeServiceSenderFlag = originalSender
+		nudgeServiceKeyFileFlag = originalKeyFile
+	})
+
+	nudgeServiceSenderFlag = "portfolio-steward"
+	nudgeServiceKeyFileFlag = ""
+	_, err := resolveNudgeSender(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "must be used together") {
+		t.Fatalf("resolveNudgeSender error = %v, want paired-flags error", err)
+	}
+}
+
+func TestResolveNudgeServiceSenderSignsRegisteredIdentity(t *testing.T) {
+	originalSender := nudgeServiceSenderFlag
+	originalKeyFile := nudgeServiceKeyFileFlag
+	t.Cleanup(func() {
+		nudgeServiceSenderFlag = originalSender
+		nudgeServiceKeyFileFlag = originalKeyFile
+	})
+
+	townRoot := t.TempDir()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messaging := config.NewMessagingConfig()
+	messaging.NudgeServiceSenders["portfolio-steward"] = config.NudgeServiceSenderConfig{
+		PublicKey: base64.StdEncoding.EncodeToString(publicKey),
+	}
+	if err := config.SaveMessagingConfig(config.MessagingConfigPath(townRoot), messaging); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(townRoot, "portfolio-steward.key")
+	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(privateKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	nudgeServiceSenderFlag = "portfolio-steward"
+	nudgeServiceKeyFileFlag = keyPath
+	sender, err := resolveNudgeSender(townRoot)
+	if err != nil {
+		t.Fatalf("resolveNudgeSender: %v", err)
+	}
+	queued, err := sender.queuedNudge("hq-mayor", "portfolio check", nudge.PriorityNormal)
+	if err != nil {
+		t.Fatalf("queuedNudge: %v", err)
+	}
+	if got := nudge.SenderAttribution(queued); got != "service/portfolio-steward (verified)" {
+		t.Fatalf("SenderAttribution = %q", got)
 	}
 }
 

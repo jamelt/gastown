@@ -38,12 +38,15 @@ func hasACPSessionByName(townRoot, sessionName string) bool {
 }
 
 var (
-	nudgeMessageFlag  string
-	nudgeForceFlag    bool
-	nudgeStdinFlag    bool
-	nudgeIfFreshFlag  bool
-	nudgeModeFlag     string
-	nudgePriorityFlag string
+	nudgeMessageFlag                string
+	nudgeForceFlag                  bool
+	nudgeStdinFlag                  bool
+	nudgeIfFreshFlag                bool
+	nudgeModeFlag                   string
+	nudgePriorityFlag               string
+	nudgeServiceSenderFlag          string
+	nudgeServiceKeyFileFlag         string
+	nudgeServiceRegisterKeyFileFlag string
 )
 
 // Nudge delivery modes.
@@ -67,6 +70,10 @@ func init() {
 	nudgeCmd.Flags().BoolVar(&nudgeIfFreshFlag, "if-fresh", false, "Only send if caller's tmux session is <60s old (suppresses compaction nudges)")
 	nudgeCmd.Flags().StringVar(&nudgeModeFlag, "mode", NudgeModeWaitIdle, "Delivery mode: wait-idle (default), queue, or immediate")
 	nudgeCmd.Flags().StringVar(&nudgePriorityFlag, "priority", nudge.PriorityNormal, "Queue priority: normal (default) or urgent")
+	nudgeCmd.Flags().StringVar(&nudgeServiceSenderFlag, "service-sender", "", "Registered service sender name")
+	nudgeCmd.Flags().StringVar(&nudgeServiceKeyFileFlag, "service-key-file", "", "Path to the registered service sender's private key")
+	nudgeCmd.AddCommand(nudgeServiceRegisterCmd)
+	nudgeServiceRegisterCmd.Flags().StringVar(&nudgeServiceRegisterKeyFileFlag, "private-key-file", "", "Path where the new private key will be created")
 }
 
 var nudgeCmd = &cobra.Command{
@@ -113,6 +120,11 @@ DND (Do Not Disturb):
   If the target has DND enabled (gt dnd on), the nudge is skipped.
   Use --force to override DND and send anyway.
 
+Registered service senders:
+  --service-sender and --service-key-file sign attribution for a non-agent
+  process registered in config/messaging.json. The receiver renders the service
+  as verified only when its signature matches the registered public key.
+
 Examples:
   gt nudge greenplace/furiosa "Check your mail and start working"
   gt nudge greenplace/alpha -m "What's your status?"
@@ -129,6 +141,35 @@ Examples:
   EOF`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runNudge,
+}
+
+var nudgeServiceRegisterCmd = &cobra.Command{
+	Use:   "service-register <name>",
+	Short: "Register a cryptographically attributable service sender",
+	Long: `Create an Ed25519 private key for a non-agent service and register its
+public key in <town-root>/config/messaging.json. The private key file is created
+with mode 0600 and is never written to town configuration. Existing keys and
+registrations are never overwritten.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runNudgeServiceRegister,
+}
+
+func runNudgeServiceRegister(_ *cobra.Command, args []string) error {
+	if nudgeServiceRegisterKeyFileFlag == "" {
+		return fmt.Errorf("--private-key-file is required")
+	}
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("cannot find town root: %w", err)
+	}
+	publicKey, err := nudge.RegisterServiceSender(townRoot, args[0], nudgeServiceRegisterKeyFileFlag)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s Registered nudge service sender %s\n", style.SuccessPrefix, args[0])
+	fmt.Printf("  Private key: %s\n", nudgeServiceRegisterKeyFileFlag)
+	fmt.Printf("  Public key:  %s\n", publicKey)
+	return nil
 }
 
 // ifFreshMaxAge is the maximum session age for --if-fresh to allow a nudge.
@@ -155,22 +196,26 @@ var idleWatcherPollInterval = 1 * time.Second
 // For "immediate" mode: sends directly via tmux (current behavior).
 // For "queue" mode: writes to the nudge queue for cooperative delivery.
 // For "wait-idle" mode: waits for idle, then delivers or falls back to queue.
-func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
+func deliverNudge(t *tmux.Tmux, sessionName, message string, sender resolvedNudgeSender) error {
+	townRoot, _ := workspace.FindFromCwd()
+	queued, err := sender.queuedNudge(sessionName, message, nudgePriorityFlag)
+	if err != nil {
+		return err
+	}
+
 	// Test hook: when GT_TEST_NUDGE_LOG is set, log the nudge instead of
 	// delivering through real tmux/queue transport. Prevents test-suite
 	// runs from delivering "test" messages to live agents (mayor reported
 	// recurring synthetic nudges traced to nudge_test.go invocations).
 	// Mirrors the pattern in sling_helpers.go's nudgeWitness/nudgeRefinery.
 	if logPath := os.Getenv("GT_TEST_NUDGE_LOG"); logPath != "" {
-		entry := fmt.Sprintf("nudge:%s:%s:%s\n", sessionName, sender, message)
+		entry := fmt.Sprintf("nudge:%s:%s:%s\n", sessionName, nudge.SenderAttribution(queued), message)
 		if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 			_, _ = f.WriteString(entry)
 			_ = f.Close()
 		}
 		return nil
 	}
-
-	townRoot, _ := workspace.FindFromCwd()
 
 	// Use the requested mode, but force queue mode for ACP sessions.
 	// ACP agents don't have tmux panes to send-keys to.
@@ -182,18 +227,14 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 	// For direct tmux delivery, prefix with sender attribution.
 	// Queue-based delivery stores Sender as a separate field and
 	// FormatForInjection adds the prefix, so we must NOT double-prefix.
-	prefixedMessage := fmt.Sprintf("[from %s] %s", sender, message)
+	prefixedMessage := fmt.Sprintf("[from %s] %s", nudge.SenderAttribution(queued), message)
 
 	switch mode {
 	case NudgeModeQueue:
 		if townRoot == "" {
 			return fmt.Errorf("--mode=queue requires a Gas Town workspace")
 		}
-		return nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
-			Sender:   sender,
-			Message:  message,
-			Priority: nudgePriorityFlag,
-		})
+		return nudge.Enqueue(townRoot, sessionName, queued)
 
 	case NudgeModeWaitIdle:
 		if townRoot == "" {
@@ -211,16 +252,8 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			preset := config.GetAgentPresetByName(agentName)
 			if preset != nil && preset.ReadyPromptPrefix == "" {
 				fmt.Fprintf(os.Stderr, "wait-idle: %s agent %q has no prompt detection, using queue mode\n", sessionName, agentName)
-				if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
-					Sender:   sender,
-					Message:  message,
-					Priority: nudgePriorityFlag,
-				}); qErr != nil {
-					formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
-						Sender:   sender,
-						Message:  message,
-						Priority: nudgePriorityFlag,
-					}})
+				if qErr := nudge.Enqueue(townRoot, sessionName, queued); qErr != nil {
+					formatted := nudge.FormatForInjection([]nudge.QueuedNudge{queued})
 					return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
 				}
 				// Ensure a nudge-poller is running so the queue actually drains.
@@ -240,21 +273,13 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			// Agent is idle — deliver directly. Format as system-reminder
 			// so the agent processes it as a background notification rather
 			// than a user interruption/correction.
-			formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
-				Sender:   sender,
-				Message:  message,
-				Priority: nudgePriorityFlag,
-			}})
+			formatted := nudge.FormatForInjection([]nudge.QueuedNudge{queued})
 			deliverErr := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
 			if !errors.Is(deliverErr, tmux.ErrSubmitNotVerified) {
 				return deliverErr
 			}
 			fmt.Fprintf(os.Stderr, "wait-idle: %v; queueing for %s\n", deliverErr, sessionName)
-			if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
-				Sender:   sender,
-				Message:  message,
-				Priority: nudgePriorityFlag,
-			}); qErr != nil {
+			if qErr := nudge.Enqueue(townRoot, sessionName, queued); qErr != nil {
 				return fmt.Errorf("queue fallback after unverified submit failed: %v (original: %w)", qErr, deliverErr)
 			}
 			return nil
@@ -265,21 +290,13 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			return fmt.Errorf("wait-idle: %w", err)
 		}
 		// Timeout (agent busy) — queue instead
-		if qErr := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
-			Sender:   sender,
-			Message:  message,
-			Priority: nudgePriorityFlag,
-		}); qErr != nil {
+		if qErr := nudge.Enqueue(townRoot, sessionName, queued); qErr != nil {
 			// Queue failed — fall back to immediate as last resort.
 			// Better to interrupt than lose the message entirely.
 			fmt.Fprintf(os.Stderr, "Warning: queue fallback failed (%v), delivering immediately\n", qErr)
 			// Still use FormatForInjection so the agent sees a consistent
 			// <system-reminder> format regardless of delivery path.
-			formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
-				Sender:   sender,
-				Message:  message,
-				Priority: nudgePriorityFlag,
-			}})
+			formatted := nudge.FormatForInjection([]nudge.QueuedNudge{queued})
 			return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
 		}
 		// Run watcher synchronously: polls for idle over a longer window.
@@ -378,6 +395,63 @@ var validNudgePriorities = map[string]bool{
 	nudge.PriorityUrgent: true,
 }
 
+type resolvedNudgeSender struct {
+	label         string
+	serviceSigner *nudge.ServiceSigner
+}
+
+func (sender resolvedNudgeSender) queuedNudge(sessionName, message, priority string) (nudge.QueuedNudge, error) {
+	queued := nudge.QueuedNudge{
+		Sender:   sender.label,
+		Message:  message,
+		Priority: priority,
+	}
+	if sender.serviceSigner == nil {
+		return queued, nil
+	}
+	return sender.serviceSigner.Sign(sessionName, queued)
+}
+
+func resolveNudgeSender(townRoot string) (resolvedNudgeSender, error) {
+	if nudgeServiceSenderFlag != "" || nudgeServiceKeyFileFlag != "" {
+		if nudgeServiceSenderFlag == "" || nudgeServiceKeyFileFlag == "" {
+			return resolvedNudgeSender{}, fmt.Errorf("--service-sender and --service-key-file must be used together")
+		}
+		if townRoot == "" {
+			return resolvedNudgeSender{}, fmt.Errorf("registered service senders require a Gas Town workspace")
+		}
+		signer, err := nudge.LoadServiceSigner(townRoot, nudgeServiceSenderFlag, nudgeServiceKeyFileFlag)
+		if err != nil {
+			return resolvedNudgeSender{}, err
+		}
+		return resolvedNudgeSender{
+			label:         "service/" + nudgeServiceSenderFlag,
+			serviceSigner: signer,
+		}, nil
+	}
+
+	sender := "unknown"
+	if roleInfo, err := GetRole(); err == nil {
+		switch roleInfo.Role {
+		case RoleMayor:
+			sender = constants.RoleMayor
+		case RoleCrew:
+			sender = fmt.Sprintf("%s/crew/%s", roleInfo.Rig, roleInfo.Polecat)
+		case RolePolecat:
+			sender = fmt.Sprintf("%s/%s", roleInfo.Rig, roleInfo.Polecat)
+		case RoleWitness:
+			sender = fmt.Sprintf("%s/witness", roleInfo.Rig)
+		case RoleRefinery:
+			sender = fmt.Sprintf("%s/refinery", roleInfo.Rig)
+		case RoleDeacon:
+			sender = constants.RoleDeacon
+		default:
+			sender = string(roleInfo.Role)
+		}
+	}
+	return resolvedNudgeSender{label: sender}, nil
+}
+
 func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	defer func() {
 		target := ""
@@ -441,25 +515,10 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("message required: use -m flag or provide as second argument")
 	}
 
-	// Identify sender for message prefix (needed before channel check)
-	sender := "unknown"
-	if roleInfo, err := GetRole(); err == nil {
-		switch roleInfo.Role {
-		case RoleMayor:
-			sender = constants.RoleMayor
-		case RoleCrew:
-			sender = fmt.Sprintf("%s/crew/%s", roleInfo.Rig, roleInfo.Polecat)
-		case RolePolecat:
-			sender = fmt.Sprintf("%s/%s", roleInfo.Rig, roleInfo.Polecat)
-		case RoleWitness:
-			sender = fmt.Sprintf("%s/witness", roleInfo.Rig)
-		case RoleRefinery:
-			sender = fmt.Sprintf("%s/refinery", roleInfo.Rig)
-		case RoleDeacon:
-			sender = constants.RoleDeacon
-		default:
-			sender = string(roleInfo.Role)
-		}
+	townRoot, _ := workspace.FindFromCwd()
+	sender, err := resolveNudgeSender(townRoot)
+	if err != nil {
+		return err
 	}
 
 	// Handle channel syntax: channel:<name>
@@ -469,7 +528,6 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Check DND status for target (unless force flag or channel target)
-	townRoot, _ := workspace.FindFromCwd()
 	if townRoot != "" {
 		// Initialize tmux socket and prefix registry so NewTmux() connects
 		// to the correct town socket. Without this, nudge from non-agent
@@ -536,7 +594,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
 			_ = LogNudge(townRoot, constants.RoleDeacon, message)
 		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", constants.RoleDeacon, message))
+		_ = events.LogFeed(events.TypeNudge, sender.label, events.NudgePayload("", constants.RoleDeacon, message))
 		return nil
 	}
 	if dogName, ok := mail.DogAddressName(target); ok {
@@ -559,7 +617,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
 			_ = LogNudge(townRoot, target, message)
 		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", target, message))
+		_ = events.LogFeed(events.TypeNudge, sender.label, events.NudgePayload("", target, message))
 		return nil
 	}
 	if strings.HasPrefix(target, constants.RoleMayor+"/") || strings.HasPrefix(target, constants.RoleDeacon+"/") {
@@ -631,7 +689,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
 			_ = LogNudge(townRoot, target, message)
 		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, target, message))
+		_ = events.LogFeed(events.TypeNudge, sender.label, events.NudgePayload(rigName, target, message))
 	} else {
 		// Raw session name (legacy)
 		// Check for ACP session - ACP agents don't have tmux sessions but can receive nudges via queue
@@ -657,7 +715,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
 			_ = LogNudge(townRoot, target, message)
 		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", target, message))
+		_ = events.LogFeed(events.TypeNudge, sender.label, events.NudgePayload("", target, message))
 	}
 
 	return nil
@@ -665,7 +723,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 
 // runNudgeChannel nudges all members of a named channel.
 // Routes each target through deliverNudge so --mode is respected.
-func runNudgeChannel(channelName, message, sender string) error {
+func runNudgeChannel(channelName, message string, sender resolvedNudgeSender) error {
 	// Find town root
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -751,7 +809,7 @@ func runNudgeChannel(channelName, message, sender string) error {
 	fmt.Println()
 
 	// Log nudge event
-	_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", "channel:"+channelName, message))
+	_ = events.LogFeed(events.TypeNudge, sender.label, events.NudgePayload("", "channel:"+channelName, message))
 
 	if failed > 0 {
 		summary := fmt.Sprintf("Channel nudge complete: %d succeeded, %d failed", succeeded, failed)

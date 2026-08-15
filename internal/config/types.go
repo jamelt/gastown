@@ -1621,6 +1621,17 @@ type MessagingConfig struct {
 	// Like mailing lists but for tmux send-keys instead of durable mail.
 	// Example: {"workers": ["gastown/polecats/*", "gastown/crew/*"], "witnesses": ["*/witness"]}
 	NudgeChannels map[string][]string `json:"nudge_channels,omitempty"`
+
+	// NudgeServiceSenders are non-agent processes allowed to sign nudge
+	// attribution. The private key remains with the service; only its Ed25519
+	// public key is stored here.
+	NudgeServiceSenders map[string]NudgeServiceSenderConfig `json:"nudge_service_senders,omitempty"`
+}
+
+// NudgeServiceSenderConfig registers a non-agent nudge sender.
+type NudgeServiceSenderConfig struct {
+	// PublicKey is a base64-encoded Ed25519 public key.
+	PublicKey string `json:"public_key"`
 }
 
 // QueueConfig represents a work queue configuration.
@@ -1649,12 +1660,13 @@ const CurrentMessagingVersion = 1
 // NewMessagingConfig creates a new MessagingConfig with defaults.
 func NewMessagingConfig() *MessagingConfig {
 	return &MessagingConfig{
-		Type:          "messaging",
-		Version:       CurrentMessagingVersion,
-		Lists:         make(map[string][]string),
-		Queues:        make(map[string]QueueConfig),
-		Announces:     make(map[string]AnnounceConfig),
-		NudgeChannels: make(map[string][]string),
+		Type:                "messaging",
+		Version:             CurrentMessagingVersion,
+		Lists:               make(map[string][]string),
+		Queues:              make(map[string]QueueConfig),
+		Announces:           make(map[string]AnnounceConfig),
+		NudgeChannels:       make(map[string][]string),
+		NudgeServiceSenders: make(map[string]NudgeServiceSenderConfig),
 	}
 }
 

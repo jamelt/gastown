@@ -57,14 +57,19 @@ func nudgeConfig(townRoot string) *config.NudgeThresholds {
 
 // QueuedNudge represents a nudge message stored in the queue.
 type QueuedNudge struct {
-	Sender    string    `json:"sender"`
-	Message   string    `json:"message"`
-	Priority  string    `json:"priority"`
-	Kind      string    `json:"kind,omitempty"`
-	ThreadID  string    `json:"thread_id,omitempty"`
-	Severity  string    `json:"severity,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	Sender                  string    `json:"sender"`
+	ServiceSender           string    `json:"service_sender,omitempty"`
+	ServiceSignatureVersion int       `json:"service_signature_version,omitempty"`
+	ServiceSignature        string    `json:"service_signature,omitempty"`
+	Target                  string    `json:"target,omitempty"`
+	Message                 string    `json:"message"`
+	Priority                string    `json:"priority"`
+	Kind                    string    `json:"kind,omitempty"`
+	ThreadID                string    `json:"thread_id,omitempty"`
+	Severity                string    `json:"severity,omitempty"`
+	Timestamp               time.Time `json:"timestamp"`
+	ExpiresAt               time.Time `json:"expires_at,omitempty"`
+	ServiceVerified         bool      `json:"-"`
 	// DeliverAfter, if non-zero, defers delivery until this time has passed.
 	// Drain skips (but does not discard) the nudge until the deadline is met.
 	DeliverAfter time.Time `json:"deliver_after,omitempty"`
@@ -102,22 +107,7 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 		return fmt.Errorf("nudge queue for %s is full (%d/%d pending)", session, pending, maxDepth)
 	}
 
-	if nudge.Timestamp.IsZero() {
-		nudge.Timestamp = time.Now()
-	}
-	if nudge.Priority == "" {
-		nudge.Priority = PriorityNormal
-	}
-
-	// Set expiry if not already specified by the caller.
-	if nudge.ExpiresAt.IsZero() {
-		switch nudge.Priority {
-		case PriorityUrgent:
-			nudge.ExpiresAt = nudge.Timestamp.Add(DefaultUrgentTTL)
-		default:
-			nudge.ExpiresAt = nudge.Timestamp.Add(DefaultNormalTTL)
-		}
-	}
+	prepareQueuedNudge(session, &nudge)
 
 	data, err := json.MarshalIndent(nudge, "", "  ")
 	if err != nil {
@@ -135,6 +125,26 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 	}
 
 	return nil
+}
+
+func prepareQueuedNudge(session string, queued *QueuedNudge) {
+	if queued.Target == "" {
+		queued.Target = session
+	}
+	if queued.Timestamp.IsZero() {
+		queued.Timestamp = time.Now()
+	}
+	if queued.Priority == "" {
+		queued.Priority = PriorityNormal
+	}
+	if queued.ExpiresAt.IsZero() {
+		switch queued.Priority {
+		case PriorityUrgent:
+			queued.ExpiresAt = queued.Timestamp.Add(DefaultUrgentTTL)
+		default:
+			queued.ExpiresAt = queued.Timestamp.Add(DefaultNormalTTL)
+		}
+	}
 }
 
 // Requeue writes previously drained nudges back to the queue for later delivery.
@@ -266,6 +276,9 @@ func Drain(townRoot, session string) ([]QueuedNudge, error) {
 			}
 			continue
 		}
+		if n.ServiceSender != "" {
+			n.ServiceVerified = n.Target == session && verifyServiceNudge(townRoot, &n)
+		}
 
 		nudges = append(nudges, n)
 
@@ -388,19 +401,19 @@ func FormatForInjection(nudges []QueuedNudge) string {
 	if len(urgent) > 0 {
 		b.WriteString(fmt.Sprintf("QUEUED NUDGE (%d urgent):\n\n", len(urgent)))
 		for _, n := range urgent {
-			b.WriteString(fmt.Sprintf("  [URGENT from %s] %s\n", n.Sender, n.Message))
+			b.WriteString(fmt.Sprintf("  [URGENT from %s] %s\n", SenderAttribution(n), n.Message))
 		}
 		if len(normal) > 0 {
 			b.WriteString(fmt.Sprintf("\nPlus %d non-urgent nudge(s):\n", len(normal)))
 			for _, n := range normal {
-				b.WriteString(fmt.Sprintf("  [from %s] %s\n", n.Sender, n.Message))
+				b.WriteString(fmt.Sprintf("  [from %s] %s\n", SenderAttribution(n), n.Message))
 			}
 		}
 		b.WriteString("\nHandle urgent nudges before continuing current work.\n")
 	} else {
 		b.WriteString(fmt.Sprintf("QUEUED NUDGE (%d message(s)):\n\n", len(normal)))
 		for _, n := range normal {
-			b.WriteString(fmt.Sprintf("  [from %s] %s\n", n.Sender, n.Message))
+			b.WriteString(fmt.Sprintf("  [from %s] %s\n", SenderAttribution(n), n.Message))
 		}
 		b.WriteString("\nThis is a background notification. Continue current work unless the nudge is higher priority.\n")
 	}

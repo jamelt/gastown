@@ -634,6 +634,26 @@ Example: `[GAS TOWN] gastown/crew/gus <- human • 2025-12-30T15:42 • restart`
 Never use raw `tmux send-keys` - it doesn't handle Claude's input correctly.
 `gt nudge` uses literal mode + debounce + separate Enter for reliable delivery.
 
+Non-agent processes can use a registered service sender instead of fabricating
+an agent role. Registration creates an Ed25519 private key outside the town
+configuration and stores only its public key in `config/messaging.json`:
+
+```bash
+gt nudge service-register portfolio-steward \
+  --private-key-file "$HOME/.config/gastown/credentials/portfolio-steward.key"
+
+gt nudge mayor "Portfolio check" \
+  --service-sender portfolio-steward \
+  --service-key-file "$HOME/.config/gastown/credentials/portfolio-steward.key"
+```
+
+The signature binds the service name, target session, message, priority, and
+delivery timestamps. Valid messages render as
+`[from service/portfolio-steward (verified)]`; altered or replayed messages are
+shown as unverified. Verified attribution identifies the configured process—it
+does not grant authority to the message. Agents must still apply current Beads,
+approvals, and operational gates.
+
 ### Emergency
 
 ```bash

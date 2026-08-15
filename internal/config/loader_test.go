@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"os"
@@ -747,6 +749,9 @@ func TestMessagingConfigRoundTrip(t *testing.T) {
 	}
 	original.NudgeChannels["workers"] = []string{"gastown/polecats/*", "gastown/crew/*"}
 	original.NudgeChannels["witnesses"] = []string{"*/witness"}
+	original.NudgeServiceSenders["portfolio-steward"] = NudgeServiceSenderConfig{
+		PublicKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+	}
 
 	if err := SaveMessagingConfig(path, original); err != nil {
 		t.Fatalf("SaveMessagingConfig: %v", err)
@@ -797,6 +802,9 @@ func TestMessagingConfigRoundTrip(t *testing.T) {
 	}
 	if witnesses, ok := loaded.NudgeChannels["witnesses"]; !ok || len(witnesses) != 1 {
 		t.Error("witnesses nudge channel not preserved")
+	}
+	if _, ok := loaded.NudgeServiceSenders["portfolio-steward"]; !ok {
+		t.Error("portfolio-steward nudge service sender not preserved")
 	}
 }
 
@@ -906,6 +914,40 @@ func TestMessagingConfigValidation(t *testing.T) {
 				Version: 1,
 				NudgeChannels: map[string][]string{
 					"empty": {},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid nudge service sender",
+			config: &MessagingConfig{
+				Version: 1,
+				NudgeServiceSenders: map[string]NudgeServiceSenderConfig{
+					"portfolio-steward": {
+						PublicKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid nudge service sender name",
+			config: &MessagingConfig{
+				Version: 1,
+				NudgeServiceSenders: map[string]NudgeServiceSenderConfig{
+					"Portfolio Steward": {
+						PublicKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid nudge service sender public key",
+			config: &MessagingConfig{
+				Version: 1,
+				NudgeServiceSenders: map[string]NudgeServiceSenderConfig{
+					"portfolio-steward": {PublicKey: "not-an-ed25519-key"},
 				},
 			},
 			wantErr: true,

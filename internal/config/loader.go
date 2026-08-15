@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1002,6 +1004,9 @@ func validateMessagingConfig(c *MessagingConfig) error {
 	if c.NudgeChannels == nil {
 		c.NudgeChannels = make(map[string][]string)
 	}
+	if c.NudgeServiceSenders == nil {
+		c.NudgeServiceSenders = make(map[string]NudgeServiceSenderConfig)
+	}
 
 	// Validate lists have at least one recipient
 	for name, recipients := range c.Lists {
@@ -1040,7 +1045,30 @@ func validateMessagingConfig(c *MessagingConfig) error {
 		}
 	}
 
+	for name, sender := range c.NudgeServiceSenders {
+		if !validNudgeServiceSenderName(name) {
+			return fmt.Errorf("%w: invalid nudge service sender name %q", ErrMissingField, name)
+		}
+		publicKey, err := base64.StdEncoding.DecodeString(sender.PublicKey)
+		if err != nil || len(publicKey) != ed25519.PublicKeySize {
+			return fmt.Errorf("%w: nudge service sender %q public_key must be a base64-encoded Ed25519 public key", ErrMissingField, name)
+		}
+	}
+
 	return nil
+}
+
+func validNudgeServiceSenderName(name string) bool {
+	if name == "" || len(name) > 63 {
+		return false
+	}
+	for i, r := range name {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' && i > 0 {
+			continue
+		}
+		return false
+	}
+	return name[len(name)-1] != '-'
 }
 
 // MessagingConfigPath returns the standard path for messaging config in a town.
