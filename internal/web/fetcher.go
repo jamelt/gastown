@@ -1126,7 +1126,7 @@ func (f *LiveConvoyFetcher) FetchMail() ([]MailRow, error) {
 			FromRaw:   m.CreatedBy,
 			To:        to,
 			Subject:   m.Title,
-			Timestamp: timestamp.Format("15:04"),
+			Timestamp: timestamp.Local().Format("15:04"),
 			Age:       age,
 			Priority:  priorityStr,
 			Type:      msgType,
@@ -1159,6 +1159,7 @@ func formatMailAge(d time.Duration) string {
 
 // formatTimestamp formats a time as "Jan 26, 3:45 PM" (or "Jan 26 2006, 3:45 PM" if different year).
 func formatTimestamp(t time.Time) string {
+	t = t.Local()
 	now := time.Now()
 	if t.Year() != now.Year() {
 		return t.Format("Jan 2 2006, 3:04 PM")
@@ -1468,7 +1469,7 @@ func (f *LiveConvoyFetcher) FetchQueues() ([]QueueRow, error) {
 // FetchSessions returns active tmux sessions with role detection.
 func (f *LiveConvoyFetcher) FetchSessions() ([]SessionRow, error) {
 	// List tmux sessions
-	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{session_activity}")
+	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{window_activity}")
 	if err != nil {
 		return nil, nil // tmux not running or no sessions
 	}
@@ -1586,7 +1587,7 @@ func (f *LiveConvoyFetcher) FetchMayor() (*MayorStatus, error) {
 	mayorSessionName := session.MayorSessionName()
 
 	// Check if mayor tmux session exists
-	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{session_activity}")
+	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{window_activity}")
 	if err != nil {
 		// tmux not running or no sessions
 		return status, nil

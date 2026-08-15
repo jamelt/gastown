@@ -43,7 +43,7 @@
             // Trigger HTMX to re-fetch the dashboard
             var dashboard = document.getElementById('dashboard-main');
             if (dashboard && typeof htmx !== 'undefined') {
-                htmx.trigger(dashboard, 'sse:dashboard-update');
+                htmx.trigger(dashboard, 'dashboard-update');
             }
         });
 

@@ -923,6 +923,9 @@ func TestFetchMayor_UsesResolvedRuntime(t *testing.T) {
 			if name != "tmux" {
 				t.Fatalf("unexpected command: %s %v", name, args)
 			}
+			if got := strings.Join(args, " "); !strings.Contains(got, "#{session_name}:#{window_activity}") {
+				t.Fatalf("tmux args = %q, want window activity format", got)
+			}
 			return bytes.NewBufferString("hq-mayor:1731328320\nhq-deacon:1731328300\n"), nil
 		},
 	)
@@ -948,6 +951,27 @@ func TestFetchMayor_UsesResolvedRuntime(t *testing.T) {
 	}
 	if status.LastActivity == "" {
 		t.Fatal("expected LastActivity to be populated")
+	}
+}
+
+func TestFetchSessions_UsesWindowActivity(t *testing.T) {
+	withMayorFetcherHooks(
+		t,
+		nil,
+		func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+			if name != "tmux" {
+				t.Fatalf("unexpected command: %s %v", name, args)
+			}
+			if got := strings.Join(args, " "); !strings.Contains(got, "#{session_name}:#{window_activity}") {
+				t.Fatalf("tmux args = %q, want window activity format", got)
+			}
+			return bytes.NewBufferString("hq-mayor:1731328320\n"), nil
+		},
+	)
+
+	f := &LiveConvoyFetcher{tmuxCmdTimeout: time.Second}
+	if _, err := f.FetchSessions(); err != nil {
+		t.Fatalf("FetchSessions: %v", err)
 	}
 }
 
@@ -1001,5 +1025,18 @@ func TestFetchHealth_DeaconHeartbeatFieldName(t *testing.T) {
 	// Heartbeat should be considered fresh (written just now).
 	if !health.HeartbeatFresh {
 		t.Error("HeartbeatFresh = false for a just-written heartbeat")
+	}
+}
+
+func TestFormatTimestampUsesLocalTimezone(t *testing.T) {
+	originalLocation := time.Local
+	time.Local = time.FixedZone("EDT", -4*60*60)
+	t.Cleanup(func() {
+		time.Local = originalLocation
+	})
+
+	timestamp := time.Date(time.Now().Year(), time.August, 14, 13, 21, 0, 0, time.UTC)
+	if got, want := formatTimestamp(timestamp), "Aug 14, 9:21 AM"; got != want {
+		t.Fatalf("formatTimestamp() = %q, want %q", got, want)
 	}
 }
