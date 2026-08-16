@@ -682,6 +682,58 @@ exit 0
 	}
 }
 
+func TestGetTrackedIssuesBatchUsesOneDependencyAndDetailQuery(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	countPath := filepath.Join(binDir, "dep-count")
+	script := fmt.Sprintf(`#!/bin/sh
+printf x >> %q
+printf '%%s' '[{"issue_id":"hq-cv-a","depends_on_id":"external:trader:trader-a"},{"issue_id":"hq-cv-b","depends_on_id":"external:trader:trader-b"}]'
+`, countPath)
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	showCalls := 0
+	withMayorFetcherHooks(t, nil, func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name != "bd" || len(args) < 3 || args[0] != "show" {
+			t.Fatalf("unexpected detail command: %s %v", name, args)
+		}
+		showCalls++
+		return bytes.NewBufferString(`[
+            {"id":"trader-a","title":"A","status":"open","assignee":""},
+            {"id":"trader-b","title":"B","status":"closed","assignee":""}
+        ]`), nil
+	})
+
+	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath}
+	tracked, err := f.getTrackedIssuesBatch([]string{"hq-cv-a", "hq-cv-b"})
+	if err != nil {
+		t.Fatalf("getTrackedIssuesBatch: %v", err)
+	}
+
+	count, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read dependency call count: %v", err)
+	}
+	if got := len(count); got != 1 {
+		t.Fatalf("dependency queries = %d, want 1", got)
+	}
+	if showCalls != 1 {
+		t.Fatalf("detail queries = %d, want 1", showCalls)
+	}
+	if got := tracked["hq-cv-a"]; len(got) != 1 || got[0].ID != "trader-a" || got[0].Title != "A" {
+		t.Fatalf("tracked hq-cv-a = %#v", got)
+	}
+	if got := tracked["hq-cv-b"]; len(got) != 1 || got[0].ID != "trader-b" || got[0].Status != "closed" {
+		t.Fatalf("tracked hq-cv-b = %#v", got)
+	}
+}
+
 func withMayorFetcherHooks(t *testing.T, sessionEnv func(sessionName, key string) (string, error), runCmdFunc func(time.Duration, string, ...string) (*bytes.Buffer, error)) {
 	t.Helper()
 

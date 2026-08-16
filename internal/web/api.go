@@ -139,8 +139,6 @@ func (h *APIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleCrew(w, r)
 	case path == "/ready" && r.Method == http.MethodGet:
 		h.handleReady(w, r)
-	case path == "/events" && r.Method == http.MethodGet:
-		h.handleSSE(w, r)
 	case path == "/session/preview" && r.Method == http.MethodGet:
 		h.handleSessionPreview(w, r)
 	default:
@@ -2174,46 +2172,6 @@ func parseCommandArgs(command string) []string {
 	}
 
 	return args
-}
-
-const dashboardRefreshInterval = 15 * time.Second
-
-// handleSSE streams periodic refresh events to the dashboard client.
-// The dashboard refresh itself reads live state; the event source must stay
-// lightweight so each connected browser does not continuously spawn gt and bd
-// subprocesses merely to decide whether a refresh is needed.
-func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "SSE not supported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	ctx := r.Context()
-
-	// Send initial connection event
-	fmt.Fprintf(w, "event: connected\ndata: ok\n\n")
-	flusher.Flush()
-
-	ticker := time.NewTicker(dashboardRefreshInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if _, err := fmt.Fprintf(w, "event: dashboard-update\ndata: %d\n\n", time.Now().UnixNano()); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
-	}
 }
 
 // handleRigAdd creates a new rig, optionally with a local bare repo.

@@ -5,12 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="dashboard-token" content="{{.CSRFToken}}">
     <title>Gas Town Control Center</title>
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
-    <script src="https://unpkg.com/idiomorph@0.3.0/dist/idiomorph-ext.min.js"></script>
     <link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
-    <div class="dashboard" id="dashboard-main" hx-get="/" hx-trigger="dashboard-update, every 30s [!window.pauseRefresh && !window.sseConnected]" hx-swap="morph:outerHTML" hx-ext="morph">
+    <div class="dashboard" id="dashboard-main">
         <header>
             <pre class="ascii-title">  __  __    __   _____ __  _   _  __  _    ___ __  __  _ _____ ___  __  _      ______ __  _ _____ ___ ___ 
  / _]/  \ /' _| |_   _/__\| | | ||  \| |  / _//__\|  \| |_   _| _ \/__\| |    / _/ __|  \| |_   _| __| _ \
@@ -20,10 +18,6 @@
                 <button class="cmd-btn" id="open-palette-btn">
                     <span>⌘</span> Commands <kbd>⌘K</kbd>
                 </button>
-                <span class="refresh-info" id="refresh-info">
-                    <span id="connection-status">Connecting...</span>
-                    <span class="htmx-indicator">⟳</span>
-                </span>
             </div>
         </header>
 
@@ -1009,7 +1003,7 @@
         </div>
     </div>
 
-    <!-- Command Palette (outside HTMX-refreshed area) -->
+    <!-- Command Palette -->
     <div id="command-palette-overlay" class="command-palette-overlay">
         <div class="command-palette">
             <input type="text" id="command-palette-input" class="command-palette-input" placeholder="Type to search commands..." autocomplete="off">

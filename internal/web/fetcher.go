@@ -257,8 +257,25 @@ func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 		return nil, fmt.Errorf("parsing convoy list: %w", err)
 	}
 
-	// Build convoy rows with activity data
-	rows := make([]ConvoyRow, 0, len(convoys))
+	convoyIDs := make([]string, 0, len(convoys))
+	for _, c := range convoys {
+		if c.IssueType != "convoy" && !webConvoyHasLabel(c.Labels, "gt:convoy") {
+			continue
+		}
+		convoyIDs = append(convoyIDs, c.ID)
+	}
+
+	// Resolve every convoy's tracked work in two batched bd calls (one dep list
+	// and one show) instead of spawning two subprocesses per convoy. The old
+	// N+1 path made dashboard latency grow linearly with the convoy count.
+	trackedByConvoy, err := f.getTrackedIssuesBatch(convoyIDs)
+	if err != nil {
+		f.convoyBreaker.recordFailure()
+		return nil, err
+	}
+
+	// Build convoy rows with activity data.
+	rows := make([]ConvoyRow, 0, len(convoyIDs))
 	for _, c := range convoys {
 		if c.IssueType != "convoy" && !webConvoyHasLabel(c.Labels, "gt:convoy") {
 			continue
@@ -269,12 +286,7 @@ func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 			Status: c.Status,
 		}
 
-		// Get tracked issues for progress and activity calculation
-		tracked, err := f.getTrackedIssues(c.ID)
-		if err != nil {
-			log.Printf("warning: skipping convoy %s: %v", c.ID, err)
-			continue
-		}
+		tracked := trackedByConvoy[c.ID]
 		row.Total = len(tracked)
 
 		var mostRecentActivity time.Time
@@ -387,54 +399,71 @@ type trackedIssueInfo struct {
 
 // getTrackedIssues fetches tracked issues for a convoy.
 func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInfo, error) {
-	// Query tracked dependencies using bd dep list
-	stdout, err := f.runBdCmd(f.townRoot, "dep", "list", convoyID, "-t", "tracks", "--json")
+	tracked, err := f.getTrackedIssuesBatch([]string{convoyID})
 	if err != nil {
-		return nil, fmt.Errorf("querying tracked issues for %s: %w", convoyID, err)
+		return nil, err
+	}
+	return tracked[convoyID], nil
+}
+
+// getTrackedIssuesBatch fetches tracked work for all convoys with a single
+// dependency query and a single detail query. bd dep list includes issue_id in
+// batch output, which lets us retain the convoy-to-work relationship without
+// one subprocess per convoy.
+func (f *LiveConvoyFetcher) getTrackedIssuesBatch(convoyIDs []string) (map[string][]trackedIssueInfo, error) {
+	result := make(map[string][]trackedIssueInfo, len(convoyIDs))
+	if len(convoyIDs) == 0 {
+		return result, nil
+	}
+
+	args := append([]string{"dep", "list"}, convoyIDs...)
+	args = append(args, "-t", "tracks", "--json")
+	stdout, err := f.runBdCmd(f.townRoot, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying tracked issues for %d convoys: %w", len(convoyIDs), err)
 	}
 
 	var deps []struct {
-		ID string `json:"id"`
+		IssueID     string `json:"issue_id"`
+		DependsOnID string `json:"depends_on_id"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
-		return nil, fmt.Errorf("parsing tracked issues for %s: %w", convoyID, err)
+		return nil, fmt.Errorf("parsing tracked issues for %d convoys: %w", len(convoyIDs), err)
 	}
 
-	// Collect resolved issue IDs, unwrapping external:prefix:id format
 	issueIDs := make([]string, 0, len(deps))
+	issueIDsByConvoy := make(map[string][]string, len(convoyIDs))
 	for _, dep := range deps {
-		issueIDs = append(issueIDs, beads.ExtractIssueID(dep.ID))
+		issueID := beads.ExtractIssueID(dep.DependsOnID)
+		issueIDs = append(issueIDs, issueID)
+		issueIDsByConvoy[dep.IssueID] = append(issueIDsByConvoy[dep.IssueID], issueID)
 	}
 
-	// Batch fetch issue details
 	details, err := f.getIssueDetailsBatch(issueIDs)
 	if err != nil {
-		return nil, fmt.Errorf("fetching tracked issue details for %s: %w", convoyID, err)
+		return nil, fmt.Errorf("fetching tracked issue details for %d convoys: %w", len(convoyIDs), err)
 	}
 
-	// Get worker activity from tmux sessions based on assignees
 	workers := f.getWorkersFromAssignees(details)
-
-	// Build result
-	result := make([]trackedIssueInfo, 0, len(issueIDs))
-	for _, id := range issueIDs {
-		info := trackedIssueInfo{ID: id}
-
-		if d, ok := details[id]; ok {
-			info.Title = d.Title
-			info.Status = d.Status
-			info.Assignee = d.Assignee
-			info.UpdatedAt = d.UpdatedAt
-		} else {
-			info.Title = "(external)"
-			info.Status = "unknown"
+	for _, convoyID := range convoyIDs {
+		tracked := make([]trackedIssueInfo, 0, len(issueIDsByConvoy[convoyID]))
+		for _, id := range issueIDsByConvoy[convoyID] {
+			info := trackedIssueInfo{ID: id}
+			if d, ok := details[id]; ok {
+				info.Title = d.Title
+				info.Status = d.Status
+				info.Assignee = d.Assignee
+				info.UpdatedAt = d.UpdatedAt
+			} else {
+				info.Title = "(external)"
+				info.Status = "unknown"
+			}
+			if w, ok := workers[id]; ok && w.LastActivity != nil {
+				info.LastActivity = *w.LastActivity
+			}
+			tracked = append(tracked, info)
 		}
-
-		if w, ok := workers[id]; ok && w.LastActivity != nil {
-			info.LastActivity = *w.LastActivity
-		}
-
-		result = append(result, info)
+		result[convoyID] = tracked
 	}
 
 	return result, nil
