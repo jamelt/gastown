@@ -18,69 +18,6 @@
     };
 
     // ============================================
-    // SSE (Server-Sent Events) CONNECTION
-    // ============================================
-    window.sseConnected = false;
-    var evtSource = null;
-    var sseReconnectDelay = 1000;
-    var sseMaxReconnectDelay = 30000;
-
-    function connectSSE() {
-        if (evtSource) {
-            evtSource.close();
-        }
-
-        evtSource = new EventSource('/api/events');
-
-        evtSource.addEventListener('connected', function() {
-            window.sseConnected = true;
-            sseReconnectDelay = 1000;
-            updateConnectionStatus('live');
-        });
-
-        evtSource.addEventListener('dashboard-update', function(e) {
-            if (window.pauseRefresh) return;
-            // Trigger HTMX to re-fetch the dashboard
-            var dashboard = document.getElementById('dashboard-main');
-            if (dashboard && typeof htmx !== 'undefined') {
-                htmx.trigger(dashboard, 'dashboard-update');
-            }
-        });
-
-        evtSource.onerror = function() {
-            window.sseConnected = false;
-            updateConnectionStatus('reconnecting');
-            evtSource.close();
-            // Exponential backoff reconnect
-            setTimeout(function() {
-                sseReconnectDelay = Math.min(sseReconnectDelay * 2, sseMaxReconnectDelay);
-                connectSSE();
-            }, sseReconnectDelay);
-        };
-    }
-
-    function updateConnectionStatus(state) {
-        var el = document.getElementById('connection-status');
-        if (!el) return;
-        switch (state) {
-            case 'live':
-                el.textContent = 'Live';
-                el.className = 'connection-live';
-                break;
-            case 'reconnecting':
-                el.textContent = 'Reconnecting...';
-                el.className = 'connection-reconnecting';
-                break;
-            default:
-                el.textContent = 'Connecting...';
-                el.className = '';
-        }
-    }
-
-    // Start SSE connection
-    connectSSE();
-
-    // ============================================
     // EXPAND BUTTON HANDLER
     // ============================================
     document.addEventListener('click', function(e) {
@@ -121,35 +58,6 @@
         if (!panel) return;
 
         panel.classList.toggle('collapsed');
-    });
-
-    // After HTMX swap - morph preserves most state, but we need to re-init some things
-    document.body.addEventListener('htmx:afterSwap', function() {
-        // Morph preserves expanded class, so we don't need to close panels anymore
-        // Just check if we should resume refresh
-        var hasExpanded = document.querySelector('.panel.expanded');
-        var mailDetail = document.getElementById('mail-detail');
-        var mailCompose = document.getElementById('mail-compose');
-        var issueDetail = document.getElementById('issue-detail');
-        var prDetail = document.getElementById('pr-detail');
-        var convoyDetailView = document.getElementById('convoy-detail');
-        var convoyCreateView = document.getElementById('convoy-create-form');
-        var sessionPreview = document.getElementById('session-preview');
-        var inDetailView = (mailDetail && mailDetail.style.display !== 'none') ||
-                          (mailCompose && mailCompose.style.display !== 'none') ||
-                          (issueDetail && issueDetail.style.display !== 'none') ||
-                          (prDetail && prDetail.style.display !== 'none') ||
-                          (convoyDetailView && convoyDetailView.style.display !== 'none') ||
-                          (convoyCreateView && convoyCreateView.style.display !== 'none') ||
-                          (sessionPreview && sessionPreview.style.display !== 'none');
-        if (!inDetailView && !hasExpanded) {
-            window.pauseRefresh = false;
-        }
-        // Reload dynamic panels after swap (handled via window functions)
-        if (window.refreshCrewPanel) window.refreshCrewPanel();
-        if (window.refreshReadyPanel) window.refreshReadyPanel();
-        // Update connection status indicator after morph
-        updateConnectionStatus(window.sseConnected ? 'live' : 'reconnecting');
     });
 
     // ============================================
@@ -1214,10 +1122,6 @@
         .then(function(data) {
             if (data.success) {
                 showToast('success', 'Detached', beadId + ' detached from hook');
-                // Refresh the page to update the hooks panel
-                if (typeof htmx !== 'undefined') {
-                    htmx.trigger(document.body, 'htmx:load');
-                }
             } else {
                 showToast('error', 'Failed', data.error || 'Failed to detach hook');
                 btn.disabled = false;
@@ -1278,9 +1182,6 @@
             if (data.success) {
                 showToast('success', 'Attached', beadId + ' attached to hook');
                 closeHookAttachForm();
-                if (typeof htmx !== 'undefined') {
-                    htmx.trigger(document.body, 'htmx:load');
-                }
             } else {
                 showToast('error', 'Failed', data.error || 'Failed to attach hook');
             }
@@ -1338,9 +1239,6 @@
                         showToast('error', 'Partial', completed + ' detached, ' + errors + ' failed');
                     } else {
                         showToast('success', 'Cleared', completed + ' hook(s) cleared');
-                    }
-                    if (typeof htmx !== 'undefined') {
-                        htmx.trigger(document.body, 'htmx:load');
                     }
                 }
             });
@@ -1424,10 +1322,6 @@
             if (data.success) {
                 showToast('success', 'Created', 'Issue ' + (data.id || '') + ' created');
                 closeIssueModal();
-                // Trigger a page refresh to show the new issue
-                if (typeof htmx !== 'undefined') {
-                    htmx.trigger(document.body, 'htmx:load');
-                }
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
             }
@@ -2981,11 +2875,6 @@
 
     // Init on page load
     initTimelineFilters();
-
-    // Re-init after HTMX swaps
-    document.body.addEventListener('htmx:afterSwap', function() {
-        initTimelineFilters();
-    });
 
     // ============================================
     // SESSION TERMINAL PREVIEW

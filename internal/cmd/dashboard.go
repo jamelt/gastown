@@ -34,7 +34,7 @@ The dashboard shows real-time convoy status with:
 - Convoy list with status indicators
 - Progress tracking for each convoy
 - Last activity indicator (green/yellow/red)
-- Auto-refresh every 30 seconds via htmx
+- Manual page refresh for predictable interaction state
 
 Example:
   gt dashboard                    # Start on default port 8080
