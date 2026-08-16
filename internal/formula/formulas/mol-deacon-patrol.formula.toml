@@ -72,7 +72,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 14
+version = 15
 
 [vars]
 [vars.wisp_type]
@@ -107,6 +107,7 @@ needs = ["heartbeat"]
 description = """
 First, clean up CLOSED wisps from previous cycles:
 ```bash
+bd mol wisp gc --closed --dry-run --json
 bd mol wisp gc --closed --force
 ```
 
@@ -115,6 +116,9 @@ bd mol wisp gc --closed --force
 > age cleanup can reap this molecule's open steps and make the patrol appear
 > complete early. Use closed-only cleanup here; stale open-wisp cleanup belongs
 > outside active patrol molecules.
+
+The JSON preview is the auditable deletion digest. Review it before running the
+forced closed-only cleanup.
 
 Then handle callbacks from agents.
 
