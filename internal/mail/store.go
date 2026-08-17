@@ -87,6 +87,9 @@ func (m *Mailbox) storeListFromDir() ([]*Message, error) {
 			if seen[si.ID] {
 				continue
 			}
+			if hasLabel(si.Labels, archivedLabel) {
+				continue
+			}
 			if si.Status == beadsdk.StatusOpen || string(si.Status) == "hooked" {
 				seen[si.ID] = true
 				messages = append(messages, sdkIssueToMessage(si))
@@ -109,8 +112,39 @@ func (m *Mailbox) storeGetFromDir(id string) (*Message, error) {
 		}
 		return nil, fmt.Errorf("store get message: %w", err)
 	}
+	bm := &BeadsMessage{Assignee: si.Assignee, Labels: si.Labels}
+	if !hasLabel(si.Labels, "gt:message") || !m.isInboxMessage(bm) {
+		return nil, ErrNotInboxMessage
+	}
 
 	return sdkIssueToMessage(si), nil
+}
+
+func (m *Mailbox) storeArchiveInDir(id string) error {
+	ctx, cancel := mailStoreCtx()
+	defer cancel()
+
+	err := m.store.AddLabel(ctx, id, archivedLabel, "")
+	telemetry.RecordMailMessage(context.Background(), "archive", telemetry.MailMessageInfo{
+		ID: id,
+		To: m.identity,
+	}, err)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return ErrMessageNotFound
+		}
+		return fmt.Errorf("store archive message: %w", err)
+	}
+	return nil
+}
+
+func hasLabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
 }
 
 // storeCloseInDir closes a message using the in-process store.

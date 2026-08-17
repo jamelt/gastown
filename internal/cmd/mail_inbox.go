@@ -367,22 +367,7 @@ func runMailArchive(cmd *cobra.Command, args []string) error {
 	// `bd compact`), the mail entry is effectively already gone — we
 	// treat ErrMessageNotFound as success so orphaned inbox references
 	// can be cleared without manual surgery. See aa-6hv.
-	archived := 0
-	gcd := 0
-	var errMsgs []string
-	for _, msgID := range args {
-		err := mailbox.Delete(msgID)
-		switch {
-		case err == nil:
-			archived++
-		case errors.Is(err, mail.ErrMessageNotFound):
-			gcd++
-			fmt.Printf("  %s %s: underlying bead already gone (GC'd), entry cleared\n",
-				style.Dim.Render("note"), msgID)
-		default:
-			errMsgs = append(errMsgs, fmt.Sprintf("%s: %v", msgID, err))
-		}
-	}
+	archived, gcd, errMsgs := archiveMessageIDs(mailbox, args)
 
 	// Report results
 	if len(errMsgs) > 0 {
@@ -448,25 +433,14 @@ func runMailArchiveStale(mailbox *mail.Mailbox, address string) error {
 	}
 
 	// GC'd beads (see aa-6hv): if the underlying bead was removed by
-	// `bd mol wisp gc` or `bd compact`, the close call returns
+	// `bd mol wisp gc` or `bd compact`, target resolution returns
 	// ErrMessageNotFound. That's a success for archive: the mail entry
 	// is already effectively gone.
-	archived := 0
-	gcd := 0
-	var errMsgs []string
+	ids := make([]string, 0, len(staleMessages))
 	for _, stale := range staleMessages {
-		err := mailbox.Delete(stale.Message.ID)
-		switch {
-		case err == nil:
-			archived++
-		case errors.Is(err, mail.ErrMessageNotFound):
-			gcd++
-			fmt.Printf("  %s %s: underlying bead already gone (GC'd), entry cleared\n",
-				style.Dim.Render("note"), stale.Message.ID)
-		default:
-			errMsgs = append(errMsgs, fmt.Sprintf("%s: %v", stale.Message.ID, err))
-		}
+		ids = append(ids, stale.Message.ID)
 	}
+	archived, gcd, errMsgs := archiveMessageIDs(mailbox, ids)
 
 	if len(errMsgs) > 0 {
 		fmt.Printf("%s Archived %d/%d stale messages\n", style.Bold.Render("⚠"), archived+gcd, len(staleMessages))
@@ -483,6 +457,30 @@ func runMailArchiveStale(mailbox *mail.Mailbox, address string) error {
 		fmt.Printf("%s Archived %d stale messages\n", style.Bold.Render("✓"), total)
 	}
 	return nil
+}
+
+type messageArchiver interface {
+	Archive(string) error
+}
+
+// archiveMessageIDs attempts every exact requested ID and reports failures
+// individually. A failure never triggers a fallback cleanup or changes the
+// target set, so partial success cannot expand into an unrelated molecule.
+func archiveMessageIDs(archiver messageArchiver, ids []string) (archived, gcd int, errMsgs []string) {
+	for _, id := range ids {
+		err := archiver.Archive(id)
+		switch {
+		case err == nil:
+			archived++
+		case errors.Is(err, mail.ErrMessageNotFound):
+			gcd++
+			fmt.Printf("  %s %s: underlying bead already gone (GC'd), entry cleared\n",
+				style.Dim.Render("note"), id)
+		default:
+			errMsgs = append(errMsgs, fmt.Sprintf("%s: %v", id, err))
+		}
+	}
+	return archived, gcd, errMsgs
 }
 
 func staleMessagesForSession(messages []*mail.Message, sessionStart time.Time) []staleMessage {

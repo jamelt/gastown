@@ -28,8 +28,11 @@ var timeNow = time.Now
 // Common errors
 var (
 	ErrMessageNotFound = errors.New("message not found")
+	ErrNotInboxMessage = errors.New("ID is not a message in this inbox")
 	ErrEmptyInbox      = errors.New("inbox is empty")
 )
+
+const archivedLabel = "archived"
 
 // Mailbox manages messages for an identity via beads.
 // When store is non-nil, beads-mode methods use the in-process beadsdk.Storage
@@ -274,6 +277,9 @@ func appendBeadsMessages(messages []*Message, seen map[string]bool, msgs []Beads
 		if seen[bm.ID] {
 			continue
 		}
+		if bm.HasLabel(archivedLabel) {
+			continue
+		}
 		if bm.Status == "open" || (includeHooked && bm.Status == "hooked") {
 			seen[bm.ID] = true
 			messages = append(messages, bm.ToMessage())
@@ -287,6 +293,9 @@ func appendWispMessages(messages []*Message, seen map[string]bool, wisps []wispQ
 		wisp := &wisps[i]
 		bm := &wisp.message
 		if seen[bm.ID] {
+			continue
+		}
+		if bm.HasLabel(archivedLabel) {
 			continue
 		}
 		include := wisp.assigneeMatch && (bm.Status == "open" || bm.Status == "hooked")
@@ -548,9 +557,25 @@ func (m *Mailbox) getFromDir(id, beadsDir string) (*Message, error) {
 	if len(bms) == 0 {
 		return nil, ErrMessageNotFound
 	}
+	if !bms[0].HasLabel("gt:message") || !m.isInboxMessage(&bms[0]) {
+		return nil, ErrNotInboxMessage
+	}
 
 	// Wisp status comes from beads issue.wisp field via ToMessage()
 	return bms[0].ToMessage(), nil
+}
+
+// isInboxMessage verifies that a Beads message is visible to this mailbox.
+// Archive-by-ID must perform this check before any mutation: accepting an
+// arbitrary bead ID here would let a mail cleanup command mutate molecule rows.
+func (m *Mailbox) isInboxMessage(bm *BeadsMessage) bool {
+	bm.ParseLabels()
+	for _, identity := range m.identityVariants() {
+		if AddressToIdentity(bm.Assignee) == AddressToIdentity(identity) || bm.IsCCRecipient(identity) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Mailbox) getLegacy(id string) (*Message, error) {
@@ -878,34 +903,49 @@ func (m *Mailbox) deleteLegacy(id string) error {
 	return m.rewriteLegacy(filtered)
 }
 
-// Archive moves a message to the archive file and removes it from inbox.
+// Archive removes a message from the inbox without closing its Beads row.
 //
-// Archive is a mail cleanup operation, not a bead operation. If the
-// underlying bead has been garbage collected (by `bd mol wisp gc` or
-// `bd compact`), there is nothing to append to the archive and nothing
-// to close — we still return nil so the caller's inbox reference is
-// considered cleared. See aa-6hv.
+// Closing an ephemeral mail wisp can invoke Beads' closed-wisp GC. Keeping the
+// row open and applying an exact archived label contains mail cleanup to the
+// requested ID and cannot cascade into an unrelated active molecule graph.
 func (m *Mailbox) Archive(id string) error {
 	if m.legacy {
 		return m.archiveLegacy(id)
 	}
-	// Beads mode: append to archive then close
-	msg, err := m.Get(id)
+
+	// Resolve and validate before the first mutation. Get rejects IDs that are
+	// not gt:message rows visible in this mailbox.
+	_, err := m.Get(id)
 	if err != nil {
-		if errors.Is(err, ErrMessageNotFound) {
-			// Underlying bead has been GC'd; nothing to archive or close.
-			return nil
-		}
 		return err
 	}
-	if err := m.appendToArchive(msg); err != nil {
+	if err := m.acknowledgeDeliveryForPrimary(id); err != nil {
 		return err
 	}
-	if err := m.Delete(id); err != nil {
-		if errors.Is(err, ErrMessageNotFound) {
-			// Bead was GC'd between Get and Delete; metadata is archived,
-			// and there is nothing left to close.
-			return nil
+
+	primary := beads.ResolveBeadsDirForID(m.beadsDir, id)
+	err = m.archiveInDir(id, primary)
+	if errors.Is(err, ErrMessageNotFound) && primary != m.beadsDir {
+		return m.archiveInDir(id, m.beadsDir)
+	}
+	return err
+}
+
+func (m *Mailbox) archiveInDir(id, beadsDir string) error {
+	if m.store != nil {
+		return m.storeArchiveInDir(id)
+	}
+
+	ctx, cancel := bdWriteCtx()
+	defer cancel()
+	_, err := runBdCommand(ctx, []string{"label", "add", id, archivedLabel}, m.workDir, beadsDir)
+	telemetry.RecordMailMessage(context.Background(), "archive", telemetry.MailMessageInfo{
+		ID: id,
+		To: m.identity,
+	}, err)
+	if err != nil {
+		if isBdNotFound(err) {
+			return ErrMessageNotFound
 		}
 		return err
 	}
