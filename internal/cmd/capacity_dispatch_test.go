@@ -70,7 +70,12 @@ func TestDispatchSingleBeadRawReviewOnlyHookFailureClearsMetadata(t *testing.T) 
 		}, nil
 	}
 	hookBeadWithRetryWithTownRootFn = func(beadID, targetAgent, hookDir, townRoot string) error {
-		assertHasRawReviewMetadata(t, readMutableBDDescription(t, descPath))
+		desc := readMutableBDDescription(t, descPath)
+		assertHasRawReviewMetadata(t, desc)
+		receipt := beads.ParseAttachmentFields(&beads.Issue{Description: desc})
+		if receipt == nil || receipt.DispatchContext != "gt-context" || receipt.DispatchedBy != "test" {
+			t.Fatalf("worker cold-start saw incomplete scheduler receipt: %+v", receipt)
+		}
 		return errors.New("forced hook failure")
 	}
 

@@ -177,6 +177,7 @@ func TestReconstructFromContext(t *testing.T) {
 		NoMerge:     true,
 		ReviewOnly:  true,
 		HookRawBead: true,
+		EnqueuedBy:  "mayor/",
 	}
 
 	params := ReconstructFromContext(ctx)
@@ -219,6 +220,9 @@ func TestReconstructFromContext(t *testing.T) {
 	}
 	if !params.HookRawBead {
 		t.Error("HookRawBead: expected true")
+	}
+	if params.EnqueuedBy != "mayor/" {
+		t.Errorf("EnqueuedBy: got %q, want mayor/", params.EnqueuedBy)
 	}
 }
 

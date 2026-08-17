@@ -43,6 +43,8 @@ type SlingParams struct {
 	SkipCook         bool   // Batch optimization: formula already cooked
 	FormulaFailFatal bool   // true=rollback+error (single/queue), false=hook raw bead (batch)
 	CallerContext    string // Identifies the caller for shutdown messages (e.g., "queue-dispatch", "batch-sling")
+	DispatchContext  string // Scheduler context bead ID; empty for direct dispatch
+	DispatchedBy     string // Original requester; defaults to the executing actor
 	TownRoot         string
 	BeadsDir         string
 }
@@ -257,6 +259,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 
 	targetAgent := spawnInfo.AgentID()
 	hookWorkDir := spawnInfo.ClonePath
+	dispatchReceiptWritten := false
 
 	// 4. Auto-convoy (if !NoConvoy)
 	convoyID := ""
@@ -264,6 +267,9 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		fmt.Printf("  %s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, spawnInfo.PolecatName)
 		rollbackSlingArtifactsFn(spawnInfo, rollbackBeadID, hookWorkDir, convoyID)
 		restoreRollbackRawWorkflowFieldsFromCurrent(rollbackBeadID, townRoot, hookWorkDir, info)
+		if dispatchReceiptWritten {
+			restoreRollbackDispatchFieldsFromCurrent(rollbackBeadID, townRoot, hookWorkDir, info)
+		}
 		if params.Force && info.Status == "pinned" {
 			restorePinnedBead(townRoot, params.BeadID, info.Assignee)
 		}
@@ -350,8 +356,14 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	result.AttachedMolecule = attachedMoleculeID
 
 	actor := detectActor()
+	dispatchedBy := params.DispatchedBy
+	if dispatchedBy == "" {
+		dispatchedBy = actor
+	}
 	fieldUpdates := beadFieldUpdates{
-		Dispatcher:       actor,
+		Dispatcher:       dispatchedBy,
+		DispatchContext:  params.DispatchContext,
+		DispatchActor:    actor,
 		Args:             params.Args,
 		Vars:             varsForAttachment,
 		AttachedMolecule: attachedMoleculeID,
@@ -379,13 +391,14 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		return result, fmt.Errorf("serializing hook write for %s: %w", targetAgent, assigneeLockErr)
 	}
 	defer assigneeUnlock()
-	if attachedMoleculeID == "" && (params.NoMerge || params.ReviewOnly) {
-		if err := storeFieldsInBeadFromTownRoot(townRoot, beadToHook, fieldUpdates); err != nil {
-			cleanupSpawnedPolecat(spawnInfo, params.RigName, convoyID)
-			restoreRollbackRawWorkflowFieldsFromCurrent(beadToHook, townRoot, hookWorkDir, info)
-			result.ErrMsg = "raw sling metadata failed"
-			return result, fmt.Errorf("storing raw sling metadata before hook: %w", err)
-		}
+	// Persist the complete dispatch receipt before making the assignment visible.
+	// A worker may cold-start immediately after the hook write, so metadata written
+	// after the hook is inherently racy. Treat failure as an aborted dispatch.
+	dispatchReceiptWritten = true // cleanup even if the write commits before reporting an error
+	if err := storeFieldsInBeadFromTownRoot(townRoot, beadToHook, fieldUpdates); err != nil {
+		rollbackSpawnedPolecat(beadToHook, "Dispatch metadata failed")
+		result.ErrMsg = "dispatch metadata failed"
+		return result, fmt.Errorf("storing dispatch metadata before hook: %w", err)
 	}
 	hookDir := beads.ResolveHookDir(townRoot, beadToHook, hookWorkDir)
 	if err := hookBeadWithRetryWithTownRootFn(beadToHook, targetAgent, hookDir, townRoot); err != nil {
@@ -397,17 +410,29 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 
 	fmt.Printf("  %s Work attached to %s\n", style.Bold.Render("✓"), spawnInfo.PolecatName)
 
+	// Re-read the authoritative source assignment before starting the worker.
+	// This is the dispatch commit point: exact assignee plus durable provenance.
+	committed, verifyErr := getBeadInfoFromTownRoot(townRoot, beadToHook)
+	if verifyErr != nil || committed.Status != "hooked" || committed.Assignee != targetAgent {
+		rollbackSpawnedPolecat(beadToHook, "Dispatch verification failed")
+		result.ErrMsg = "dispatch verification failed"
+		if verifyErr != nil {
+			return result, fmt.Errorf("verifying committed dispatch: %w", verifyErr)
+		}
+		return result, fmt.Errorf("verifying committed dispatch: bead %s is %s to %q, want hooked to %q", beadToHook, committed.Status, committed.Assignee, targetAgent)
+	}
+	receipt := beads.ParseAttachmentFields(&beads.Issue{Description: committed.Description})
+	if receipt == nil || receipt.DispatchedBy != dispatchedBy || receipt.DispatchContext != params.DispatchContext {
+		rollbackSpawnedPolecat(beadToHook, "Dispatch receipt verification failed")
+		result.ErrMsg = "dispatch receipt verification failed"
+		return result, fmt.Errorf("verifying committed dispatch receipt for %s", beadToHook)
+	}
+
 	// 8. Log sling event
 	_ = events.LogFeed(events.TypeSling, actor, events.SlingPayload(beadToHook, targetAgent))
 
 	// 9. Update agent hook_bead state
 	updateAgentHookBead(targetAgent, beadToHook, hookWorkDir, beadsDir)
-
-	// 10. Store fields in bead (dispatcher, args, attached_molecule, no_merge, mode)
-	// Use beadToHook for the update target (may differ from beadID when formula-on-bead)
-	if err := storeFieldsInBeadFromTownRoot(townRoot, beadToHook, fieldUpdates); err != nil {
-		fmt.Printf("  %s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
-	}
 
 	// Update agent bead mode for stuck-detector Ralph thresholds. Reuse/reset clears stale mode.
 	if params.Mode != "" {

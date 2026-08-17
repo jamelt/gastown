@@ -19,6 +19,8 @@ type AttachmentFields struct {
 	AttachedArgs     string   // Natural language args passed via gt sling --args (no-tmux mode)
 	AttachedVars     []string // Formula variables passed via gt sling --var
 	DispatchedBy     string   // Agent ID that dispatched this work (for completion notification)
+	DispatchContext  string   // Durable scheduler context/receipt ID for this assignment
+	DispatchActor    string   // Agent that executed the dispatch transition
 	NoMerge          bool     // If true, gt done skips merge queue (for upstream PRs/human review)
 	ReviewOnly       bool     // If true, assignee must evaluate and report back — no merge/commit/push
 	Mode             string   // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
@@ -76,6 +78,12 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 			hasFields = true
 		case "dispatched_by", "dispatched-by", "dispatchedby":
 			fields.DispatchedBy = value
+			hasFields = true
+		case "dispatch_context", "dispatch-context", "dispatchcontext":
+			fields.DispatchContext = value
+			hasFields = true
+		case "dispatch_actor", "dispatch-actor", "dispatchactor":
+			fields.DispatchActor = value
 			hasFields = true
 		case "no_merge", "no-merge", "nomerge":
 			fields.NoMerge = strings.ToLower(value) == "true"
@@ -137,6 +145,12 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 	if fields.DispatchedBy != "" {
 		lines = append(lines, "dispatched_by: "+fields.DispatchedBy)
 	}
+	if fields.DispatchContext != "" {
+		lines = append(lines, "dispatch_context: "+fields.DispatchContext)
+	}
+	if fields.DispatchActor != "" {
+		lines = append(lines, "dispatch_actor: "+fields.DispatchActor)
+	}
 	if fields.NoMerge {
 		lines = append(lines, "no_merge: true")
 	}
@@ -188,6 +202,12 @@ func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
 		"dispatched_by":     true,
 		"dispatched-by":     true,
 		"dispatchedby":      true,
+		"dispatch_context":  true,
+		"dispatch-context":  true,
+		"dispatchcontext":   true,
+		"dispatch_actor":    true,
+		"dispatch-actor":    true,
+		"dispatchactor":     true,
 		"no_merge":          true,
 		"no-merge":          true,
 		"nomerge":           true,
