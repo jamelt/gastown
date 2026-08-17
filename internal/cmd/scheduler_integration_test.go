@@ -1791,6 +1791,70 @@ func TestSchedulerDispatchFailureRecordedInLegacyCrossRigContextDB(t *testing.T)
 	}
 }
 
+func TestSchedulerActualDispatchLegacyCrossRigContextUsesOwningDB(t *testing.T) {
+	hqPath, _, rig2Path, _, _ := setupMultiRigSchedulerTown(t)
+
+	beadID := createTestBead(t, rig2Path, "Legacy cross-rig dispatch success")
+	ctxID := createSlingContextWithID(t, rig2Path, "gt-sc-34ae2af2ef", &capacity.SlingContextFields{
+		Version:    1,
+		WorkBeadID: beadID,
+		TargetRig:  "rig2",
+		EnqueuedAt: "2026-01-02T00:00:00Z",
+	})
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "rig2" {
+			t.Fatalf("spawn rig = %q, want rig2", rigName)
+		}
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "legacy",
+			ClonePath:   rig2Path,
+			Pane:        "test-pane",
+		}, nil
+	}
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want 1", dispatched)
+	}
+
+	rigBeads := beads.NewWithBeadsDir(rig2Path, filepath.Join(rig2Path, ".beads"))
+	issue, err := rigBeads.Show(beadID)
+	if err != nil {
+		t.Fatalf("rig bead show after dispatch: %v", err)
+	}
+	if issue.Status != "hooked" || issue.Assignee != "rig2/polecats/legacy" {
+		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked rig2/polecats/legacy", issue.Status, issue.Assignee)
+	}
+
+	rigOpenContexts, err := rigBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("rig ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range rigOpenContexts {
+		if ctx.ID == ctxID {
+			t.Fatalf("legacy context %s should be closed after successful dispatch", ctxID)
+		}
+	}
+
+	hqBeads := beads.NewWithBeadsDir(hqPath, filepath.Join(hqPath, ".beads"))
+	hqOpenContexts, err := hqBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("HQ ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range hqOpenContexts {
+		if ctx.ID == ctxID {
+			t.Fatalf("legacy context %s unexpectedly exists in HQ after dispatch", ctxID)
+		}
+	}
+}
+
 // TestSchedulerDirectConvoyDispatch verifies that gt sling <convoy-id> --dry-run
 // with max_polecats=-1 (direct mode) routes to the direct dispatch path.
 func TestSchedulerDirectConvoyDispatch(t *testing.T) {
