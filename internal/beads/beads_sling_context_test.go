@@ -16,6 +16,7 @@ func TestFormatParseSlingContextRoundTrip(t *testing.T) {
 		Version:          1,
 		WorkBeadID:       "gt-abc123",
 		TargetRig:        "gastown",
+		TargetAgent:      "gastown/polecats/garnet",
 		Formula:          "mol-polecat-work",
 		Args:             "implement feature X",
 		Vars:             "a=1\nb=2",
@@ -49,6 +50,9 @@ func TestFormatParseSlingContextRoundTrip(t *testing.T) {
 	}
 	if parsed.TargetRig != original.TargetRig {
 		t.Errorf("TargetRig: got %q, want %q", parsed.TargetRig, original.TargetRig)
+	}
+	if parsed.TargetAgent != original.TargetAgent {
+		t.Errorf("TargetAgent: got %q, want %q", parsed.TargetAgent, original.TargetAgent)
 	}
 	if parsed.Formula != original.Formula {
 		t.Errorf("Formula: got %q, want %q", parsed.Formula, original.Formula)

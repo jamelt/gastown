@@ -701,6 +701,7 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, actor string) (*SlingR
 	params := SlingParams{
 		BeadID:           dp.BeadID,
 		RigName:          dp.RigName,
+		TargetAgent:      dp.TargetAgent,
 		FormulaName:      dp.FormulaName,
 		Args:             dp.Args,
 		Vars:             dp.Vars,
@@ -726,7 +727,11 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, actor string) (*SlingR
 		params.DispatchedBy = actor
 	}
 
-	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, b.TargetRig)
+	target := b.TargetRig
+	if dp.TargetAgent != "" {
+		target = dp.TargetAgent
+	}
+	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, target)
 	result, err := executeSling(params)
 	if err != nil {
 		return nil, fmt.Errorf("sling failed: %w", err)

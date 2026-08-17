@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,9 +58,11 @@ func TestDispatchSingleBeadRawReviewOnlyHookFailureClearsMetadata(t *testing.T) 
 	townRoot, _, descPath := setupMutableBDRawSlingTest(t, "Keep this body.")
 
 	prevSpawn := spawnPolecatForSling
+	prevResolve := resolveTargetAgentFn
 	prevHook := hookBeadWithRetryWithTownRootFn
 	t.Cleanup(func() {
 		spawnPolecatForSling = prevSpawn
+		resolveTargetAgentFn = prevResolve
 		hookBeadWithRetryWithTownRootFn = prevHook
 	})
 	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
@@ -95,6 +98,92 @@ func TestDispatchSingleBeadRawReviewOnlyHookFailureClearsMetadata(t *testing.T) 
 		t.Fatal("expected scheduler dispatch hook failure")
 	}
 	assertNoRawReviewMetadata(t, readMutableBDDescription(t, descPath))
+}
+
+func TestDispatchSingleBeadHonorsExactPolecatReservation(t *testing.T) {
+	townRoot, _, _ := setupMutableBDRawSlingTest(t, "Keep this body.")
+
+	prevSpawn := spawnPolecatForSling
+	prevResolve := resolveTargetAgentFn
+	prevVerifyWorktree := verifyDeferredTargetWorktreeFn
+	prevBranch := deferredTargetBranchFn
+	prevAssignment := deferredTargetAssignmentFn
+	t.Cleanup(func() {
+		spawnPolecatForSling = prevSpawn
+		resolveTargetAgentFn = prevResolve
+		verifyDeferredTargetWorktreeFn = prevVerifyWorktree
+		deferredTargetBranchFn = prevBranch
+		deferredTargetAssignmentFn = prevAssignment
+	})
+	spawnCalled := false
+	resolveTargetAgentFn = func(string) (string, string, string, error) {
+		return "gastown/polecats/toast", "", filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown"), nil
+	}
+	spawnPolecatForSling = func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		spawnCalled = true
+		return nil, errors.New("exact reservation must not spawn")
+	}
+	verifyDeferredTargetWorktreeFn = func(string) error { return nil }
+	deferredTargetBranchFn = func(string) (string, error) { return "preserved-branch", nil }
+	deferredTargetAssignmentFn = func(*beads.Beads, string) (*beads.Issue, error) { return nil, nil }
+
+	result, err := dispatchSingleBead(capacity.PendingBead{
+		ID:         "gt-context",
+		WorkBeadID: "gt-rawrollback",
+		TargetRig:  "gastown",
+		Context: &capacity.SlingContextFields{
+			WorkBeadID:   "gt-rawrollback",
+			TargetRig:    "gastown",
+			TargetAgent:  "gastown/polecats/toast",
+			ResumeBranch: "preserved-branch",
+			HookRawBead:  true,
+		},
+	}, townRoot, "test")
+	if err != nil {
+		t.Fatalf("dispatchSingleBead exact reservation: %v", err)
+	}
+	if spawnCalled {
+		t.Fatal("exact reservation invoked polecat spawn")
+	}
+	if result == nil || !result.Success || result.PolecatName != "toast" || result.SpawnInfo != nil {
+		t.Fatalf("result = %#v, want successful reuse of toast without SpawnInfo", result)
+	}
+}
+
+func TestScheduleBeadExplicitTargetBranchMismatchFailsBeforeSideEffects(t *testing.T) {
+	townRoot, _, descPath := setupMutableBDRawSlingTest(t, "Original description.")
+
+	prevResolve := resolveTargetAgentFn
+	prevVerifyWorktree := verifyDeferredTargetWorktreeFn
+	prevBranch := deferredTargetBranchFn
+	prevAssignment := deferredTargetAssignmentFn
+	t.Cleanup(func() {
+		resolveTargetAgentFn = prevResolve
+		verifyDeferredTargetWorktreeFn = prevVerifyWorktree
+		deferredTargetBranchFn = prevBranch
+		deferredTargetAssignmentFn = prevAssignment
+	})
+	resolveTargetAgentFn = func(string) (string, string, string, error) {
+		return "gastown/polecats/toast", "", filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown"), nil
+	}
+	verifyDeferredTargetWorktreeFn = func(string) error { return nil }
+	deferredTargetBranchFn = func(string) (string, error) { return "other-branch", nil }
+	deferredTargetAssignmentFn = func(*beads.Beads, string) (*beads.Issue, error) {
+		t.Fatal("assignment lookup must not run after branch mismatch")
+		return nil, nil
+	}
+
+	err := scheduleBead("gt-rawrollback", "gastown", ScheduleOptions{
+		TargetAgent:  "gastown/polecats/toast",
+		ResumeBranch: "preserved-branch",
+		Force:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to create a duplicate checkout") {
+		t.Fatalf("scheduleBead error = %v, want fail-closed branch mismatch", err)
+	}
+	if got := readMutableBDDescription(t, descPath); got != "Original description." {
+		t.Fatalf("description mutated before validation: %q", got)
+	}
 }
 
 func TestListBlockedWorkBeadIDStatesPartialFailureFailsClosedPerGroup(t *testing.T) {

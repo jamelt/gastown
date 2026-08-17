@@ -22,6 +22,7 @@ type SlingContextFields struct {
 	WorkBeadID       string `json:"work_bead_id"`
 	TargetRig        string `json:"target_rig"`
 	EnqueuedBy       string `json:"enqueued_by,omitempty"`
+	TargetAgent      string `json:"target_agent,omitempty"`
 	Formula          string `json:"formula,omitempty"`
 	Args             string `json:"args,omitempty"`
 	Vars             string `json:"vars,omitempty"`
@@ -143,6 +144,47 @@ func PlanDispatch(availableCapacity, batchSize int, ready []PendingBead) Dispatc
 		return DispatchPlan{Reason: "none"}
 	}
 
+	// Exact polecat reservations reuse an already-running worker and therefore
+	// do not consume a new capacity slot. Select them independently of free spawn
+	// capacity while retaining the existing FIFO/capacity behavior for rig-only
+	// contexts. This prevents a reserved recovery worker from waiting forever on
+	// capacity that it already occupies.
+	hasReservation := false
+	for _, b := range ready {
+		if b.Context != nil && b.Context.TargetAgent != "" {
+			hasReservation = true
+			break
+		}
+	}
+	if hasReservation {
+		remainingSlots := availableCapacity
+		if remainingSlots < 0 {
+			remainingSlots = 0
+		}
+		toDispatch := make([]PendingBead, 0, batchSize)
+		for _, b := range ready {
+			if len(toDispatch) >= batchSize {
+				break
+			}
+			reserved := b.Context != nil && b.Context.TargetAgent != ""
+			if !reserved && remainingSlots == 0 {
+				continue
+			}
+			toDispatch = append(toDispatch, b)
+			if !reserved {
+				remainingSlots--
+			}
+		}
+		if len(toDispatch) == 0 {
+			return DispatchPlan{Skipped: len(ready) + msgSkipped, Reason: "capacity"}
+		}
+		return DispatchPlan{
+			ToDispatch: toDispatch,
+			Skipped:    len(ready) - len(toDispatch) + msgSkipped,
+			Reason:     "reservation",
+		}
+	}
+
 	if availableCapacity <= 0 {
 		return DispatchPlan{
 			Skipped: len(ready) + msgSkipped,
@@ -218,6 +260,7 @@ type DispatchParams struct {
 	BeadID       string
 	FormulaName  string
 	RigName      string
+	TargetAgent  string
 	Args         string
 	Vars         []string
 	Merge        string
@@ -237,6 +280,7 @@ func ReconstructFromContext(ctx *SlingContextFields) DispatchParams {
 	p := DispatchParams{
 		BeadID:       ctx.WorkBeadID,
 		RigName:      ctx.TargetRig,
+		TargetAgent:  ctx.TargetAgent,
 		FormulaName:  ctx.Formula,
 		Args:         ctx.Args,
 		Merge:        ctx.Merge,
