@@ -1,11 +1,14 @@
 package doltserver
 
 import (
+	"context"
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // LineageState describes whether a local main branch can safely exchange
@@ -23,17 +26,17 @@ const (
 // remote-tracking head; callers that require a freshly fetched head should run
 // their normal fetch step before inspection.
 type LineageReport struct {
-	Database         string       `json:"database"`
-	RemoteName       string       `json:"remote_name,omitempty"`
-	RemoteURL        string       `json:"remote_url,omitempty"`
-	LocalHead        string       `json:"local_head,omitempty"`
-	RemoteHead       string       `json:"remote_head,omitempty"`
-	MergeBase        string       `json:"merge_base,omitempty"`
-	LocalOnlyCommits int          `json:"local_only_commits"`
-	RemoteOnlyCommits int         `json:"remote_only_commits"`
-	LocalOnlyRecords int          `json:"local_only_records"`
-	RemoteOnlyRecords int         `json:"remote_only_records"`
-	State            LineageState `json:"state"`
+	Database          string       `json:"database"`
+	RemoteName        string       `json:"remote_name,omitempty"`
+	RemoteURL         string       `json:"remote_url,omitempty"`
+	LocalHead         string       `json:"local_head,omitempty"`
+	RemoteHead        string       `json:"remote_head,omitempty"`
+	MergeBase         string       `json:"merge_base,omitempty"`
+	LocalOnlyCommits  int          `json:"local_only_commits"`
+	RemoteOnlyCommits int          `json:"remote_only_commits"`
+	LocalOnlyRecords  int          `json:"local_only_records"`
+	RemoteOnlyRecords int          `json:"remote_only_records"`
+	State             LineageState `json:"state"`
 }
 
 // SafeToPush reports whether a push can proceed without replacing unrelated
@@ -45,7 +48,7 @@ func (r LineageReport) SafeToPush() bool {
 
 // Shared reports whether both sides have a verified common ancestor.
 func (r LineageReport) Shared() bool {
-	return r.State == LineageShared || r.State == LineageNoRemote
+	return r.State == LineageShared
 }
 
 // Diagnostic returns a stable, actionable summary suitable for doctor, sync,
@@ -83,6 +86,28 @@ func InspectLineageSQL(townRoot, db string) (LineageReport, error) {
 	}
 	q := func(query string) (string, error) {
 		return QueryCSV(townRoot, fmt.Sprintf("USE `%s`; %s", db, query))
+	}
+	return inspectLineage(db, remoteName, remoteURL, q)
+}
+
+// InspectLineageCLI is the stopped-server counterpart to InspectLineageSQL.
+// It opens the database read-only through Dolt CLI SELECT statements.
+func InspectLineageCLI(dbDir, db string) (LineageReport, error) {
+	remoteName, remoteURL, err := FindRemote(dbDir)
+	if err != nil {
+		return LineageReport{}, err
+	}
+	q := func(query string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "dolt", "sql", "-r", "csv", "-q", query)
+		cmd.Dir = dbDir
+		setProcessGroup(cmd)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("dolt sql: %w (%s)", err, strings.TrimSpace(string(out)))
+		}
+		return string(out), nil
 	}
 	return inspectLineage(db, remoteName, remoteURL, q)
 }

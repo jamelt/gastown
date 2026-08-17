@@ -2151,7 +2151,7 @@ func TestBeadsConfigHasSyncRemote_MissingFile(t *testing.T) {
 	}
 }
 
-func TestAddRig_TrackedBeadsWithSyncRemote_PassesReinitFlags(t *testing.T) {
+func TestAddRig_TrackedBeadsWithSyncRemote_BootstrapsFromRemote(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based bd shim not reliable on Windows CI")
 	}
@@ -2223,14 +2223,13 @@ esac
 	}
 	cmds := string(logData)
 
-	if !strings.Contains(cmds, "--reinit-local") {
-		t.Errorf("bd init missing --reinit-local; full log:\n%s", cmds)
+	if !strings.Contains(cmds, "--remote git+https://github.com/steveyegge/gastown.git") {
+		t.Errorf("bd init missing configured remote bootstrap; full log:\n%s", cmds)
 	}
-	if !strings.Contains(cmds, "--discard-remote") {
-		t.Errorf("bd init missing --discard-remote; full log:\n%s", cmds)
-	}
-	if !strings.Contains(cmds, "--destroy-token=DESTROY-gt") {
-		t.Errorf("bd init missing --destroy-token=DESTROY-gt; full log:\n%s", cmds)
+	for _, destructive := range []string{"--reinit-local", "--discard-remote", "--destroy-token"} {
+		if strings.Contains(cmds, destructive) {
+			t.Errorf("bd init must not use destructive flag %s; full log:\n%s", destructive, cmds)
+		}
 	}
 }
 

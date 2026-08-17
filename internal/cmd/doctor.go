@@ -309,6 +309,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 
 	// Dolt data health checks (binary + server reachability moved to top as prerequisites)
 	d.Register(doctor.NewDoltMetadataCheck())
+	d.Register(doctor.NewDoltLineageCheck())
 	d.Register(doctor.NewDoltOrphanedDatabaseCheck())
 	d.Register(doctor.NewUnregisteredBeadsDirsCheck())
 	d.Register(doctor.NewNullAssigneeCheck())
