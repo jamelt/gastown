@@ -20,7 +20,7 @@ func TestDaemonStatusJSONCompatibility(t *testing.T) {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"running", "pid", "town", "binary_newer"} {
+	for _, field := range []string{"running", "pid", "town", "binary_newer", "sessions"} {
 		if _, ok := decoded[field]; !ok {
 			t.Errorf("daemon status JSON missing %q", field)
 		}

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -275,10 +277,19 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 	binaryModTime, binaryErr := getBinaryModTime()
 
 	if daemonStatusJSON {
+		sessions, sessionsErr := tmux.NewTmux().ListSessions()
+		if sessions == nil {
+			sessions = []string{}
+		}
+		sort.Strings(sessions)
 		status := daemonStatusOutput{
-			Running: running,
-			PID:     pid,
-			Town:    townRoot,
+			Running:  running,
+			PID:      pid,
+			Town:     townRoot,
+			Sessions: sessions,
+		}
+		if sessionsErr != nil {
+			status.SessionsError = sessionsErr.Error()
 		}
 		if stateErr == nil && state != nil {
 			status.StartedAt = optionalTime(state.StartedAt)
@@ -342,6 +353,8 @@ type daemonStatusOutput struct {
 	HeartbeatCount   int64      `json:"heartbeat_count,omitempty"`
 	BinaryModifiedAt *time.Time `json:"binary_modified_at,omitempty"`
 	BinaryNewer      bool       `json:"binary_newer"`
+	Sessions         []string   `json:"sessions"`
+	SessionsError    string     `json:"sessions_error,omitempty"`
 }
 
 func optionalTime(value time.Time) *time.Time {
