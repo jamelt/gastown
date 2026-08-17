@@ -95,6 +95,15 @@ func (m *Mailbox) Identity() string {
 	return m.identity
 }
 
+// mutationActor returns the canonical identity authorized to mutate this
+// mailbox. In particular, town-level sessions use BD_ACTOR values such as
+// "deacon", while their mail assignees are stored as "deacon/". Passing the
+// canonical mailbox identity to beads keeps mutation authorization consistent
+// with inbox lookup without broadening access to another mailbox.
+func (m *Mailbox) mutationActor() string {
+	return AddressToIdentity(m.identity)
+}
+
 // Path returns the JSONL path for legacy mailboxes.
 func (m *Mailbox) Path() string {
 	return m.path
@@ -630,7 +639,7 @@ func (m *Mailbox) closeInDir(id, beadsDir string) error {
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+	_, err := runBdCommand(ctx, args, m.workDir, beadsDir, "BD_ACTOR="+m.mutationActor())
 	telemetry.RecordMailMessage(context.Background(), "read", telemetry.MailMessageInfo{
 		ID: id,
 		To: m.identity,
@@ -698,14 +707,15 @@ func (m *Mailbox) markReadOnlyBeads(id string) error {
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, args, m.workDir, primary)
+	_, err := runBdCommand(ctx, args, m.workDir, primary, "BD_ACTOR="+m.mutationActor())
 	if err != nil {
 		if isBdNotFound(err) {
 			if primary != m.beadsDir {
 				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
 				ctx2, cancel2 := bdWriteCtx()
 				defer cancel2()
-				_, err2 := runBdCommand(ctx2, args, m.workDir, m.beadsDir)
+				_, err2 := runBdCommand(ctx2, args, m.workDir, m.beadsDir,
+					"BD_ACTOR="+m.mutationActor())
 				if err2 != nil {
 					if isBdNotFound(err2) {
 						return ErrMessageNotFound
@@ -938,7 +948,8 @@ func (m *Mailbox) archiveInDir(id, beadsDir string) error {
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, []string{"label", "add", id, archivedLabel}, m.workDir, beadsDir)
+	_, err := runBdCommand(ctx, []string{"label", "add", id, archivedLabel}, m.workDir, beadsDir,
+		"BD_ACTOR="+m.mutationActor())
 	telemetry.RecordMailMessage(context.Background(), "archive", telemetry.MailMessageInfo{
 		ID: id,
 		To: m.identity,
