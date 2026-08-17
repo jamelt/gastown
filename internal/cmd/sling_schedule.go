@@ -203,7 +203,9 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	if !ok {
 		return fmt.Errorf("cannot resolve target rig %q beads database for bead %s", rigName, beadID)
 	}
-	rigBeads := beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
+	// Context identity is local to its owning database. Pin every operation so
+	// legacy wrong-prefix contexts remain addressable by ownership evidence.
+	rigBeads := beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForLocalBeads()
 	existingCtx, _, findErr := rigBeads.FindOpenSlingContext(beadID)
 	if findErr != nil {
 		return fmt.Errorf("checking for existing sling context: %w", findErr)

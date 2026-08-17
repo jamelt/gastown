@@ -296,6 +296,32 @@ func createSlingContext(t *testing.T, hqPath string, fields *capacity.SlingConte
 	return ctxBead.ID
 }
 
+func createSlingContextWithID(t *testing.T, rigPath, contextID string, fields *capacity.SlingContextFields) string {
+	t.Helper()
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	description := beads.FormatSlingContextDescription(fields)
+	args := []string{
+		"create",
+		"--json",
+		"--id=" + contextID,
+		"--force",
+		"--ephemeral",
+		"--title=test: " + fields.WorkBeadID,
+		"--description=" + description,
+		"--type=task",
+		"--labels=" + capacity.LabelSlingContext,
+	}
+	out, err := rigBeads.Run(args...)
+	if err != nil {
+		t.Fatalf("CreateSlingContext %s for %s failed: %v", contextID, fields.WorkBeadID, err)
+	}
+	var issue beads.Issue
+	if err := json.Unmarshal(out, &issue); err != nil {
+		t.Fatalf("parse sling context %s create output: %v", contextID, err)
+	}
+	return issue.ID
+}
+
 // findSlingContext finds an open sling context for a work bead by scanning all
 // rig beads dirs under townRoot. Mirrors production's listAllSlingContexts since
 // sling contexts now live in the target rig's beads dir, not HQ (see dee628d3).
@@ -1682,6 +1708,149 @@ func TestSchedulerDispatchFailureRecordedInContextSourceDB(t *testing.T) {
 	for _, rigCtx := range rigContexts {
 		if rigCtx.ID == ctxID {
 			t.Fatalf("context %s unexpectedly exists in rig DB; failure should update source HQ DB", ctxID)
+		}
+	}
+}
+
+func TestSchedulerDispatchFailureRecordedInLegacyCrossRigContextDB(t *testing.T) {
+	hqPath, _, rig2Path, _, _ := setupMultiRigSchedulerTown(t)
+
+	beadID := createTestBead(t, rig2Path, "Legacy cross-rig context failure")
+	legacyContextID := "gt-sc-95f105d4f2"
+	ctxID := createSlingContextWithID(t, rig2Path, legacyContextID, &capacity.SlingContextFields{
+		Version:     1,
+		WorkBeadID:  beadID,
+		TargetRig:   "rig2",
+		HookRawBead: true,
+		EnqueuedAt:  "2026-01-01T00:00:00Z",
+	})
+
+	foundCtx := findSlingContext(t, hqPath, beadID)
+	if foundCtx == nil {
+		t.Fatalf("bead %s has no sling context after creating legacy ID %s", beadID, ctxID)
+	}
+	if foundCtx.WorkBeadID != beadID {
+		t.Fatalf("found context %s has work bead %s, want %s", ctxID, foundCtx.WorkBeadID, beadID)
+	}
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "rig2" {
+			t.Fatalf("spawn rig = %q, want rig2", rigName)
+		}
+		return nil, fmt.Errorf("forced spawn failure")
+	}
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 0 {
+		t.Fatalf("dispatched = %d, want 0", dispatched)
+	}
+
+	rigBeads := beads.NewWithBeadsDir(rig2Path, filepath.Join(rig2Path, ".beads"))
+	rigCtx, err := rigBeads.ForLocalBeads().Show(ctxID)
+	if err != nil {
+		t.Fatalf("show rig context after failure: %v", err)
+	}
+	rigFields := beads.ParseSlingContextFields(rigCtx.Description)
+	if rigFields == nil {
+		t.Fatalf("context fields missing after failure: %q", rigCtx.Description)
+	}
+	if rigFields.DispatchFailures != 1 {
+		t.Fatalf("dispatch_failures = %d, want 1 (description: %s)", rigFields.DispatchFailures, rigCtx.Description)
+	}
+	if !strings.Contains(rigFields.LastFailure, "forced spawn failure") {
+		t.Fatalf("last_failure = %q, want forced spawn failure", rigFields.LastFailure)
+	}
+
+	records, err := listAllSlingContextRecords(hqPath)
+	if err != nil {
+		t.Fatalf("listAllSlingContextRecords: %v", err)
+	}
+	foundHQ := false
+	foundRig := false
+	for _, rec := range records {
+		if rec.issue.ID != ctxID {
+			continue
+		}
+		switch rec.beadsDir {
+		case filepath.Join(hqPath, ".beads"):
+			foundHQ = true
+		case filepath.Join(rig2Path, ".beads"):
+			foundRig = true
+		}
+	}
+	if !foundRig {
+		t.Fatalf("legacy context %s not found in rig2 sling context scan", ctxID)
+	}
+	if foundHQ {
+		t.Fatalf("legacy context %s found in HQ context scan; expected owning rig storage", ctxID)
+	}
+}
+
+func TestSchedulerActualDispatchLegacyCrossRigContextUsesOwningDB(t *testing.T) {
+	hqPath, _, rig2Path, _, _ := setupMultiRigSchedulerTown(t)
+
+	beadID := createTestBead(t, rig2Path, "Legacy cross-rig dispatch success")
+	ctxID := createSlingContextWithID(t, rig2Path, "gt-sc-34ae2af2ef", &capacity.SlingContextFields{
+		Version:    1,
+		WorkBeadID: beadID,
+		TargetRig:  "rig2",
+		EnqueuedAt: "2026-01-02T00:00:00Z",
+	})
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "rig2" {
+			t.Fatalf("spawn rig = %q, want rig2", rigName)
+		}
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "legacy",
+			ClonePath:   rig2Path,
+			Pane:        "test-pane",
+		}, nil
+	}
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want 1", dispatched)
+	}
+
+	rigBeads := beads.NewWithBeadsDir(rig2Path, filepath.Join(rig2Path, ".beads"))
+	issue, err := rigBeads.Show(beadID)
+	if err != nil {
+		t.Fatalf("rig bead show after dispatch: %v", err)
+	}
+	if issue.Status != "hooked" || issue.Assignee != "rig2/polecats/legacy" {
+		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked rig2/polecats/legacy", issue.Status, issue.Assignee)
+	}
+
+	rigOpenContexts, err := rigBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("rig ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range rigOpenContexts {
+		if ctx.ID == ctxID {
+			t.Fatalf("legacy context %s should be closed after successful dispatch", ctxID)
+		}
+	}
+
+	hqBeads := beads.NewWithBeadsDir(hqPath, filepath.Join(hqPath, ".beads"))
+	hqOpenContexts, err := hqBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("HQ ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range hqOpenContexts {
+		if ctx.ID == ctxID {
+			t.Fatalf("legacy context %s unexpectedly exists in HQ after dispatch", ctxID)
 		}
 	}
 }

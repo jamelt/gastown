@@ -383,11 +383,11 @@ func beadsForContext(townRoot string, fields *capacity.SlingContextFields) *bead
 	if fields != nil && fields.TargetRig != "" {
 		rigBeadsDir := doltserver.FindRigBeadsDir(townRoot, fields.TargetRig)
 		if rigBeadsDir != "" {
-			return beads.NewWithBeadsDir(townRoot, rigBeadsDir)
+			return beads.NewWithBeadsDir(townRoot, rigBeadsDir).ForLocalBeads()
 		}
 	}
 	// Fallback to HQ for contexts without a valid TargetRig
-	return beads.NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads"))
+	return beads.NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads")).ForLocalBeads()
 }
 
 func beadsForPendingContext(townRoot string, b capacity.PendingBead) *beads.Beads {
@@ -396,7 +396,7 @@ func beadsForPendingContext(townRoot string, b capacity.PendingBead) *beads.Bead
 		if workDir == "" {
 			workDir = filepath.Dir(b.ContextBeadsDir)
 		}
-		return beads.NewWithBeadsDir(workDir, b.ContextBeadsDir)
+		return beads.NewWithBeadsDir(workDir, b.ContextBeadsDir).ForLocalBeads()
 	}
 	return beadsForContext(townRoot, b.Context)
 }
@@ -418,7 +418,9 @@ type scheduledContextAssessment struct {
 }
 
 func beadsForContextRecord(rec slingContextRecord) *beads.Beads {
-	return beads.NewWithBeadsDir(rec.workDir, rec.beadsDir)
+	// The scan result is direct ownership evidence. Keep mutations pinned to
+	// that database even when a legacy context ID has another rig's prefix.
+	return beads.NewWithBeadsDir(rec.workDir, rec.beadsDir).ForLocalBeads()
 }
 
 // cleanupStaleContexts closes invalid and stale sling context beads.
@@ -803,7 +805,7 @@ func isDaemonDispatch() bool {
 }
 
 // recordDispatchFailure increments the dispatch failure counter on the sling context bead.
-func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispatchErr error) {
+func recordDispatchFailure(contextBeads *beads.Beads, b capacity.PendingBead, dispatchErr error) {
 	if b.Context == nil {
 		return
 	}
@@ -811,13 +813,13 @@ func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispa
 	b.Context.DispatchFailures++
 	b.Context.LastFailure = dispatchErr.Error()
 
-	if err := townBeads.UpdateSlingContextFields(b.ID, b.Context); err != nil {
+	if err := contextBeads.UpdateSlingContextFields(b.ID, b.Context); err != nil {
 		fmt.Printf("  %s Failed to record dispatch failure for %s: %v\n",
 			style.Warning.Render("⚠"), b.ID, err)
 	}
 
 	if b.Context.DispatchFailures >= maxDispatchFailures {
-		if err := townBeads.CloseSlingContext(b.ID, "circuit-broken"); err != nil {
+		if err := contextBeads.CloseSlingContext(b.ID, "circuit-broken"); err != nil {
 			fmt.Printf("  %s Failed to close circuit-broken context %s: %v\n",
 				style.Warning.Render("⚠"), b.ID, err)
 		}
