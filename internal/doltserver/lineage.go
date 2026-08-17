@@ -161,12 +161,28 @@ func inspectLineage(db, remoteName, remoteURL string, query lineageQuerier) (Lin
 		"SELECT COUNT(*) FROM dolt_log('main') WHERE commit_hash NOT IN (SELECT commit_hash FROM dolt_log('%s'))", remoteRef))
 	report.RemoteOnlyCommits, _ = queryInt(query, fmt.Sprintf(
 		"SELECT COUNT(*) FROM dolt_log('%s') WHERE commit_hash NOT IN (SELECT commit_hash FROM dolt_log('main'))", remoteRef))
-	report.LocalOnlyRecords, _ = queryInt(query, fmt.Sprintf(
-		"SELECT COUNT(*) FROM issues AS OF 'main' l WHERE NOT EXISTS (SELECT 1 FROM issues AS OF '%s' r WHERE r.id = l.id)", remoteRef))
-	report.RemoteOnlyRecords, _ = queryInt(query, fmt.Sprintf(
-		"SELECT COUNT(*) FROM issues AS OF '%s' r WHERE NOT EXISTS (SELECT 1 FROM issues AS OF 'main' l WHERE l.id = r.id)", remoteRef))
+	report.LocalOnlyRecords = queryIssueDifferences(query, "main", remoteRef)
+	report.RemoteOnlyRecords = queryIssueDifferences(query, remoteRef, "main")
 
 	return report, nil
+}
+
+// queryIssueDifferences counts issue/mail records that are missing or have a
+// different content hash on the other head. Older schemas may not have
+// content_hash, so fall back to unique IDs while still preserving both complete
+// snapshots in reconciliation bundles.
+func queryIssueDifferences(query lineageQuerier, fromRef, otherRef string) int {
+	statement := fmt.Sprintf(
+		"SELECT COUNT(*) FROM issues AS OF '%s' a WHERE NOT EXISTS (SELECT 1 FROM issues AS OF '%s' b WHERE b.id = a.id AND COALESCE(b.content_hash, '') = COALESCE(a.content_hash, ''))",
+		fromRef, otherRef)
+	if count, err := queryInt(query, statement); err == nil {
+		return count
+	}
+	fallback := fmt.Sprintf(
+		"SELECT COUNT(*) FROM issues AS OF '%s' a WHERE NOT EXISTS (SELECT 1 FROM issues AS OF '%s' b WHERE b.id = a.id)",
+		fromRef, otherRef)
+	count, _ := queryInt(query, fallback)
+	return count
 }
 
 func queryScalar(query lineageQuerier, statement string) (string, error) {

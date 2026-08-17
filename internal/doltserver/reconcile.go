@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+var (
+	reconciliationQueryCSV  = QueryCSV
+	reconciliationQueryJSON = QueryJSON
+)
+
 // ReconciliationReceipt records a non-destructive preservation bundle. The
 // selected authority is a decision for a later, explicit reconstruction; this
 // operation never resets, merges, deletes, or pushes either history.
@@ -88,7 +93,7 @@ func CreateReconciliationBundle(townRoot string, report LineageReport, authority
 }
 
 func exportDoltRevision(townRoot, db, label, ref, outputDir string, files map[string]string) error {
-	tablesCSV, err := QueryCSV(townRoot, fmt.Sprintf("USE `%s`; SHOW TABLES AS OF '%s'", db, ref))
+	tablesCSV, err := reconciliationQueryCSV(townRoot, fmt.Sprintf("USE `%s`; SHOW TABLES AS OF '%s'", db, ref))
 	if err != nil {
 		return err
 	}
@@ -108,7 +113,7 @@ func exportDoltRevision(townRoot, db, label, ref, outputDir string, files map[st
 		return err
 	}
 	for _, table := range tables {
-		data, err := QueryJSON(townRoot, fmt.Sprintf("USE `%s`; SELECT * FROM `%s` AS OF '%s'", db, table, ref))
+		data, err := reconciliationQueryJSON(townRoot, fmt.Sprintf("USE `%s`; SELECT * FROM `%s` AS OF '%s'", db, table, ref))
 		if err != nil {
 			return fmt.Errorf("exporting table %s: %w", table, err)
 		}
@@ -116,7 +121,7 @@ func exportDoltRevision(townRoot, db, label, ref, outputDir string, files map[st
 			return err
 		}
 	}
-	history, err := QueryJSON(townRoot, fmt.Sprintf("USE `%s`; SELECT * FROM dolt_log('%s')", db, ref))
+	history, err := reconciliationQueryJSON(townRoot, fmt.Sprintf("USE `%s`; SELECT * FROM dolt_log('%s')", db, ref))
 	if err != nil {
 		return fmt.Errorf("exporting commit history: %w", err)
 	}
