@@ -53,6 +53,25 @@ func TestPlanDispatch(t *testing.T) {
 	}
 }
 
+func TestPlanDispatchExactReservationDoesNotConsumeSpawnCapacity(t *testing.T) {
+	ready := []PendingBead{
+		{ID: "rig-first", Context: &SlingContextFields{TargetRig: "gastown"}},
+		{ID: "reserved", Context: &SlingContextFields{TargetRig: "gastown", TargetAgent: "gastown/polecats/garnet"}},
+		{ID: "rig-last", Context: &SlingContextFields{TargetRig: "gastown"}},
+	}
+
+	plan := PlanDispatch(0, 3, ready)
+	if len(plan.ToDispatch) != 1 || plan.ToDispatch[0].ID != "reserved" {
+		t.Fatalf("ToDispatch = %#v, want only exact reservation", plan.ToDispatch)
+	}
+	if plan.Skipped != 2 {
+		t.Fatalf("Skipped = %d, want 2", plan.Skipped)
+	}
+	if plan.Reason != "reservation" {
+		t.Fatalf("Reason = %q, want reservation", plan.Reason)
+	}
+}
+
 func TestFilterCircuitBroken(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -166,6 +185,7 @@ func TestReconstructFromContext(t *testing.T) {
 	ctx := &SlingContextFields{
 		WorkBeadID:  "bead-123",
 		TargetRig:   "prod-rig",
+		TargetAgent: "prod-rig/polecats/garnet",
 		Formula:     "mol-polecat-work",
 		Args:        "do stuff",
 		Vars:        "x=1\ny=2",
@@ -187,6 +207,9 @@ func TestReconstructFromContext(t *testing.T) {
 	}
 	if params.RigName != "prod-rig" {
 		t.Errorf("RigName: got %q, want %q", params.RigName, "prod-rig")
+	}
+	if params.TargetAgent != "prod-rig/polecats/garnet" {
+		t.Errorf("TargetAgent: got %q, want %q", params.TargetAgent, "prod-rig/polecats/garnet")
 	}
 	if params.FormulaName != "mol-polecat-work" {
 		t.Errorf("FormulaName: got %q, want %q", params.FormulaName, "mol-polecat-work")
