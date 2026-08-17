@@ -114,7 +114,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 		return nil, polecatCapacitySnapshot{}, err
 	}
 	if max <= 0 {
-		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, nil
+		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}, nil
 	}
 
 	lock, err := acquirePolecatAdmissionLock(townRoot)
@@ -179,7 +179,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 	if err != nil {
 		return polecatCapacitySnapshot{}, err
 	}
-	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}
+	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}
 	if max <= 0 {
 		return snapshot, nil
 	}
