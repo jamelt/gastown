@@ -23,8 +23,13 @@ type polecatInventoryItem struct {
 	Branch         string
 	SessionRunning bool
 	SessionName    string
-	Disposition    polecat.WorkstateDisposition
+	// CleanupProvenance explains when legacy missing metadata was classified
+	// from current read-only evidence instead of a persisted cleanup_status.
+	CleanupProvenance string
+	Disposition       polecat.WorkstateDisposition
 }
+
+const legacyCleanupReadOnlyProvenance = "legacy-missing:session-dormant+work-unassigned+worktree+hook+mr"
 
 type polecatActiveWorkEvidence struct {
 	BlocksCleanup        bool
@@ -135,6 +140,22 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 
 	input.State = item.State
 	item.Disposition = polecat.DecideWorkstate(input)
+	return item
+}
+
+// applyLegacyCleanupCompatibility replaces the metadata-only inventory verdict
+// with a Manager assessment that gathered live hook, worktree, branch, and MR
+// evidence. Only dormant, unassigned entries with an actual legacy agent bead
+// are eligible. Missing beads, live sessions, and active work remain fail-closed.
+func applyLegacyCleanupCompatibility(item polecatInventoryItem, fields *beads.AgentFields, activeWorkEvidence polecatActiveWorkEvidence, assessed polecat.WorkstateDisposition) polecatInventoryItem {
+	if fields == nil || strings.TrimSpace(fields.CleanupStatus) != "" || item.SessionRunning || activeWorkEvidence.BlocksCleanup {
+		return item
+	}
+	if item.State != polecat.StateIdle && item.State != polecat.StateDone {
+		return item
+	}
+	item.Disposition = assessed
+	item.CleanupProvenance = legacyCleanupReadOnlyProvenance
 	return item
 }
 

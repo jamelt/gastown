@@ -422,6 +422,54 @@ func TestReconcileCleanupStatusIfSafe(t *testing.T) {
 	}
 }
 
+func TestReconcileLegacyMissingCleanupStatusIfSafeIsIdempotent(t *testing.T) {
+	status := &RecoveryStatus{
+		CleanupStatus:     "",
+		CleanupProvenance: legacyCleanupReadOnlyProvenance,
+		Verdict:           polecat.WorkstateVerdictSafeToNuke,
+		Branch:            "polecat/legacy/completed",
+		MQStatus:          "submitted",
+	}
+	fields := &beads.AgentFields{AgentState: string(beads.AgentStateDone)}
+	updater := &fakeCleanupUpdater{}
+	reconcileCleanupStatusIfSafe(status, updater, "gt-gastown-polecat-legacy", &polecat.Polecat{State: polecat.StateDone}, fields)
+	if updater.calls != 1 || status.CleanupStatus != polecat.CleanupClean || !status.Reconciled {
+		t.Fatalf("first reconcile = status %+v updater %+v", status, updater)
+	}
+
+	fields.CleanupStatus = string(polecat.CleanupClean)
+	status.Reconciled = false
+	reconcileCleanupStatusIfSafe(status, updater, "gt-gastown-polecat-legacy", &polecat.Polecat{State: polecat.StateDone}, fields)
+	if updater.calls != 1 {
+		t.Fatalf("idempotent reconcile wrote again: calls=%d", updater.calls)
+	}
+}
+
+func TestCanUseLegacyMissingCleanupEvidenceRequiresAllReadOnlyPredicates(t *testing.T) {
+	p := &polecat.Polecat{State: polecat.StateDone}
+	fields := &beads.AgentFields{AgentState: string(beads.AgentStateDone)}
+	if !canUseLegacyMissingCleanupEvidence(p, fields, true, true, true, true, true) {
+		t.Fatal("complete dormant legacy polecat with clean evidence should reconcile")
+	}
+	tests := []struct {
+		name                                   string
+		session, work, hook, activeMR, gitSafe bool
+	}{
+		{name: "live session", work: true, hook: true, activeMR: true, gitSafe: true},
+		{name: "active work", session: true, hook: true, activeMR: true, gitSafe: true},
+		{name: "hook uncertainty", session: true, work: true, activeMR: true, gitSafe: true},
+		{name: "pending mr", session: true, work: true, hook: true, gitSafe: true},
+		{name: "dirty or unknown git", session: true, work: true, hook: true, activeMR: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if canUseLegacyMissingCleanupEvidence(p, fields, tt.session, tt.work, tt.hook, tt.activeMR, tt.gitSafe) {
+				t.Fatal("unsafe legacy evidence was accepted")
+			}
+		})
+	}
+}
+
 func TestReconcileCleanupStatusIfSafe_FailsClosed(t *testing.T) {
 	status := &RecoveryStatus{
 		CleanupStatus: polecat.CleanupUnpushed,

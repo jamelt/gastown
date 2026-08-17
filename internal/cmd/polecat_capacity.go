@@ -12,7 +12,9 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -221,12 +223,19 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		if err != nil {
 			return snapshot, fmt.Errorf("listing active polecat work for %s capacity: %w", rigName, err)
 		}
+		inventoryManager := polecat.NewManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), tmuxClient)
 		prefix := beads.GetPrefixForRig(townRoot, rigName)
 		for _, name := range polecatNames {
 			agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, name)
 			issue := agents[agentID]
 			fields := parsePolecatAgentFields(issue)
-			applyAgentFieldsToCapacitySnapshot(&snapshot, rigName, name, fields, activeWork[name], sessions)
+			workEvidence := assessPolecatAssignedIssueWork(activeWork[name])
+			item := buildPolecatInventoryItemFromEvidence(rigName, name, fields, workEvidence, sessions)
+			if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" && !item.SessionRunning && !workEvidence.BlocksCleanup {
+				assessment := inventoryManager.WorkstateDispositionForPolecat(name, item.State, item.Issue)
+				item = applyLegacyCleanupCompatibility(item, fields, workEvidence, assessment)
+			}
+			applyWorkstateDispositionToCapacitySnapshot(&snapshot, item.State, item.Disposition)
 		}
 	}
 

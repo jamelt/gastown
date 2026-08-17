@@ -162,6 +162,68 @@ func TestBuildPolecatInventoryItemActiveWorkLookupErrorFailsClosed(t *testing.T)
 	}
 }
 
+func TestApplyLegacyCleanupCompatibilityUpgradeAndRestart(t *testing.T) {
+	fields := &beads.AgentFields{AgentState: string(beads.AgentStateDone)}
+	assessed := polecat.DecideWorkstate(polecat.WorkstateInput{
+		State:         polecat.StateDone,
+		CleanupStatus: polecat.CleanupClean,
+		Branch:        "polecat/legacy/completed",
+	})
+
+	classify := func(sessions polecatSessionSet) polecatInventoryItem {
+		item := buildPolecatInventoryItemFromEvidence("gastown", "legacy", fields, polecatActiveWorkEvidence{}, sessions)
+		return applyLegacyCleanupCompatibility(item, fields, polecatActiveWorkEvidence{}, assessed)
+	}
+
+	// The legacy metadata-only classifier is fail-closed but no longer reserves
+	// capacity solely because the optional field is absent.
+	before := buildPolecatInventoryItemFromEvidence("gastown", "legacy", fields, polecatActiveWorkEvidence{}, nil)
+	if !before.Disposition.NeedsRecovery || before.Disposition.CountsTowardCapacity {
+		t.Fatalf("legacy pre-compat disposition = %+v", before.Disposition)
+	}
+
+	for _, phase := range []string{"after-upgrade", "after-daemon-restart"} {
+		t.Run(phase, func(t *testing.T) {
+			got := classify(newPolecatSessionSet(nil))
+			if !got.Disposition.Reusable || got.Disposition.Verdict != polecat.WorkstateVerdictSafeToNuke {
+				t.Fatalf("disposition = %+v, want reusable after read-only reconciliation", got.Disposition)
+			}
+			if got.CleanupProvenance != legacyCleanupReadOnlyProvenance {
+				t.Fatalf("cleanup provenance = %q", got.CleanupProvenance)
+			}
+		})
+	}
+}
+
+func TestApplyLegacyCleanupCompatibilityFailsClosed(t *testing.T) {
+	legacyDone := &beads.AgentFields{AgentState: string(beads.AgentStateDone)}
+	cleanAssessment := polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: polecat.CleanupClean})
+	tests := []struct {
+		name       string
+		fields     *beads.AgentFields
+		work       polecatActiveWorkEvidence
+		sessions   polecatSessionSet
+		assessment polecat.WorkstateDisposition
+	}{
+		{name: "missing agent bead", fields: nil, assessment: cleanAssessment},
+		{name: "live session", fields: legacyDone, sessions: polecatSessionSet{polecatSessionKey("gastown", "legacy"): "gt-legacy"}, assessment: cleanAssessment},
+		{name: "active work", fields: legacyDone, work: polecatActiveWorkEvidence{BlocksCleanup: true, RequiresRestart: true, CountsTowardCapacity: true, Blocker: "assigned_work=gt-open status=open", AssignedIssue: "gt-open"}, assessment: cleanAssessment},
+		{name: "hooked work evidence", fields: legacyDone, assessment: polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: polecat.CleanupClean, HookBead: "gt-open"})},
+		{name: "dirty worktree evidence", fields: legacyDone, assessment: polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: "", GitDirty: true})},
+		{name: "uncertain worktree evidence", fields: legacyDone, assessment: polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: "", GitCheckFailed: true})},
+		{name: "pending mr evidence", fields: legacyDone, assessment: polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: polecat.CleanupClean, ActiveMRBlocker: "active_mr=gt-mr status=open"})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := buildPolecatInventoryItemFromEvidence("gastown", "legacy", tt.fields, tt.work, tt.sessions)
+			got := applyLegacyCleanupCompatibility(item, tt.fields, tt.work, tt.assessment)
+			if got.Disposition.Reusable {
+				t.Fatalf("disposition unexpectedly reusable: %+v", got.Disposition)
+			}
+		})
+	}
+}
+
 func TestPolecatSummaryIssueRankPrefersActiveWork(t *testing.T) {
 	ordered := []*beads.Issue{
 		{ID: "hook", Status: string(beads.IssueStatusHooked)},
