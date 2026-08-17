@@ -72,7 +72,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 15
+version = 16
 
 [vars]
 [vars.wisp_type]
@@ -690,14 +690,14 @@ gt escalate -s CRITICAL "Dolt server is down"
 **Commit bloat (commits > 50k in any DB):**
 The compactor dog (`mol-dog-compactor`) may have failed. Dispatch a compactor:
 ```bash
-gt dog dispatch --formula mol-dog-compactor --var db=<db_name>
+gt sling mol-dog-compactor deacon/dogs --var db=<db_name>
 ```
 If no idle dogs, log for next cycle.
 
 **Stale backups:**
 The backup dog (`mol-dog-backup`) may have failed. Dispatch a backup:
 ```bash
-gt dog dispatch --formula mol-dog-backup
+gt sling mol-dog-backup deacon/dogs
 ```
 
 **Zombie processes:**
@@ -1176,7 +1176,9 @@ The Deacon runs in a Claude session with finite context. Check if approaching th
 gt context --usage
 ```
 
-If context is high (>80%), prepare for handoff:
+The command reports `Handoff recommended: yes` when usage crosses the supported
+threshold (`GT_CONTEXT_HANDOFF_THRESHOLD`, 80% by default). If it recommends a
+handoff, prepare for one:
 - Summarize current state
 - Note any pending work
 - Write handoff to molecule state
