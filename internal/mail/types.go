@@ -46,6 +46,22 @@ const (
 	TypeReply MessageType = "reply"
 )
 
+// ResponsePolicy declares whether a mail message expects a semantic response.
+// The empty value preserves compatibility by deriving the policy from Type.
+// Persisting explicit policy in mail metadata avoids subject-text heuristics.
+type ResponsePolicy string
+
+const (
+	// ResponsePolicyAuto derives actionability from the structured message type.
+	ResponsePolicyAuto ResponsePolicy = ""
+
+	// ResponsePolicyRequired schedules response reminders until the thread is satisfied.
+	ResponsePolicyRequired ResponsePolicy = "required"
+
+	// ResponsePolicyNone marks acknowledgements, receipts, and terminal notices as final.
+	ResponsePolicyNone ResponsePolicy = "none"
+)
+
 // Delivery specifies how a message is delivered to the recipient.
 type Delivery string
 
@@ -88,6 +104,10 @@ type Message struct {
 
 	// Type indicates the message type (task, escalation, scavenge, notification, reply).
 	Type MessageType `json:"type"`
+
+	// ResponsePolicy controls whether delivery schedules a response reminder.
+	// The empty value derives the policy from Type for backward compatibility.
+	ResponsePolicy ResponsePolicy `json:"response_policy,omitempty"`
 
 	// Delivery specifies how the message is delivered (queue or interrupt).
 	// Queue: agent checks periodically. Interrupt: inject into session.
@@ -158,17 +178,18 @@ func NewMessage(from, to, subject, body string) *Message {
 // NewReplyMessage creates a reply message that inherits the thread from the original.
 func NewReplyMessage(from, to, subject, body string, original *Message) *Message {
 	return &Message{
-		ID:        GenerateID(),
-		From:      from,
-		To:        to,
-		Subject:   subject,
-		Body:      body,
-		Timestamp: time.Now(),
-		Read:      false,
-		Priority:  PriorityNormal,
-		Type:      TypeReply,
-		ThreadID:  original.ThreadID,
-		ReplyTo:   original.ID,
+		ID:             GenerateID(),
+		From:           from,
+		To:             to,
+		Subject:        subject,
+		Body:           body,
+		Timestamp:      time.Now(),
+		Read:           false,
+		Priority:       PriorityNormal,
+		Type:           TypeReply,
+		ResponsePolicy: ResponsePolicyNone,
+		ThreadID:       original.ThreadID,
+		ReplyTo:        original.ID,
 	}
 }
 
@@ -309,15 +330,16 @@ type BeadsMessage struct {
 	Wisp        bool      `json:"wisp,omitempty"` // Ephemeral message (not synced to git)
 
 	// Cached parsed values (populated by ParseLabels)
-	sender    string
-	threadID  string
-	replyTo   string
-	msgType   string
-	cc        []string   // CC recipients
-	queue     string     // Queue name (for queue messages)
-	channel   string     // Channel name (for broadcast messages)
-	claimedBy string     // Who claimed the queue message
-	claimedAt *time.Time // When the queue message was claimed
+	sender         string
+	threadID       string
+	replyTo        string
+	msgType        string
+	responsePolicy string
+	cc             []string   // CC recipients
+	queue          string     // Queue name (for queue messages)
+	channel        string     // Channel name (for broadcast messages)
+	claimedBy      string     // Who claimed the queue message
+	claimedAt      *time.Time // When the queue message was claimed
 	// Two-phase delivery metadata
 	deliveryState   string
 	deliveryAckedBy string
@@ -331,6 +353,7 @@ func (bm *BeadsMessage) ParseLabels() {
 	bm.threadID = ""
 	bm.replyTo = ""
 	bm.msgType = ""
+	bm.responsePolicy = ""
 	bm.cc = nil
 	bm.queue = ""
 	bm.channel = ""
@@ -349,6 +372,8 @@ func (bm *BeadsMessage) ParseLabels() {
 			bm.replyTo = strings.TrimPrefix(label, "reply-to:")
 		} else if strings.HasPrefix(label, "msg-type:") {
 			bm.msgType = strings.TrimPrefix(label, "msg-type:")
+		} else if strings.HasPrefix(label, "response-policy:") {
+			bm.responsePolicy = strings.TrimPrefix(label, "response-policy:")
 		} else if strings.HasPrefix(label, "cc:") {
 			bm.cc = append(bm.cc, strings.TrimPrefix(label, "cc:"))
 		} else if strings.HasPrefix(label, "queue:") {
@@ -424,6 +449,7 @@ func (bm *BeadsMessage) ToMessage() *Message {
 		Read:            bm.Status == "closed" || bm.HasLabel("read"),
 		Priority:        priority,
 		Type:            msgType,
+		ResponsePolicy:  ParseResponsePolicy(bm.responsePolicy),
 		ThreadID:        bm.threadID,
 		ReplyTo:         bm.replyTo,
 		Wisp:            bm.Wisp,
@@ -536,6 +562,17 @@ func ParseMessageType(s string) MessageType {
 		return MessageType(s)
 	default:
 		return TypeNotification
+	}
+}
+
+// ParseResponsePolicy parses persisted response policy metadata. Unknown values
+// safely fall back to automatic type-based classification.
+func ParseResponsePolicy(s string) ResponsePolicy {
+	switch ResponsePolicy(s) {
+	case ResponsePolicyRequired, ResponsePolicyNone:
+		return ResponsePolicy(s)
+	default:
+		return ResponsePolicyAuto
 	}
 }
 
