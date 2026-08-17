@@ -125,6 +125,10 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			}
 			return result, fmt.Errorf("cannot sling to %s rig %q\n%s %s", reason, params.RigName, undoCmd, params.RigName)
 		}
+		if err := verifyRigDoltLineage(townRoot, params.RigName); err != nil {
+			result.ErrMsg = err.Error()
+			return result, err
+		}
 	}
 
 	// 1. Get bead info + status check
