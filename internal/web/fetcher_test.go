@@ -14,7 +14,24 @@ import (
 	"github.com/steveyegge/gastown/internal/activity"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+func TestDashboardTmuxSocketUsesInheritedCanonicalSocket(t *testing.T) {
+	originalSocket := tmux.GetDefaultSocket()
+	tmux.SetDefaultSocket("")
+	t.Cleanup(func() {
+		tmux.SetDefaultSocket(originalSocket)
+	})
+	t.Setenv("GT_TMUX_SOCKET", "gastown-ops-da43e7")
+
+	if got := dashboardTmuxSocket(t.TempDir()); got != "gastown-ops-da43e7" {
+		t.Fatalf("dashboardTmuxSocket() = %q, want inherited canonical socket", got)
+	}
+	if got := tmux.GetDefaultSocket(); got != "gastown-ops-da43e7" {
+		t.Fatalf("tmux default socket = %q, want inherited canonical socket", got)
+	}
+}
 
 func TestCalculateWorkStatus(t *testing.T) {
 	tests := []struct {

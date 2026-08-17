@@ -191,6 +191,7 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	tmuxSocket := dashboardTmuxSocket(townRoot)
 
 	webCfg := config.DefaultWebTimeoutsConfig()
 	workerCfg := config.DefaultWorkerStatusConfig()
@@ -218,7 +219,7 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 		townRoot:                townRoot,
 		townBeads:               filepath.Join(townRoot, ".beads"),
 		registry:                registry,
-		tmuxSocket:              tmux.GetDefaultSocket(),
+		tmuxSocket:              tmuxSocket,
 		cmdTimeout:              config.ParseDurationOrDefault(webCfg.CmdTimeout, 15*time.Second),
 		ghCmdTimeout:            config.ParseDurationOrDefault(webCfg.GhCmdTimeout, 10*time.Second),
 		tmuxCmdTimeout:          config.ParseDurationOrDefault(webCfg.TmuxCmdTimeout, 2*time.Second),
@@ -227,6 +228,28 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 		heartbeatFreshThreshold: config.ParseDurationOrDefault(workerCfg.HeartbeatFreshThreshold, 5*time.Minute),
 		mayorActiveThreshold:    config.ParseDurationOrDefault(workerCfg.MayorActiveThreshold, 5*time.Minute),
 	}, nil
+}
+
+// dashboardTmuxSocket resolves the town socket before the fetcher caches it.
+// Cobra normally initializes the package default in persistentPreRun, but the
+// dashboard is also constructed by embedded entry points where that hook may
+// not have run. Prefer the explicit environment inherited by supervised
+// dashboard processes, then initialize the registry as a final fallback.
+func dashboardTmuxSocket(townRoot string) string {
+	if socket := tmux.GetDefaultSocket(); socket != "" {
+		return socket
+	}
+
+	socket := strings.TrimSpace(os.Getenv("GT_TMUX_SOCKET"))
+	if socket != "" && socket != "default" && socket != "auto" {
+		tmux.SetDefaultSocket(socket)
+		return socket
+	}
+
+	if err := session.InitRegistry(townRoot); err != nil {
+		log.Printf("dashboard: failed to initialize town socket: %v", err)
+	}
+	return tmux.GetDefaultSocket()
 }
 
 // FetchConvoys fetches all open convoys with their activity data.
