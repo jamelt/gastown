@@ -126,6 +126,9 @@ func TestNewMergedMessage(t *testing.T) {
 	if !strings.Contains(msg.Body, "Merge-Commit: abc123") {
 		t.Errorf("Body missing merge commit: %s", msg.Body)
 	}
+	if msg.ResponsePolicy != mail.ResponsePolicyNone {
+		t.Errorf("ResponsePolicy = %q, want none", msg.ResponsePolicy)
+	}
 }
 
 func TestNewMergeFailedMessage(t *testing.T) {
