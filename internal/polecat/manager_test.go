@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,21 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+func initManagerTestBeads(t *testing.T, workDir string) {
+	t.Helper()
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	// The prefix selects the Dolt database. Derive it from this test's unique
+	// temp directory so independent projects never reuse one database and trip
+	// bd's project-identity guard, including under concurrent source test runs.
+	sum := sha256.Sum256([]byte(workDir))
+	prefix := fmt.Sprintf("pt%x", sum[:3])
+	bd := beads.NewIsolatedWithPort(workDir, port)
+	if err := bd.Init(prefix); err != nil {
+		t.Fatalf("bd init with isolated prefix %s: %v", prefix, err)
+	}
+}
 
 func TestHasSubmittableWorkForWorkstateUsesBranchTargetStatus(t *testing.T) {
 	repo := setupManagerSquashPreservedRepo(t)
@@ -1402,12 +1418,7 @@ func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 	// Use real bd if available; fall back to a mock for environments (like
 	// Windows CI) where bd is not installed.
 	if _, err := exec.LookPath("bd"); err == nil {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
-		}
+		initManagerTestBeads(t, mayorRig)
 	} else {
 		installMockBd(t)
 		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
@@ -1752,12 +1763,7 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 	// Use real bd if available; fall back to a mock for environments (like
 	// Windows CI) where bd is not installed.
 	if _, err := exec.LookPath("bd"); err == nil {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
-		}
+		initManagerTestBeads(t, mayorRig)
 	} else {
 		installMockBd(t)
 		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
@@ -1898,12 +1904,7 @@ func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 	// Use real bd if available; fall back to a mock for environments (like
 	// Windows CI) where bd is not installed.
 	if _, err := exec.LookPath("bd"); err == nil {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
-		}
+		initManagerTestBeads(t, mayorRig)
 	} else {
 		installMockBd(t)
 		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
