@@ -152,10 +152,12 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	}
 
 	// Build sling context fields
+	actor := detectActor()
 	fields := &capacity.SlingContextFields{
 		Version:    1,
 		WorkBeadID: beadID,
 		TargetRig:  rigName,
+		EnqueuedBy: actor,
 		EnqueuedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if opts.Formula != "" {
@@ -217,7 +219,6 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		}
 	}
 
-	actor := detectActor()
 	_ = events.LogFeed(events.TypeSchedulerEnqueue, actor, events.SchedulerEnqueuePayload(beadID, rigName))
 
 	fmt.Printf("%s Scheduled %s → %s (context: %s)\n", style.Bold.Render("✓"), beadID, rigName, ctxBead.ID)

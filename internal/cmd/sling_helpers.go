@@ -536,6 +536,8 @@ func parseBeadInfo(beadID string, out []byte) (*beadInfo, error) {
 // eliminating the race condition where concurrent writers could overwrite each other's fields.
 type beadFieldUpdates struct {
 	Dispatcher       string   // Agent that dispatched the work
+	DispatchContext  string   // Scheduler context ID that produced this assignment
+	DispatchActor    string   // Agent executing the dispatch transition
 	Args             string   // Natural language instructions
 	Vars             []string // Formula variables (key=value pairs)
 	AttachedMolecule string   // Wisp root ID
@@ -633,6 +635,14 @@ func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpd
 	}
 	if updates.Dispatcher != "" {
 		fields.DispatchedBy = updates.Dispatcher
+	}
+	// DispatchActor marks a complete receipt update. In direct-dispatch mode the
+	// context is intentionally empty, which must clear any stale scheduler ID.
+	if updates.DispatchContext != "" || updates.DispatchActor != "" {
+		fields.DispatchContext = updates.DispatchContext
+	}
+	if updates.DispatchActor != "" {
+		fields.DispatchActor = updates.DispatchActor
 	}
 	if updates.Args != "" {
 		fields.AttachedArgs = updates.Args
