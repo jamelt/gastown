@@ -216,6 +216,39 @@ func TestBuildPinnedBDEnvUsesSelectedConnectionMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildPinnedBDEnvOverridesContributorPlanningRoute(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{
+		"PATH=/usr/bin",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=user.name",
+		"GIT_CONFIG_VALUE_0=Test User",
+	}, beadsDir)
+	got := envMap(env)
+	if got["GIT_CONFIG_COUNT"] != "2" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want 2 in %v", got["GIT_CONFIG_COUNT"], env)
+	}
+	if got["GIT_CONFIG_KEY_0"] != "user.name" || got["GIT_CONFIG_VALUE_0"] != "Test User" {
+		t.Fatalf("existing git config env was not preserved: %v", env)
+	}
+	if got["GIT_CONFIG_KEY_1"] != "beads.role" || got["GIT_CONFIG_VALUE_1"] != "maintainer" {
+		t.Fatalf("pinned env does not suppress contributor planning routing: %v", env)
+	}
+
+	routing := envMap(BuildRoutingBDEnv([]string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=beads.role",
+		"GIT_CONFIG_VALUE_0=contributor",
+	}, beadsDir))
+	if routing["GIT_CONFIG_COUNT"] != "1" || routing["GIT_CONFIG_VALUE_0"] != "contributor" {
+		t.Fatalf("routing env should preserve caller role selection: %v", routing)
+	}
+}
+
 func TestBuildPinnedBDEnvPinsRigDatabaseInsideTown(t *testing.T) {
 	townDir := t.TempDir()
 	beadsDir := filepath.Join(townDir, "minime", ".beads")
