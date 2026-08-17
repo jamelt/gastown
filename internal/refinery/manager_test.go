@@ -230,6 +230,71 @@ func TestManager_StartForkRigDoesNotCreateSession(t *testing.T) {
 	}
 }
 
+func TestManager_ForkRigAllowsExplicitLocalMergeQueue(t *testing.T) {
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigConfig(t, rigPath, `{"upstream_url":"https://github.com/upstream/repo"}`)
+	if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(`{"merge_queue":{"enabled":true}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(&rig.Rig{Name: "testrig", Path: rigPath})
+	if err := mgr.ForkRigStartError(); err != nil {
+		t.Fatalf("explicit local merge queue should allow fork-backed Refinery: %v", err)
+	}
+}
+
+func TestManager_IdentityPreflightFailureDoesNotCreateSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd/tmux scripts use POSIX shell")
+	}
+	setupTestRegistry(t)
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+	for _, dir := range []string{filepath.Join(townRoot, "mayor"), filepath.Join(townRoot, ".beads"), filepath.Join(rigPath, ".beads")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeRigConfig(t, rigPath, `{"beads":{"prefix":"gt"}}`)
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	writeSafetyStopMockTmux(t, binDir, logPath)
+	bdScript := `#!/bin/sh
+if [ "$1" = "--allow-stale" ]; then shift; fi
+case "$1" in
+  version) exit 0 ;;
+  show) echo '[]'; exit 0 ;;
+  create) echo 'identity write refused' >&2; exit 9 ;;
+  *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mgr := NewManager(&rig.Rig{Name: "testrig", Path: rigPath})
+	err := mgr.Start(false, "")
+	if err == nil || !strings.Contains(err.Error(), "identity preflight failed") {
+		t.Fatalf("Start error = %v, want identity preflight failure", err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logBytes), "new-session") {
+		t.Fatalf("manager session started despite identity failure:\n%s", logBytes)
+	}
+}
+
 func TestManager_StartAllowingForkRigStillHonorsSafetyStop(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mock bd/tmux scripts use POSIX shell")

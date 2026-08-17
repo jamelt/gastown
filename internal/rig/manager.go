@@ -574,9 +574,11 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	}
 	fmt.Printf("   ✓ Created mayor clone\n")
 
-	// Check if source repo has tracked .beads/ directory.
-	// If so, we need to initialize the database (it doesn't exist after clone since DB files are gitignored).
+	// Check if the source repo has a tracked .beads/ directory. A usable
+	// manager-worktree database is authoritative and must be preserved; only a
+	// fresh clone whose referenced database is genuinely absent is initialized.
 	sourceBeadsDir := filepath.Join(mayorRigPath, ".beads")
+	sourceDatabaseAuthoritative := false
 	if _, err := os.Stat(sourceBeadsDir); err == nil {
 		// Remove any redirect file that might have been accidentally tracked.
 		// Redirect files are runtime/local config and should not be in git.
@@ -613,7 +615,8 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		// to a new workspace), we still need to run bd init to create the server-side
 		// database and set issue_prefix. Always ensure issue_prefix is set afterward.
 		sourceBdEnv := bdSubprocessEnv(sourceBeadsDir, opts.Name)
-		if !bdDatabaseExists(sourceBeadsDir) {
+		sourceDatabaseAuthoritative = bdDatabaseExists(sourceBeadsDir)
+		if !sourceDatabaseAuthoritative {
 			initArgs := []string{"init"}
 			if opts.BeadsPrefix != "" {
 				initArgs = append(initArgs, "--prefix", opts.BeadsPrefix)
@@ -661,10 +664,10 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// Create server-side database for this rig BEFORE initializing beads.
 	// InitBeads runs bd init --server which writes metadata.json, but the actual
 	// database in .dolt-data/ must exist first for bd config commands to work.
-	if !opts.SkipDoltCheck {
+	if !opts.SkipDoltCheck && !sourceDatabaseAuthoritative {
 		if _, err := exec.LookPath("dolt"); err == nil {
-			if _, _, err := doltserver.InitRig(m.townRoot, opts.Name); err != nil {
-				fmt.Printf("  Warning: Could not create rig database: %v\n", err)
+			if _, _, err := doltserver.InitRig(m.townRoot, opts.Name, opts.BeadsPrefix); err != nil {
+				return nil, fmt.Errorf("creating rig database: %w", err)
 			}
 		}
 	}
@@ -682,18 +685,19 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// writes both fields so bd connects to the correct centralized database.
 	// This must happen BEFORE setting issue_prefix below, so bd connects to
 	// the correct server-side database (rigName, not beads_<prefix>).
-	if err := doltserver.EnsureMetadata(m.townRoot, opts.Name); err != nil {
-		// Non-fatal: daemon's EnsureAllMetadata self-heals on next startup,
-		// or user can run gt doctor --fix to repair manually.
-		fmt.Printf("  Warning: Could not set Dolt server metadata: %v\n", err)
-		fmt.Printf("  Run 'gt doctor --fix' to repair, or it will self-heal on next daemon start.\n")
+	if !sourceDatabaseAuthoritative {
+		if err := doltserver.EnsureMetadata(m.townRoot, opts.Name); err != nil {
+			return nil, fmt.Errorf("setting rig database metadata: %w", err)
+		}
 	}
 
 	// Safety-net: drop orphan databases that may have been created by bd init.
 	// InitBeads already does this, but repeat here in case EnsureMetadata path
 	// diverges, and verify post-condition: no orphan should remain (gh#3562).
-	if err := dropRigOrphanDBs(m.townRoot, opts.BeadsPrefix, opts.Name); err != nil {
-		return nil, fmt.Errorf("rig init left a duplicate Dolt database: %w", err)
+	if !sourceDatabaseAuthoritative {
+		if err := dropRigOrphanDBs(m.townRoot, opts.BeadsPrefix, opts.Name); err != nil {
+			return nil, fmt.Errorf("rig init left a duplicate Dolt database: %w", err)
+		}
 	}
 
 	// Set issue_prefix on the correct server-side database. bd 1.0+ rejects
@@ -871,11 +875,13 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// Seeding at rig-add time would fork the config, silently shadowing
 	// any future repo-side updates.
 
-	// Create rig-level agent beads (witness, refinery) in rig beads.
-	// Town-level agents (mayor, deacon) are created by gt install in town beads.
-	if err := m.initAgentBeads(rigPath, opts.Name, opts.BeadsPrefix); err != nil {
-		// Non-fatal: log warning but continue
-		fmt.Fprintf(os.Stderr, "  Warning: Could not create agent beads: %v\n", err)
+	// Database identity and all durable rig-local identities must round-trip
+	// before the rig is registered or any managers can be started.
+	if err := m.verifyRigIdentity(rigPath, opts.Name); err != nil {
+		return nil, fmt.Errorf("verifying rig database identity: %w", err)
+	}
+	if err := EnsureRigIdentities(rigPath, opts.Name, opts.BeadsPrefix, opts.GitURL); err != nil {
+		return nil, fmt.Errorf("initializing rig-local identities: %w", err)
 	}
 
 	// Seed patrol molecules for this rig
@@ -900,16 +906,6 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 		BeadsConfig: &config.BeadsConfig{
 			Prefix: opts.BeadsPrefix,
 		},
-	}
-
-	// Post-init identity verification (gas-tc4): verify metadata.json points
-	// to the correct database. This catches identity mismatches caused by bd init
-	// writing the wrong database name, before the rig is considered ready.
-	if err := m.verifyRigIdentity(rigPath, opts.Name); err != nil {
-		// Non-fatal but loud: the rig was created, but identity may be wrong.
-		// gt doctor --fix can repair this.
-		fmt.Fprintf(os.Stderr, "  ⚠ Identity verification warning: %v\n", err)
-		fmt.Fprintf(os.Stderr, "  Run 'gt doctor --fix' to repair if needed.\n")
 	}
 
 	// Persist rigs.json atomically before marking success.
@@ -1139,15 +1135,11 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
 
 	// Check if source repo has tracked .beads/ (cloned into mayor/rig).
-	// If so, create a redirect file instead of a new database.
+	// If so, reconcile the rig container to the authoritative manager DB
+	// instead of initializing or replacing that database.
 	if _, err := os.Stat(mayorRigBeads); err == nil {
-		// Tracked beads exist - create redirect to mayor/rig/.beads
-		if err := os.MkdirAll(beadsDir, 0755); err != nil {
-			return err
-		}
-		redirectPath := filepath.Join(beadsDir, "redirect")
-		if err := os.WriteFile(redirectPath, []byte("mayor/rig/.beads\n"), 0644); err != nil {
-			return fmt.Errorf("creating redirect file: %w", err)
+		if err := beads.ReconcileRigContainerRedirect(rigPath); err != nil {
+			return fmt.Errorf("reconciling rig beads redirect: %w", err)
 		}
 		return nil
 	}
@@ -1268,60 +1260,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 //
 // Agent beads track lifecycle state for ZFC compliance (gt-h3hak, gt-pinkq).
 func (m *Manager) initAgentBeads(rigPath, rigName, prefix string) error {
-	// Rig-level agents go in rig beads with rig prefix (per docs/architecture.md).
-	// Town-level agents (Mayor, Deacon) are created by gt install in town beads.
-	// Use ResolveBeadsDir to follow redirect files for tracked beads.
-	rigBeadsDir := beads.ResolveBeadsDir(rigPath)
-	bd := beads.NewWithBeadsDir(rigPath, rigBeadsDir)
-
-	// Define rig-level agents to create
-	type agentDef struct {
-		id       string
-		roleType string
-		rig      string
-		desc     string
-	}
-
-	// Create rig-specific agents using rig prefix in rig beads.
-	// Format: <prefix>-<rig>-<role> (e.g., pi-pixelforge-witness)
-	agents := []agentDef{
-		{
-			id:       beads.WitnessBeadIDWithPrefix(prefix, rigName),
-			roleType: "witness",
-			rig:      rigName,
-			desc:     fmt.Sprintf("Witness for %s - monitors polecat health and progress.", rigName),
-		},
-		{
-			id:       beads.RefineryBeadIDWithPrefix(prefix, rigName),
-			roleType: "refinery",
-			rig:      rigName,
-			desc:     fmt.Sprintf("Refinery for %s - processes merge queue.", rigName),
-		},
-	}
-
-	// Note: Mayor and Deacon are now created by gt install in town beads.
-
-	for _, agent := range agents {
-		// Check if already exists
-		if _, err := bd.Show(agent.id); err == nil {
-			continue // Already exists
-		}
-
-		// Note: RoleBead field removed - role definitions are now config-based
-		fields := &beads.AgentFields{
-			RoleType:   agent.roleType,
-			Rig:        agent.rig,
-			AgentState: "idle",
-			HookBead:   "",
-		}
-
-		if _, err := bd.CreateAgentBead(agent.id, agent.desc, fields); err != nil {
-			return fmt.Errorf("creating %s: %w", agent.id, err)
-		}
-		fmt.Printf("   ✓ Created agent bead: %s\n", agent.id)
-	}
-
-	return nil
+	return EnsureRigIdentities(rigPath, rigName, prefix, "")
 }
 
 // ensureGitignoreEntry adds an entry to .gitignore if it doesn't already exist.

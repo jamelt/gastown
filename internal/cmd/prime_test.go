@@ -996,6 +996,27 @@ func TestOutputAutonomousDirectiveForkRigAvoidsMergeQueueGuidance(t *testing.T) 
 	}
 }
 
+func TestOutputAutonomousDirectiveForkRigWithLocalMergeQueueUsesDone(t *testing.T) {
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"upstream_url":"https://github.com/upstream/repo"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(`{"merge_queue":{"enabled":true}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	output := captureStdout(t, func() {
+		outputAutonomousDirective(RoleContext{Role: RolePolecat, Rig: "myrig", TownRoot: townRoot, Polecat: "scout"}, &beads.Issue{ID: "gt-test", Title: "test"}, false)
+	})
+	if !strings.Contains(output, "gt done") || strings.Contains(output, "FORK-BACKED RIG") {
+		t.Fatalf("explicit local merge queue directive mismatch:\n%s", output)
+	}
+}
+
 func TestOutputMoleculeWorkflowForkRigOverridesFormulaMergeQueueReminder(t *testing.T) {
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "myrig"), 0o755); err != nil {
