@@ -439,7 +439,15 @@ func (f *LiveConvoyFetcher) getTrackedIssuesBatch(convoyIDs []string) (map[strin
 		return result, nil
 	}
 
-	args := append([]string{"dep", "list"}, convoyIDs...)
+	// bd has two dep-list code paths: one ID uses the legacy joined lookup,
+	// which drops cross-database targets, while multiple IDs use the raw
+	// relationship batch lookup. Repeat a lone ID to retain authoritative
+	// cross-rig relationships after the active convoy set drains to one.
+	queryIDs := convoyIDs
+	if len(queryIDs) == 1 {
+		queryIDs = []string{queryIDs[0], queryIDs[0]}
+	}
+	args := append([]string{"dep", "list"}, queryIDs...)
 	args = append(args, "-t", "tracks", "--json")
 	stdout, err := f.runBdCmd(f.townRoot, args...)
 	if err != nil {

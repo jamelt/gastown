@@ -751,6 +751,47 @@ printf '%%s' '[{"issue_id":"hq-cv-a","depends_on_id":"external:trader:trader-a"}
 	}
 }
 
+func TestGetTrackedIssuesBatchForcesBatchModeForOneConvoy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based command test")
+	}
+
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	argsPath := filepath.Join(binDir, "dep-args")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s' "$*" > %q
+printf '%%s' '[{"issue_id":"hq-cv-only","depends_on_id":"external:trader:trader-only"}]'
+`, argsPath)
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	withMayorFetcherHooks(t, nil, func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
+		if name != "bd" || len(args) < 3 || args[0] != "show" {
+			t.Fatalf("unexpected detail command: %s %v", name, args)
+		}
+		return bytes.NewBufferString(`[{"id":"trader-only","title":"Only","status":"open"}]`), nil
+	})
+
+	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath}
+	tracked, err := f.getTrackedIssuesBatch([]string{"hq-cv-only"})
+	if err != nil {
+		t.Fatalf("getTrackedIssuesBatch: %v", err)
+	}
+	if got := tracked["hq-cv-only"]; len(got) != 1 || got[0].ID != "trader-only" {
+		t.Fatalf("tracked hq-cv-only = %#v", got)
+	}
+
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read dependency args: %v", err)
+	}
+	if got, want := string(args), "dep list hq-cv-only hq-cv-only -t tracks --json"; got != want {
+		t.Fatalf("dependency args = %q, want %q", got, want)
+	}
+}
+
 func withMayorFetcherHooks(t *testing.T, sessionEnv func(sessionName, key string) (string, error), runCmdFunc func(time.Duration, string, ...string) (*bytes.Buffer, error)) {
 	t.Helper()
 
