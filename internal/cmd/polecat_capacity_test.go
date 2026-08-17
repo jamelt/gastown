@@ -424,6 +424,21 @@ func TestCapacitySnapshotRecoveryBlockedDoesNotAlwaysConsumeFreeCapacity(t *test
 	}
 }
 
+func TestCapacitySnapshotLegacyMissingCleanupCannotExhaustScheduler(t *testing.T) {
+	snapshot := polecatCapacitySnapshot{Max: 3}
+	for i := 0; i < 36; i++ {
+		item := buildPolecatInventoryItem("gastown", fmt.Sprintf("legacy-%d", i), &beads.AgentFields{
+			AgentState: string(beads.AgentStateDone),
+		}, nil, nil)
+		applyWorkstateDispositionToCapacitySnapshot(&snapshot, item.State, item.Disposition)
+	}
+	snapshot.Free = snapshot.Max - snapshot.occupied()
+
+	if snapshot.RecoveryBlocked != 36 || snapshot.capacityUsed != 0 || snapshot.Free != 3 {
+		t.Fatalf("snapshot = %+v, want 36 recovery-visible legacy entries without capacity deadlock", snapshot)
+	}
+}
+
 func TestPrintDryRunPlanUsesCapacitySnapshot(t *testing.T) {
 	out := captureStdout(t, func() {
 		printDryRunPlan(capacity.DispatchPlan{

@@ -230,10 +230,14 @@ Used by the Witness to determine appropriate cleanup action:
 
 This prevents accidental data loss when cleaning up dormant polecats.
 The Witness should escalate NEEDS_RECOVERY and NEEDS_MQ_SUBMIT cases to the Mayor.
+Use --reconcile-cleanup to persist cleanup_status=clean only after current
+session, assignment, hook, worktree, and MR evidence proves a dormant legacy
+or stale entry is safe. Repeating the command is idempotent.
 
 Examples:
   gt polecat check-recovery greenplace/Toast
-  gt polecat check-recovery greenplace/Toast --json`,
+	gt polecat check-recovery greenplace/Toast --json
+	gt polecat check-recovery greenplace/Toast --reconcile-cleanup --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPolecatCheckRecovery,
 }
@@ -349,7 +353,7 @@ func init() {
 
 	// Check-recovery flags
 	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryJSON, "json", false, "Output as JSON")
-	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryReconcileCleanup, "reconcile-cleanup", false, "Safely rewrite stale dirty cleanup_status to clean when live recovery predicates prove no work is at risk")
+	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryReconcileCleanup, "reconcile-cleanup", false, "Safely backfill missing or stale cleanup_status when live recovery predicates prove no work is at risk")
 
 	// Stale flags
 	polecatStaleCmd.Flags().BoolVar(&polecatStaleJSON, "json", false, "Output as JSON")
@@ -388,6 +392,7 @@ type PolecatListItem struct {
 	State                polecat.State `json:"state"`
 	Issue                string        `json:"issue,omitempty"`
 	CleanupStatus        string        `json:"cleanup_status,omitempty"`
+	CleanupProvenance    string        `json:"cleanup_provenance,omitempty"`
 	ActiveMR             string        `json:"active_mr,omitempty"`
 	Branch               string        `json:"branch,omitempty"`
 	Verdict              string        `json:"verdict,omitempty"`
@@ -492,6 +497,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 
 	for _, r := range rigs {
 		bd := beads.New(r.Path)
+		inventoryManager := polecat.NewManager(r, git.NewGit(r.Path), t)
 
 		polecatNames, err := listPolecatDirectoryNames(r.Path)
 		if err != nil {
@@ -514,9 +520,13 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		for _, name := range polecatNames {
 			agentBeadID := polecatBeadIDForRig(r, r.Name, name)
 			fields := parsePolecatAgentFields(agents[agentBeadID])
-			item := buildPolecatInventoryItem(r.Name, name, fields, activeWork[name], sessions)
+			workEvidence := assessPolecatAssignedIssueWork(activeWork[name])
+			item := buildPolecatInventoryItemFromEvidence(r.Name, name, fields, workEvidence, sessions)
 			if activeWorkErr != nil {
 				item = buildPolecatInventoryItemFromEvidence(r.Name, name, fields, polecatActiveWorkLookupError(activeWorkErr), sessions)
+			} else if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" && !item.SessionRunning && !workEvidence.BlocksCleanup {
+				assessment := inventoryManager.WorkstateDispositionForPolecat(name, item.State, item.Issue)
+				item = applyLegacyCleanupCompatibility(item, fields, workEvidence, assessment)
 			}
 			disposition := item.Disposition
 			state := effectivePolecatState(PolecatListItem{
@@ -531,6 +541,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 				State:                state,
 				Issue:                item.Issue,
 				CleanupStatus:        item.CleanupStatus,
+				CleanupProvenance:    item.CleanupProvenance,
 				ActiveMR:             item.ActiveMR,
 				Branch:               item.Branch,
 				Verdict:              disposition.Verdict,
@@ -618,6 +629,9 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			details := "reuse: " + p.ReuseStatus
 			if p.CleanupStatus != "" {
 				details += " cleanup=" + p.CleanupStatus
+			}
+			if p.CleanupProvenance != "" {
+				details += " cleanup_source=" + p.CleanupProvenance
 			}
 			if p.ActiveMR != "" {
 				details += " active_mr=" + p.ActiveMR
@@ -1012,6 +1026,7 @@ type RecoveryStatus struct {
 	Rig                  string                `json:"rig"`
 	Polecat              string                `json:"polecat"`
 	CleanupStatus        polecat.CleanupStatus `json:"cleanup_status"`
+	CleanupProvenance    string                `json:"cleanup_provenance,omitempty"`
 	NeedsRecovery        bool                  `json:"needs_recovery"`
 	Verdict              string                `json:"verdict"` // SAFE_TO_NUKE, PENDING_MR, NEEDS_RECOVERY, or NEEDS_MQ_SUBMIT
 	Reason               string                `json:"reason,omitempty"`
@@ -1064,6 +1079,8 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	workTerminal := beadTerminal
 	targetRefs, targetRefLookupFailed := recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
 	input := polecat.WorkstateInput{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch}
+	legacyHookSafe := false
+	legacyActiveMRSafe := false
 	var gitState *GitState
 	var gitErr error
 	gitStateLoaded := false
@@ -1102,6 +1119,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		input.ActiveMR = fields.ActiveMR
 		hookBead := agentHookBead(agentIssue, fields)
 		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
+		legacyHookSafe = hookSafe
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
 		targetRefs, targetRefLookupFailed = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
@@ -1142,6 +1160,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 				input.ActiveMRBlocker = activeMRAssessment.Reason
 			}
 		}
+		legacyActiveMRSafe = !activeMRAssessment.Pending
 		input.PartialSpawnWithoutDurableHook = partialSpawn
 		if blocker := cleanupStatusBlockerForRecovery(input.CleanupStatus, partialSpawn); blocker == "" && !input.CleanupStatus.IsSafe() {
 			input.IgnoreCleanupStatus = true
@@ -1161,6 +1180,31 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 
 	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
+	if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" {
+		sessionDormant := false
+		sessionManager := polecat.NewSessionManager(tmux.NewTmux(), r)
+		if sessionInfo, sessionErr := sessionManager.Status(polecatName); sessionErr == nil {
+			sessionDormant = !sessionInfo.Running
+		} else {
+			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("legacy_cleanup_session_lookup_failed=%v", sessionErr))
+		}
+		activeWorkSafe := false
+		if assigned, assignedErr := listActivePolecatWorkByName(bd, rigName); assignedErr == nil {
+			activeWorkSafe = assigned[polecatName] == nil
+			if !activeWorkSafe {
+				input.ActiveWorkBlocker = fmt.Sprintf("assigned_work=%s status=%s", assigned[polecatName].ID, assigned[polecatName].Status)
+				input.ActiveWorkCountsTowardCapacity = polecatSummaryIssueRequiresRestart(beads.IssueStatus(assigned[polecatName].Status))
+			}
+		} else {
+			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("legacy_cleanup_work_lookup_failed=%v", assignedErr))
+		}
+		gitSafe := gitErr == nil && gitState != nil && gitState.Clean
+		if canUseLegacyMissingCleanupEvidence(p, fields, sessionDormant, activeWorkSafe, legacyHookSafe, legacyActiveMRSafe, gitSafe) {
+			input.IgnoreCleanupStatus = true
+			status.CleanupProvenance = legacyCleanupReadOnlyProvenance
+			status.Diagnostics = append(status.Diagnostics, "legacy_cleanup_status=<missing> evidence="+legacyCleanupReadOnlyProvenance)
+		}
+	}
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
@@ -1385,7 +1429,11 @@ func reconcileCleanupStatusIfSafe(status *RecoveryStatus, updater cleanupStatusU
 	}
 	status.CleanupStatus = polecat.CleanupClean
 	status.Reconciled = true
-	status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("reconciled_cleanup_status=clean previous=%s", previous))
+	previousLabel := string(previous)
+	if previousLabel == "" {
+		previousLabel = "<missing>"
+	}
+	status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("reconciled_cleanup_status=clean previous=%s", previousLabel))
 }
 
 func cleanupStatusReconcileCandidate(status *RecoveryStatus, p *polecat.Polecat, fields *beads.AgentFields) (polecat.CleanupStatus, bool) {
@@ -1393,10 +1441,13 @@ func cleanupStatusReconcileCandidate(status *RecoveryStatus, p *polecat.Polecat,
 		return "", false
 	}
 	previous := polecat.CleanupStatus(fields.CleanupStatus)
-	if previous == "" || previous == polecat.CleanupClean {
+	if previous == polecat.CleanupClean {
 		return previous, false
 	}
-	if p.State != polecat.StateIdle || beads.AgentState(fields.AgentState) != beads.AgentStateIdle {
+	if previous == "" && status.CleanupProvenance != legacyCleanupReadOnlyProvenance {
+		return previous, false
+	}
+	if !legacyCleanupLifecycleDormant(p.State, beads.AgentState(fields.AgentState)) {
 		return previous, false
 	}
 	if status.NeedsRecovery || status.Verdict != "SAFE_TO_NUKE" {
@@ -1406,6 +1457,22 @@ func cleanupStatusReconcileCandidate(status *RecoveryStatus, p *polecat.Polecat,
 		return previous, false
 	}
 	return previous, true
+}
+
+func canUseLegacyMissingCleanupEvidence(p *polecat.Polecat, fields *beads.AgentFields, sessionDormant, activeWorkSafe, hookSafe, activeMRSafe, gitSafe bool) bool {
+	if p == nil || fields == nil || strings.TrimSpace(fields.CleanupStatus) != "" {
+		return false
+	}
+	if !legacyCleanupLifecycleDormant(p.State, beads.AgentState(strings.TrimSpace(fields.AgentState))) {
+		return false
+	}
+	return sessionDormant && activeWorkSafe && hookSafe && activeMRSafe && gitSafe
+}
+
+func legacyCleanupLifecycleDormant(polecatState polecat.State, agentState beads.AgentState) bool {
+	polecatDormant := polecatState == polecat.StateIdle || polecatState == polecat.StateDone
+	agentDormant := agentState == beads.AgentStateIdle || agentState == beads.AgentStateDone
+	return polecatDormant && agentDormant
 }
 
 func agentSourceIssueHint(currentIssue string, fields *beads.AgentFields) string {

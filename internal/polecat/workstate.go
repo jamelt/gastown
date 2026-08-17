@@ -116,13 +116,21 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	if !in.IgnoreCleanupStatus && !in.CleanupStatus.IsSafe() {
 		reason := "cleanup-" + string(in.CleanupStatus)
 		blocker := "cleanup_status=" + string(in.CleanupStatus)
+		countsTowardCapacity := true
 		if in.CleanupStatus == "" {
 			reason = "cleanup-unknown"
 			blocker = "cleanup_status=<missing>"
+			// cleanup_status was optional before the integrated lifecycle
+			// classifier. Preserve the fail-closed recovery verdict, but do not
+			// let absent historical metadata alone reserve scheduler capacity.
+			// Direct uncertainty or worktree risk is represented by the git,
+			// hook, work, and MR predicates below and still consumes capacity.
+			countsTowardCapacity = false
 		} else if in.CleanupStatus == CleanupUnknown {
 			reason = "cleanup-unknown"
+			countsTowardCapacity = false
 		}
-		block(reason, blocker, true)
+		block(reason, blocker, countsTowardCapacity)
 	}
 	if in.GitCheckFailed {
 		blocker := in.GitCheckFailedReason
