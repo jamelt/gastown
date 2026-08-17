@@ -478,7 +478,7 @@ func SyncDatabases(townRoot string, opts SyncOptions) []SyncResult {
 			continue
 		}
 		if !lineage.SafeToPush() {
-			result.Error = fmt.Errorf("refusing push: %s; run 'gt dolt reconcile --db %s'", lineage.Diagnostic(), db)
+			result.Error = unsafeLineagePushError(lineage, db)
 			results = append(results, result)
 			continue
 		}
@@ -584,7 +584,7 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 			continue
 		}
 		if !lineage.SafeToPush() {
-			result.Error = fmt.Errorf("refusing push: %s; run 'gt dolt reconcile --db %s'", lineage.Diagnostic(), db)
+			result.Error = unsafeLineagePushError(lineage, db)
 			results = append(results, result)
 			continue
 		}
@@ -607,6 +607,13 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 	}
 
 	return results
+}
+
+func unsafeLineagePushError(lineage LineageReport, db string) error {
+	if lineage.State == LineageDiverged {
+		return fmt.Errorf("refusing push: %s; run 'gt dolt reconcile --db %s'", lineage.Diagnostic(), db)
+	}
+	return fmt.Errorf("refusing push: %s; bootstrap from or fetch and verify the configured remote before pushing", lineage.Diagnostic())
 }
 
 // PurgeClosedEphemerals runs "bd purge" for a specific rig database to remove

@@ -84,7 +84,7 @@ func TestInspectLineageUnverifiedRemote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspectLineage: %v", err)
 	}
-	if report.State != LineageRemoteUnverified || report.Shared() == true || !report.SafeToPush() {
+	if report.State != LineageRemoteUnverified || report.Shared() || report.SafeToPush() {
 		t.Fatalf("unexpected unverified report: %#v", report)
 	}
 }

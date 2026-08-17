@@ -40,10 +40,11 @@ type LineageReport struct {
 }
 
 // SafeToPush reports whether a push can proceed without replacing unrelated
-// remote history. A configured remote with no tracking head is allowed so an
-// initial push can establish the remote branch. Dispatch uses Shared() instead.
+// remote history. A configured remote with no tracking head fails closed: it
+// cannot be distinguished from an unrelated remote without explicit bootstrap
+// or fetch/verification.
 func (r LineageReport) SafeToPush() bool {
-	return r.State != LineageDiverged
+	return r.State == LineageShared || r.State == LineageNoRemote
 }
 
 // Shared reports whether both sides have a verified common ancestor.

@@ -617,6 +617,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		sourceBdEnv := bdSubprocessEnv(sourceBeadsDir, opts.Name)
 		sourceDatabaseAuthoritative = bdDatabaseExists(sourceBeadsDir)
 		if !sourceDatabaseAuthoritative {
+			syncRemote := beadsConfigSyncRemote(sourceBeadsConfig)
 			initArgs := []string{"init"}
 			if opts.BeadsPrefix != "" {
 				initArgs = append(initArgs, "--prefix", opts.BeadsPrefix)
@@ -633,13 +634,16 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			// it establishes shared lineage; reinitializing locally with
 			// --discard-remote creates an independent history that cannot later
 			// be pushed safely.
-			if syncRemote := beadsConfigSyncRemote(sourceBeadsConfig); syncRemote != "" {
+			if syncRemote != "" {
 				initArgs = append(initArgs, "--remote", syncRemote)
 			}
 			cmd := exec.Command("bd", initArgs...)
 			cmd.Dir = mayorRigPath
 			cmd.Env = sourceBdEnv
 			if output, err := cmd.CombinedOutput(); err != nil {
+				if syncRemote != "" {
+					return nil, fmt.Errorf("bootstrapping Beads database from configured remote %q: %w (%s)", syncRemote, err, strings.TrimSpace(string(output)))
+				}
 				fmt.Printf("  Warning: Could not init bd database: %v (%s)\n", err, strings.TrimSpace(string(output)))
 			}
 			// Drop orphan databases created by bd init (gh#3562, gt-sv1h).
