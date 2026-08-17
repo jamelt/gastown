@@ -967,8 +967,17 @@ cmd="$1"
 shift
 case "$cmd" in
   show)
-    # Return empty to indicate agent doesn't exist yet
-    echo "[]"
+    id="$1"
+    if [[ -f "$AGENT_LOG" ]] && grep -Fxq "$id" "$AGENT_LOG"; then
+      labels='["gt:rig"]'; description='Rig identity'
+      case "$id" in
+        *-witness) labels='["gt:agent"]'; description='role_type: witness\nrig: demo\nagent_state: idle' ;;
+        *-refinery) labels='["gt:agent"]'; description='role_type: refinery\nrig: demo\nagent_state: idle' ;;
+      esac
+      printf '[{"id":"%s","title":"%s","description":"%s","issue_type":"task","status":"open","labels":%s}]' "$id" "$id" "$description" "$labels"
+    else
+      echo "[]"
+    fi
     ;;
   create)
     id=""
@@ -981,7 +990,12 @@ case "$cmd" in
     done
     # Log the created agent ID for verification
     echo "$id" >> "$AGENT_LOG"
-    printf '{"id":"%s","title":"%s","description":"","issue_type":"agent"}' "$id" "$title"
+    labels='["gt:rig"]'; description='Rig identity'
+    case "$id" in
+      *-witness) labels='["gt:agent"]'; description='role_type: witness\nrig: demo\nagent_state: idle' ;;
+      *-refinery) labels='["gt:agent"]'; description='role_type: refinery\nrig: demo\nagent_state: idle' ;;
+    esac
+    printf '{"id":"%s","title":"%s","description":"%s","issue_type":"task","status":"open","labels":%s}' "$id" "$title" "$description" "$labels"
     ;;
   slot)
     # Accept slot commands
@@ -1020,8 +1034,9 @@ esac
 	}
 	createdAgents = strings.Split(strings.TrimSpace(string(data)), "\n")
 
-	// Should create witness and refinery for the rig
+	// Should create the rig plus Witness and Refinery in the rig database.
 	expectedAgents := map[string]bool{
+		"gt-rig-demo":      false,
 		"gt-demo-witness":  false,
 		"gt-demo-refinery": false,
 	}
@@ -1815,26 +1830,48 @@ func createTestGitRepoForRig(t *testing.T, name string) string {
 func fakeBDForAddRig(t *testing.T) {
 	t.Helper()
 	script := `#!/bin/bash
-# no-op bd shim for AddRig tests
+set -e
 cmd="$1"
 [[ "$cmd" == "--allow-stale" ]] && { shift; cmd="$1"; }
 shift
 case "$cmd" in
   init|config|slot) exit 0 ;;
-  show) echo "[]" ;;
+  show)
+    id="$1"
+    if [[ -f "$FAKE_BD_STATE/$id" ]]; then
+      printf '['; cat "$FAKE_BD_STATE/$id"; printf ']\n'
+    else
+      echo "[]"
+    fi
+    ;;
   create)
     id=""; title=""
     for arg in "$@"; do
       case "$arg" in --id=*) id="${arg#--id=}" ;; --title=*) title="${arg#--title=}" ;; esac
     done
-    printf '{"id":"%s","title":"%s","description":"","issue_type":"agent"}' "$id" "$title"
+    [[ ! -f "$FAKE_BD_STATE/$id" ]] || exit 1
+    labels='["gt:rig"]'; description='Rig identity'
+    case "$id" in
+      *-witness)
+        role=witness; rig="${id#*-}"; rig="${rig%-witness}"
+        labels='["gt:agent"]'; description="role_type: witness\\nrig: $rig\\nagent_state: idle"
+        ;;
+      *-refinery)
+        role=refinery; rig="${id#*-}"; rig="${rig%-refinery}"
+        labels='["gt:agent"]'; description="role_type: refinery\\nrig: $rig\\nagent_state: idle"
+        ;;
+    esac
+    printf '{"id":"%s","title":"%s","description":"%s","issue_type":"task","status":"open","labels":%s}' "$id" "$title" "$description" "$labels" | tee "$FAKE_BD_STATE/$id"
     ;;
+  update|reopen) exit 0 ;;
   *) exit 0 ;;
 esac
 `
 	windowsScript := "@echo off\r\nif \"%1\"==\"init\" exit /b 0\r\nif \"%1\"==\"config\" exit /b 0\r\nif \"%1\"==\"slot\" exit /b 0\r\nif \"%1\"==\"--allow-stale\" shift\r\nif \"%1\"==\"show\" echo [] & exit /b 0\r\nif \"%1\"==\"create\" echo {\"id\":\"x\",\"title\":\"x\"} & exit /b 0\r\nexit /b 0\r\n"
 	binDir := writeFakeBD(t, script, windowsScript)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stateDir := t.TempDir()
+	t.Setenv("FAKE_BD_STATE", stateDir)
 }
 
 func TestAddRig_UpstreamURL(t *testing.T) {
