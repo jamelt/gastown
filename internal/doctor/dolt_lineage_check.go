@@ -67,7 +67,7 @@ func (c *DoltLineageCheck) Run(ctx *CheckContext) *CheckResult {
 		fixHint = "Run 'gt dolt reconcile --db <database>' for each divergent rig; do not force-push"
 	} else if worst == StatusWarning {
 		message = "One or more rig Beads histories could not be verified"
-		fixHint = "Restore Dolt connectivity or bootstrap from the configured remote before dispatch"
+		fixHint = "Restore Dolt connectivity, or bootstrap/register the configured remote before dispatch"
 	}
 	return &CheckResult{Name: c.Name(), Status: worst, Message: message, Details: details, FixHint: fixHint}
 }
@@ -107,6 +107,14 @@ func (c *DoltLineageCheck) runRig(ctx *CheckContext, rigName string) *CheckResul
 			Message: "Local and remote Beads histories have no common ancestor",
 			Details: []string{report.Diagnostic()},
 			FixHint: fmt.Sprintf("Run 'gt dolt reconcile --db %s' to inspect; reconciliation requires an explicit authority and preservation bundle", dbName),
+		}
+	}
+	if report.State == doltserver.LineageNoRemote {
+		return &CheckResult{
+			Name: c.Name(), Status: StatusWarning,
+			Message: "Beads config declares sync.remote but the Dolt database has no registered remote",
+			Details: []string{report.Diagnostic()},
+			FixHint: fmt.Sprintf("Register the Dolt remote for %s and bootstrap it, or remove the sync.remote line if remote sync isn't intended", dbName),
 		}
 	}
 	if !report.Shared() {

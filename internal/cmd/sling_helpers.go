@@ -32,8 +32,11 @@ import (
 var inspectRigDoltLineageFn = doltserver.InspectLineageSQL
 
 // verifyRigDoltLineage blocks work dispatch when a rig configured for remote
-// Beads sync cannot prove that local and remote main share history. The check
-// is read-only and deliberately runs before polecat creation or hook mutation.
+// Beads sync has a registered remote whose lineage cannot be verified. A rig
+// with no Dolt remote registered at all degrades to local-only (SafeToPush,
+// matching the push path) rather than blocking dispatch permanently — see
+// SafeToPush for the risk model. The check is read-only and deliberately
+// runs before polecat creation or hook mutation.
 func verifyRigDoltLineage(townRoot, rigName string) error {
 	if townRoot == "" || rigName == "" {
 		return fmt.Errorf("cannot verify Dolt lineage for rig %q: workspace context unavailable", rigName)
@@ -57,7 +60,7 @@ func verifyRigDoltLineage(townRoot, rigName string) error {
 	if err != nil {
 		return fmt.Errorf("cannot verify rig %q Beads lineage: %w; refusing dispatch", rigName, err)
 	}
-	if !report.Shared() {
+	if !report.SafeToPush() {
 		return fmt.Errorf("refusing dispatch: %s\nRun 'gt dolt reconcile --db %s' for read-only diagnostics and an approved preservation plan", report.Diagnostic(), dbName)
 	}
 	return nil

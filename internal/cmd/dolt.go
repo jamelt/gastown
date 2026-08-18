@@ -1743,6 +1743,10 @@ func runDoltReconcile(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("%s\n", report.Diagnostic())
 	if report.State != doltserver.LineageDiverged {
+		if report.State == doltserver.LineageNoRemote {
+			fmt.Printf("%s No Dolt remote is registered; nothing to reconcile.\n", style.Bold.Render("✓"))
+			return nil
+		}
 		if report.Shared() {
 			fmt.Printf("%s Histories share lineage; no reconciliation is needed.\n", style.Bold.Render("✓"))
 			return nil
