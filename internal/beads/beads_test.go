@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -2022,14 +2023,17 @@ func TestWrapError(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		err := b.wrapError(nil, tt.stderr, []string{"test"})
+		err := b.wrapError(nil, tt.stderr, []string{"test"}, "/test/.beads")
 		if tt.wantNil {
 			if err != nil {
 				t.Errorf("wrapError(%q) = %v, want nil", tt.stderr, err)
 			}
 		} else {
-			if err != tt.wantErr {
-				t.Errorf("wrapError(%q) = %v, want %v", tt.stderr, err, tt.wantErr)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("wrapError(%q) = %v, want errors.Is match for %v", tt.stderr, err, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), "/test/.beads") {
+				t.Errorf("wrapError(%q) = %v, want message to name the searched database", tt.stderr, err)
 			}
 		}
 	}
