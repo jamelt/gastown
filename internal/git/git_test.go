@@ -2716,6 +2716,95 @@ func TestCheckBranchContamination(t *testing.T) {
 	}
 }
 
+func TestBranchContaminationEvaluate(t *testing.T) {
+	tests := []struct {
+		name         string
+		bc           BranchContamination
+		wantSeverity ContaminationSeverity
+		wantReasons  int
+	}{
+		{"clean", BranchContamination{Behind: 0, Ahead: 0}, SeverityClean, 0},
+		{"behind-warn-only", BranchContamination{Behind: ContaminationWarnBehind, Ahead: 0}, SeverityWarn, 1},
+		{"behind-just-under-warn", BranchContamination{Behind: ContaminationWarnBehind - 1, Ahead: 0}, SeverityClean, 0},
+		{"behind-block-boundary", BranchContamination{Behind: ContaminationBlockBehind, Ahead: 0}, SeverityBlock, 1},
+		{"behind-just-under-block", BranchContamination{Behind: ContaminationBlockBehind - 1, Ahead: 0}, SeverityWarn, 1},
+		{"ahead-warn-only", BranchContamination{Behind: 0, Ahead: ContaminationWarnAhead}, SeverityWarn, 1},
+		{"ahead-just-under-warn", BranchContamination{Behind: 0, Ahead: ContaminationWarnAhead - 1}, SeverityClean, 0},
+		{"ahead-block-boundary", BranchContamination{Behind: 0, Ahead: ContaminationBlockAhead}, SeverityBlock, 1},
+		{"ahead-just-under-block", BranchContamination{Behind: 0, Ahead: ContaminationBlockAhead - 1}, SeverityWarn, 1},
+		// Real incident shapes: PR #4238 (~553 behind / ~86 ahead), PR #4257 (~553 behind / ~98 ahead).
+		{"incident-4238-shape", BranchContamination{Behind: 553, Ahead: 86}, SeverityBlock, 2},
+		{"incident-4257-shape", BranchContamination{Behind: 553, Ahead: 98}, SeverityBlock, 2},
+		// Behind blocks while ahead is merely warn-level: the ahead-warn reason must
+		// still surface, not be silently dropped because severity was already block.
+		{"behind-block-ahead-warn-both-reported", BranchContamination{Behind: ContaminationBlockBehind, Ahead: ContaminationWarnAhead}, SeverityBlock, 2},
+		{"ahead-block-behind-warn-both-reported", BranchContamination{Behind: ContaminationWarnBehind, Ahead: ContaminationBlockAhead}, SeverityBlock, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			severity, reasons := tt.bc.Evaluate()
+			if severity != tt.wantSeverity {
+				t.Errorf("Evaluate() severity = %v, want %v", severity, tt.wantSeverity)
+			}
+			if len(reasons) != tt.wantReasons {
+				t.Errorf("Evaluate() reasons = %v (len %d), want len %d", reasons, len(reasons), tt.wantReasons)
+			}
+		})
+	}
+}
+
+// TestCheckBranchContaminationEvaluate_RealRepo closes the loop between the real
+// git rev-list plumbing (CheckBranchContamination) and the pure threshold math
+// (Evaluate), using an unrelated-ahead shape rather than TestCheckBranchContamination's
+// stale-behind shape.
+func TestCheckBranchContaminationEvaluate_RealRepo(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	run("branch", "-M", "main")
+	run("checkout", "-b", "replacement")
+
+	// Simulate an "unrelated ahead" replacement branch: many more commits than a
+	// small replacement/fixup should carry, with main untouched (0 behind).
+	for i := 0; i < ContaminationBlockAhead+5; i++ {
+		fname := filepath.Join(dir, fmt.Sprintf("unrelated_%d.txt", i))
+		if err := os.WriteFile(fname, []byte("unrelated change"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", ".")
+		run("commit", "-m", fmt.Sprintf("unrelated commit %d", i))
+	}
+
+	contam, err := g.CheckBranchContamination("main")
+	if err != nil {
+		t.Fatalf("CheckBranchContamination: %v", err)
+	}
+	if contam.Behind != 0 {
+		t.Errorf("Behind = %d, want 0", contam.Behind)
+	}
+	if contam.Ahead != ContaminationBlockAhead+5 {
+		t.Errorf("Ahead = %d, want %d", contam.Ahead, ContaminationBlockAhead+5)
+	}
+
+	severity, reasons := contam.Evaluate()
+	if severity != SeverityBlock {
+		t.Errorf("Evaluate() severity = %v, want SeverityBlock", severity)
+	}
+	if len(reasons) != 1 {
+		t.Errorf("Evaluate() reasons = %v, want exactly 1 (ahead-block only, behind is 0)", reasons)
+	}
+}
+
 // initTestRepoWithSplitRemote creates a test setup that mirrors the polecat workflow:
 // two bare repos (upstream and fork), a local clone whose origin has fetch URL → upstream
 // and push URL → fork. Returns (localDir, upstreamBareDir, forkBareDir, mainBranch).

@@ -61,6 +61,14 @@ func runTapList(cmd *cobra.Command, args []string) error {
 			matchers:    []string{"Bash(sudo *)", "Bash(apt install*)", "Bash(dnf install*)", "Bash(brew install*)", "Bash(rm -rf /*)", "Bash(git push --force*)", "Bash(git push -f*)"},
 			implemented: true,
 		},
+		{
+			name:        "branch-hygiene",
+			kind:        "guard",
+			description: "Block gh pr create from a contaminated branch (stale base or unrelated ahead commits)",
+			event:       "PreToolUse",
+			matchers:    []string{"Bash(gh pr create*)"},
+			implemented: true,
+		},
 	}
 
 	// Try to load registry for additional handlers
