@@ -148,6 +148,29 @@ func assertNoMayorEvents(t *testing.T, townRoot string) {
 	}
 }
 
+func setupMayorMailFallback(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "mail.log")
+	t.Setenv("GT_TEST_MAYOR_MAIL_LOG", logPath)
+	t.Setenv("PATH", binDir)
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$GT_TEST_MAYOR_MAIL_LOG\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return logPath
+}
+
+func assertMayorMailFallback(t *testing.T, logPath string) {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read mayor mail fallback: %v", err)
+	}
+	if !strings.Contains(string(data), "mail send mayor/") {
+		t.Fatalf("mayor mail fallback = %q, want mail send mayor/", data)
+	}
+}
+
 func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
@@ -193,7 +216,7 @@ func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
 }
 
 func TestNotifyMayorSlotOpen_DispatchThenEmptyNotifiesWithoutEvent(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+	mailLog := setupMayorMailFallback(t)
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
 	prevRecovery := slotOpenRecoveryCheck
@@ -224,6 +247,7 @@ func TestNotifyMayorSlotOpen_DispatchThenEmptyNotifiesWithoutEvent(t *testing.T)
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
 	assertNoMayorEvents(t, townRoot)
+	assertMayorMailFallback(t, mailLog)
 }
 
 func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T) {
@@ -255,7 +279,7 @@ func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T
 }
 
 func TestNotifyMayorSlotOpen_QueueEmptyNotifiesWithoutEvent(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+	mailLog := setupMayorMailFallback(t)
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
 	prevRecovery := slotOpenRecoveryCheck
@@ -284,6 +308,7 @@ func TestNotifyMayorSlotOpen_QueueEmptyNotifiesWithoutEvent(t *testing.T) {
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
 	assertNoMayorEvents(t, townRoot)
+	assertMayorMailFallback(t, mailLog)
 }
 
 func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
