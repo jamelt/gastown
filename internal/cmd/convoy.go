@@ -1553,7 +1553,7 @@ func runConvoyStranded(cmd *cobra.Command, args []string) error {
 	if len(feedable) > 0 {
 		fmt.Println("To feed stranded convoys, run:")
 		for _, s := range feedable {
-			fmt.Printf("  gt sling mol-convoy-feed deacon/dogs --var convoy=%s\n", s.ID)
+			fmt.Printf("  gt sling mol-convoy-feed deacon/dogs --var convoy=%s --var title=%q\n", s.ID, s.Title)
 		}
 	}
 	if len(needsAttention) > 0 {
