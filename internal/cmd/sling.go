@@ -326,6 +326,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		} else {
 			args = redirected
 		}
+		applyWorkflowStepAgentOverride(args)
 	}
 
 	// Config-driven dispatch mode: check scheduler.max_polecats

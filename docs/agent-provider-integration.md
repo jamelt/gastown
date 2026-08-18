@@ -263,6 +263,52 @@ At each step, the agent name is looked up in:
 
 This means your JSON preset is found automatically — no code change needed.
 
+### Provider-aware backup chains
+
+Backups are ordered aliases, not model-name guesses. Tag each catalog entry
+with the allocation pool it consumes:
+
+```json
+{
+  "name": "codex-sol-high",
+  "quota_provider": "openai",
+  "command": "codex",
+  "args": ["--model", "gpt-5.6-sol"]
+}
+```
+
+Then declare role routes in `settings/config.json`:
+
+```json
+{
+  "role_agents": {
+    "mayor": "claude-opus-5"
+  },
+  "role_agent_backups": {
+    "mayor": ["codex-sol-high", "openrouter-qwen38-max"]
+  },
+  "agent_backups": {
+    "claude-opus-5": ["codex-sol-high", "openrouter-qwen38-max"]
+  },
+  "agent_failover": {
+    "enabled": true,
+    "provider_cooldown": "1h",
+    "max_per_session": 2
+  }
+}
+```
+
+`role_agent_backups` applies to normal role selection. `agent_backups` applies
+when a formula explicitly selects an agent that differs from the session's role
+default. A rig can override either map in its own `settings/config.json`.
+
+`gt quota failover --dry-run` shows the next transitions. Without `--dry-run`,
+only hard quota/usage-limit signals can trigger a restart. The route advances
+strictly forward, skips providers in cooldown, and resumes from durable Gas
+Town state rather than trying to carry a provider-specific transcript across
+runtimes. The opt-in `quota_dog` runs same-provider account rotation first and
+then provider failover for sessions that remain blocked.
+
 ---
 
 ## Tier 2: Hooks Integration

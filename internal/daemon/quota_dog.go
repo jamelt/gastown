@@ -34,9 +34,10 @@ func quotaDogInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultQuotaDogInterval
 }
 
-// runQuotaDog executes a quota rotation cycle by shelling out to `gt quota rotate`.
-// The daemon is a thin ticker — `gt quota rotate` handles scanning for rate-limited
-// sessions, planning account assignments, and executing keychain swaps + session restarts.
+// runQuotaDog executes same-provider account rotation first, then cross-provider
+// agent failover for any hard-limited sessions that remain. Rotation errors are
+// non-fatal because a town may intentionally have no second Claude account;
+// provider fallback must still get its chance.
 //
 // This follows the daemon's "dumb scheduler" principle: the daemon schedules,
 // existing commands do the work. No LLM or molecule needed — pure mechanical rotation.
@@ -45,34 +46,38 @@ func (d *Daemon) runQuotaDog() {
 		return
 	}
 
-	d.logger.Printf("quota_dog: starting rotation cycle")
+	d.logger.Printf("quota_dog: starting quota recovery cycle")
 
-	ctx, cancel := context.WithTimeout(d.ctx, quotaDogTimeout)
-	defer cancel()
+	for _, action := range quotaDogActions() {
+		ctx, cancel := context.WithTimeout(d.ctx, quotaDogTimeout)
+		cmd := exec.CommandContext(ctx, d.gtPath, "quota", action, "--json") //nolint:gosec // G204: gtPath resolved at daemon init
+		cmd.Dir = d.config.TownRoot
 
-	cmd := exec.CommandContext(ctx, d.gtPath, "quota", "rotate", "--json") //nolint:gosec // G204: gtPath resolved at daemon init
-	cmd.Dir = d.config.TownRoot
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		cancel()
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// Non-fatal: rotation failure shouldn't crash the daemon.
-		// Common expected failures: <2 accounts, no rate-limited sessions.
-		stderrStr := stderr.String()
-		if stderrStr != "" {
-			d.logger.Printf("quota_dog: rotation failed (non-fatal): %v: %s", err, stderrStr)
-		} else {
-			d.logger.Printf("quota_dog: rotation failed (non-fatal): %v", err)
+		if err != nil {
+			stderrStr := stderr.String()
+			if stderrStr != "" {
+				d.logger.Printf("quota_dog: %s failed (non-fatal): %v: %s", action, err, stderrStr)
+			} else {
+				d.logger.Printf("quota_dog: %s failed (non-fatal): %v", action, err)
+			}
+			continue
 		}
-		return
-	}
 
-	outStr := stdout.String()
-	if outStr != "" && outStr != "[]\n" && outStr != "[]" {
-		d.logger.Printf("quota_dog: rotation result: %s", outStr)
-	} else {
-		d.logger.Printf("quota_dog: no rate-limited sessions detected")
+		outStr := stdout.String()
+		if outStr != "" && outStr != "[]\n" && outStr != "[]" {
+			d.logger.Printf("quota_dog: %s result: %s", action, outStr)
+		} else {
+			d.logger.Printf("quota_dog: %s found no actionable sessions", action)
+		}
 	}
+}
+
+func quotaDogActions() []string {
+	return []string{"rotate", "failover"}
 }

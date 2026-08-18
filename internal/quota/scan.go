@@ -14,13 +14,15 @@ import (
 
 // ScanResult holds the result of scanning a single tmux session.
 type ScanResult struct {
-	Session       string    `json:"session"`                  // tmux session name
-	AccountHandle string    `json:"account_handle,omitempty"` // resolved account handle
-	ConfigDir     string    `json:"config_dir,omitempty"`     // CLAUDE_CONFIG_DIR (even if account unknown)
-	RateLimited   bool      `json:"rate_limited"`             // whether hard rate-limit was detected
-	NearLimit     bool      `json:"near_limit"`               // whether approaching-limit signal was detected
-	MatchedLine   string    `json:"matched_line,omitempty"`   // the line that matched (hard or warning)
-	ResetsAt      string    `json:"resets_at,omitempty"`      // parsed reset time if available
+	Session       string `json:"session"`                  // tmux session name
+	Agent         string `json:"agent,omitempty"`          // active GT_AGENT alias
+	Role          string `json:"role,omitempty"`           // active GT_ROLE identity
+	AccountHandle string `json:"account_handle,omitempty"` // resolved account handle
+	ConfigDir     string `json:"config_dir,omitempty"`     // CLAUDE_CONFIG_DIR (even if account unknown)
+	RateLimited   bool   `json:"rate_limited"`             // whether hard rate-limit was detected
+	NearLimit     bool   `json:"near_limit"`               // whether approaching-limit signal was detected
+	MatchedLine   string `json:"matched_line,omitempty"`   // the line that matched (hard or warning)
+	ResetsAt      string `json:"resets_at,omitempty"`      // parsed reset time if available
 }
 
 // TmuxClient is the interface for tmux operations needed by the scanner.
@@ -119,6 +121,12 @@ func (s *Scanner) ScanAll() ([]ScanResult, error) {
 // scanSession examines a single tmux session for rate-limit and near-limit indicators.
 func (s *Scanner) scanSession(session string) ScanResult {
 	result := ScanResult{Session: session}
+	if agent, err := s.tmux.GetEnvironment(session, "GT_AGENT"); err == nil {
+		result.Agent = strings.TrimSpace(agent)
+	}
+	if role, err := s.tmux.GetEnvironment(session, "GT_ROLE"); err == nil {
+		result.Role = strings.TrimSpace(role)
+	}
 
 	// Always capture CLAUDE_CONFIG_DIR for rotation planning, even if
 	// the account handle can't be resolved (unknown account sessions).

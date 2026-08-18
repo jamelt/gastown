@@ -36,17 +36,19 @@ var (
 var quotaCmd = &cobra.Command{
 	Use:     "quota",
 	GroupID: GroupServices,
-	Short:   "Manage account quota rotation",
+	Short:   "Manage account quota rotation and provider failover",
 	RunE:    requireSubcommand,
-	Long: `Manage Claude Code account quota rotation for Gas Town.
+	Long: `Manage account quota rotation and provider failover for Gas Town.
 
-When sessions hit rate limits, quota commands help detect blocked sessions
-and rotate them to available accounts from the pool.
+When sessions hit hard rate limits, quota commands detect blocked sessions,
+rotate Claude accounts when available, and optionally advance to an ordered
+backup agent on a different provider.
 
 Commands:
   gt quota status            Show account quota status
   gt quota scan              Detect rate-limited sessions
   gt quota rotate            Swap blocked sessions to available accounts
+  gt quota failover          Advance blocked sessions to backup providers
   gt quota clear             Mark account(s) as available again`,
 }
 
@@ -800,8 +802,6 @@ func executeKeychainRotation(
 	result.Rotated = true
 	return result
 }
-
-
 
 // Watch command flags
 var (

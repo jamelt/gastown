@@ -187,6 +187,34 @@ func applyWorkflowStepTargetOverride(args []string) ([]string, error) {
 	return redirected, nil
 }
 
+// workflowStepAgentFromDescription returns a formula-persisted agent alias.
+// This lets dependency-blocked workflow and synthesis beads retain their model
+// selection when the convoy manager slings them in a later cycle.
+func workflowStepAgentFromDescription(description string) string {
+	for _, line := range strings.Split(description, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), workflowAgentField) {
+			continue
+		}
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func applyWorkflowStepAgentOverride(args []string) {
+	if len(args) != 2 || slingAgent != "" {
+		return
+	}
+	info, err := getBeadInfo(args[0])
+	if err != nil {
+		return
+	}
+	if agent := workflowStepAgentFromDescription(info.Description); agent != "" {
+		slingAgent = agent
+		fmt.Printf("%s Workflow step agent: %s\n", style.Dim.Render("→"), agent)
+	}
+}
+
 func workflowStepTargetFromDescription(description, targetRig string) string {
 	for _, line := range strings.Split(description, "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
