@@ -618,7 +618,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		sourceDatabaseAuthoritative = bdDatabaseExists(sourceBeadsDir)
 		if !sourceDatabaseAuthoritative {
 			syncRemote := beadsConfigSyncRemote(sourceBeadsConfig)
-			initArgs := []string{"init"}
+			initArgs := []string{"init", "--skip-agents", "--skip-hooks"}
 			if opts.BeadsPrefix != "" {
 				initArgs = append(initArgs, "--prefix", opts.BeadsPrefix)
 			}
@@ -1157,7 +1157,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	// Run bd init if available (Dolt is the only backend since bd v0.51.0).
 	// --server tells bd to set dolt_mode=server in metadata.json so bd
 	// connects to the centralized Dolt sql-server instead of embedded mode.
-	initArgs := []string{"init"}
+	initArgs := []string{"init", "--skip-agents", "--skip-hooks"}
 	if prefix != "" {
 		initArgs = append(initArgs, "--prefix", prefix)
 	}

@@ -738,7 +738,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 // If ServerPort is set (via NewIsolatedWithPort), passes --server-port to bd init
 // so the database is created on the test Dolt server.
 func (b *Beads) Init(prefix string) error {
-	args := []string{"init"}
+	args := []string{"init", "--skip-agents", "--skip-hooks"}
 	if prefix != "" {
 		args = append(args, "--prefix", prefix)
 	}
