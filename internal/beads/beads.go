@@ -498,16 +498,17 @@ func isResolvedDependency(dep IssueDep) bool {
 
 // ListOptions specifies filters for listing issues.
 type ListOptions struct {
-	Status     string // "open", "closed", "all"
-	Type       string // Deprecated: use Label instead. Was "task", "bug", "feature", "epic"; converted to "gt:" prefix.
-	Label      string // Label filter (e.g., "gt:agent", "gt:merge-request")
-	Priority   int    // 0-4, -1 for no filter
-	Parent     string // filter by parent ID
-	Assignee   string // filter by assignee (e.g., "gastown/Toast")
-	NoAssignee bool   // filter for issues with no assignee
-	Limit      int    // Max results (0 = unlimited, overrides bd default of 50)
-	Ephemeral  bool   // Search wisps table (ephemeral issues) instead of issues table
-	Rig        string // filter merge-request descriptions by rig before hydration
+	Status     string   // "open", "closed", "all"
+	Type       string   // Deprecated: use Label instead. Was "task", "bug", "feature", "epic"; converted to "gt:" prefix.
+	Label      string   // Label filter (e.g., "gt:agent", "gt:merge-request")
+	Labels     []string // Additional label filters, ANDed with Label/Type and each other (e.g., ["type:plugin-run", "plugin:foo"])
+	Priority   int      // 0-4, -1 for no filter
+	Parent     string   // filter by parent ID
+	Assignee   string   // filter by assignee (e.g., "gastown/Toast")
+	NoAssignee bool     // filter for issues with no assignee
+	Limit      int      // Max results (0 = unlimited, overrides bd default of 50)
+	Ephemeral  bool     // Search wisps table (ephemeral issues) instead of issues table
+	Rig        string   // filter merge-request descriptions by rig before hydration
 }
 
 // CreateOptions specifies options for creating an issue.
@@ -1097,6 +1098,9 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 		// Deprecated: convert type to label for backward compatibility
 		args = append(args, "--label=gt:"+opts.Type)
 	}
+	for _, label := range opts.Labels {
+		args = append(args, "--label="+label)
+	}
 	if opts.Priority >= 0 {
 		args = append(args, fmt.Sprintf("--priority=%d", opts.Priority))
 	}
@@ -1202,6 +1206,9 @@ func (b *Beads) listEphemeral(opts ListOptions) ([]*Issue, error) {
 		clauses = append(clauses, "label="+quoteBDQueryValue(opts.Label))
 	} else if opts.Type != "" {
 		clauses = append(clauses, "label="+quoteBDQueryValue("gt:"+opts.Type))
+	}
+	for _, label := range opts.Labels {
+		clauses = append(clauses, "label="+quoteBDQueryValue(label))
 	}
 	if opts.Status != "" && opts.Status != "all" {
 		clauses = append(clauses, "status="+quoteBDQueryValue(opts.Status))

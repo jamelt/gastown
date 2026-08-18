@@ -77,6 +77,33 @@ func TestListEphemeralQuotesQueryValuesAndDisablesLimit(t *testing.T) {
 	}
 }
 
+// TestListEphemeralMultipleLabelsANDsClauses verifies that ListOptions.Labels
+// produces one ANDed label clause per entry, on top of any Label/Type filter.
+// Plugin-run receipts (ephemeral wisps) are discoverable only by combining
+// "type:plugin-run" and "plugin:<name>" label filters; a single-label query
+// silently returns nothing even though matching wisps exist.
+func TestListEphemeralMultipleLabelsANDsClauses(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	_, err := b.List(ListOptions{
+		Status:    "all",
+		Priority:  -1,
+		Ephemeral: true,
+		Labels:    []string{"type:plugin-run", "plugin:gitignore-reconcile"},
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	want := `query --json ephemeral=true AND label="type:plugin-run" AND label="plugin:gitignore-reconcile" --all --limit=0`
+	if !strings.Contains(logOutput, want) {
+		t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
+	}
+}
+
 func TestListIssueStatusesUsesSingleQuery(t *testing.T) {
 	ResetBdAllowStaleCacheForTest()
 	logPath := installMockBDRecorder(t)
@@ -123,6 +150,29 @@ func TestListDurableUsesBDListFilters(t *testing.T) {
 	}
 	if strings.Contains(logOutput, "sql --json") {
 		t.Fatalf("List() should not use raw SQL\nlog:\n%s", logOutput)
+	}
+}
+
+// TestListDurableMultipleLabelsUsesRepeatedFlag verifies that ListOptions.Labels
+// emits one repeated --label flag per entry, ANDed together by bd list.
+func TestListDurableMultipleLabelsUsesRepeatedFlag(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	_, err := b.List(ListOptions{
+		Status:   "all",
+		Priority: -1,
+		Labels:   []string{"type:plugin-run", "plugin:gitignore-reconcile"},
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	want := "list --json --status=all --label=type:plugin-run --label=plugin:gitignore-reconcile"
+	if !strings.Contains(logOutput, want) {
+		t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
 	}
 }
 
