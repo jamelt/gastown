@@ -512,6 +512,8 @@ func (d *Daemon) Run() (err error) {
 	// Normal wake is handled by feed subscription (bd activity --follow)
 	timer := time.NewTimer(d.recoveryHeartbeatInterval())
 	defer timer.Stop()
+	schedulerWakeTicker := time.NewTicker(time.Second)
+	defer schedulerWakeTicker.Stop()
 
 	d.logger.Printf("Daemon running, recovery heartbeat interval %v", d.recoveryHeartbeatInterval())
 
@@ -736,6 +738,7 @@ func (d *Daemon) Run() (err error) {
 				// Lifecycle signal: immediate lifecycle processing (from gt handoff)
 				d.logger.Println("Received lifecycle signal, processing lifecycle requests immediately")
 				d.processLifecycleRequests()
+				d.dispatchQueuedWorkIfPressureAllows()
 			} else if isReloadRestartSignal(sig) {
 				// Reload restart tracker from disk (from 'gt daemon clear-backoff')
 				d.logger.Println("Received reload-restart signal, reloading restart tracker from disk")
@@ -825,6 +828,9 @@ func (d *Daemon) Run() (err error) {
 			if !d.isShutdownInProgress() {
 				d.runQuotaDog()
 			}
+
+		case <-schedulerWakeTicker.C:
+			d.processSchedulerWake()
 
 		case <-timer.C:
 			d.heartbeat(state)
@@ -991,13 +997,7 @@ func (d *Daemon) heartbeat(state *State) {
 	d.pruneStaleBranches()
 
 	// 14. Dispatch scheduled work (capacity-controlled polecat dispatch).
-	// Shells out to `gt scheduler run` to avoid circular import between daemon and cmd.
-	// Pressure-gated: polecats are the primary resource consumers.
-	if p := d.checkPressure("polecat"); !p.OK {
-		d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
-	} else {
-		d.dispatchQueuedWork()
-	}
+	d.dispatchQueuedWorkIfPressureAllows()
 
 	// 15. Rotate oversized Dolt logs (copytruncate for child process fds).
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.
@@ -3071,7 +3071,33 @@ func (d *Daemon) pruneStaleBranches() {
 	pruneInDir(d.config.TownRoot, "town-root")
 }
 
-// dispatchQueuedWork shells out to `gt scheduler run` to dispatch scheduled beads.
+// dispatchQueuedWorkIfPressureAllows runs one bounded scheduler cycle when the
+// daemon has sufficient capacity to launch polecats.
+func (d *Daemon) dispatchQueuedWorkIfPressureAllows() {
+	if p := d.checkPressure("polecat"); !p.OK {
+		d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
+		return
+	}
+	_, _ = d.dispatchQueuedWork()
+}
+
+func (d *Daemon) processSchedulerWake() {
+	claim, ok := claimSchedulerWake(d.config.TownRoot)
+	if !ok {
+		return
+	}
+	defer clearSchedulerWake(claim)
+	if p := d.checkPressure("polecat"); !p.OK {
+		RequestSchedulerWake(d.config.TownRoot)
+		return
+	}
+	dispatched, err := d.dispatchQueuedWork()
+	if err == nil && dispatched > 0 {
+		RequestSchedulerWake(d.config.TownRoot)
+	}
+}
+
+// dispatchQueuedWork shells out to the daemon's resolved gt executable to dispatch scheduled beads.
 // This avoids circular import between the daemon and cmd packages.
 // Uses a 5m timeout to allow multi-bead dispatch with formula cooking and hook retries.
 //
@@ -3080,19 +3106,37 @@ func (d *Daemon) pruneStaleBranches() {
 // is released on process death, and dispatchSingleBead's label swap retry logic
 // prevents double-dispatch on the next cycle. The batch_size config (default: 1)
 // limits how many beads are in-flight per heartbeat, reducing the timeout window.
-func (d *Daemon) dispatchQueuedWork() {
+func (d *Daemon) dispatchQueuedWork() (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run")
+	cmd := exec.CommandContext(ctx, d.gtPath, "scheduler", "run")
 	setSysProcAttr(cmd)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		d.logger.Printf("Scheduler dispatch timed out after 5m")
+		return 0, ctx.Err()
 	} else if err != nil {
 		d.logger.Printf("Scheduler dispatch failed: %v (output: %s)", err, string(out))
+		return 0, err
 	} else if len(out) > 0 {
 		d.logger.Printf("Scheduler dispatch: %s", string(out))
 	}
+	return parseSchedulerDispatchCount(string(out)), nil
+}
+
+func parseSchedulerDispatchCount(output string) int {
+	var dispatched int
+	index := strings.LastIndex(output, "Dispatched ")
+	if index >= 0 {
+		_, err := fmt.Sscanf(output[index:], "Dispatched %d,", &dispatched)
+		if err == nil {
+			return dispatched
+		}
+	}
+	if _, err := fmt.Sscanf(output, "Dispatched %d,", &dispatched); err == nil {
+		return dispatched
+	}
+	return 0
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -76,6 +77,8 @@ type deferredPolecatTarget struct {
 // scheduleBeadForSling is a test seam for CLI routing. Scheduler internals call
 // scheduleBead directly; only sling argument parsing goes through this seam.
 var scheduleBeadForSling = scheduleBead
+
+var requestSchedulerWake = daemon.RequestSchedulerWake
 
 var (
 	verifyDeferredTargetWorktreeFn = verifyWorktreeExists
@@ -343,6 +346,9 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	}
 
 	_ = events.LogFeed(events.TypeSchedulerEnqueue, actor, events.SchedulerEnqueuePayload(beadID, rigName))
+	// The context is now durable. Request prompt bounded scheduler cycles;
+	// heartbeat remains the fallback if the daemon is unavailable.
+	requestSchedulerWake(townRoot)
 
 	fmt.Printf("%s Scheduled %s → %s (context: %s)\n", style.Bold.Render("✓"), beadID, rigName, ctxBead.ID)
 	return nil
