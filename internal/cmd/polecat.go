@@ -182,6 +182,7 @@ This is the nuclear option for post-merge cleanup. It:
 SAFETY CHECKS: The command refuses to nuke a polecat if:
   - cleanup_status is dirty, unknown, or missing
   - Worktree fallback detects unpushed/uncommitted/stashed changes
+  - The worktree is detached or its live git state cannot be verified
   - Polecat has an open merge request (MR bead or active_mr)
   - Polecat has work on its hook
 
@@ -891,6 +892,7 @@ func formatActivityTime(t time.Time) string {
 // GitState represents the git state of a polecat's worktree.
 type GitState struct {
 	Clean                 bool     `json:"clean"`
+	DetachedHead          bool     `json:"detached_head,omitempty"`
 	UncommittedFiles      []string `json:"uncommitted_files"`
 	UnpushedCommits       int      `json:"unpushed_commits"`
 	ComparisonBase        string   `json:"comparison_base,omitempty"`
@@ -1001,7 +1003,16 @@ func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, e
 		state.Clean = false
 	}
 
-	branch, _ := worktreeGit.CurrentBranch()
+	branch, branchErr := worktreeGit.CurrentBranch()
+	if branchErr != nil {
+		return nil, fmt.Errorf("current branch: %w", branchErr)
+	}
+	if branch == "HEAD" {
+		// A detached worktree has no unambiguous branch custody target. Never
+		// classify it as safe for destructive cleanup.
+		state.DetachedHead = true
+		state.Clean = false
+	}
 	if preservation, preserveErr := worktreeGit.BranchPreservationStatus(branch, "origin", targets); preserveErr == nil {
 		state.ComparisonBase = preservation.ComparisonBase
 		state.UnpreservedPatchCount = preservation.UnpreservedPatchCount
@@ -1934,6 +1945,15 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	if err := checkNukeActiveMRSafety(mgr, polecatName, rigName, opts.Force); err != nil {
 		return err
 	}
+	if !opts.Force {
+		// Re-run the same decision used by dry-run immediately before the first
+		// destructive action. Agent fields can be stale, so live git state is
+		// authoritative at this point.
+		result := checkPolecatSafety(polecatTarget{rigName: rigName, polecatName: polecatName, mgr: mgr, r: r})
+		if result.Blocked {
+			return fmt.Errorf("refusing to nuke %s/%s: %s", rigName, polecatName, strings.Join(result.Reasons, "; "))
+		}
+	}
 
 	t := tmux.NewTmux()
 
@@ -1961,35 +1981,6 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// fail with "bead already has N attached molecule(s)" on re-dispatch (gt-npzy).
 	if getErr == nil && polecatInfo != nil && polecatInfo.Issue != "" {
 		nukeCleanupMolecules(polecatInfo.Issue, r)
-	}
-
-	// Step 2.75: Best-effort push before nuke (gt-4vr guardrail).
-	// Try to preserve any unpushed commits on the branch. Push failures are
-	// non-fatal because this cleanup path already passed its safety gates.
-	if branchToDelete != "" {
-		var pushGit *git.Git
-		// Try worktree first (may still exist), then bare repo fallback.
-		// Use ClonePath from the polecat record — the worktree lives at
-		// <rig>/polecats/<name>/<rigName>/, not <rig>/polecats/<name>/.
-		if polecatInfo != nil && polecatInfo.ClonePath != "" {
-			if _, statErr := os.Stat(polecatInfo.ClonePath); statErr == nil {
-				pushGit = git.NewGit(polecatInfo.ClonePath)
-			}
-		}
-		if pushGit == nil {
-			bareRepoPath := filepath.Join(r.Path, ".repo.git")
-			if info, statErr := os.Stat(bareRepoPath); statErr == nil && info.IsDir() {
-				pushGit = git.NewGitWithDir(bareRepoPath, "")
-			}
-		}
-		if pushGit != nil {
-			refspec := branchToDelete + ":" + branchToDelete
-			if err := pushGit.Push("origin", refspec, false); err != nil {
-				fmt.Printf("  %s best-effort push failed (proceeding): %v\n", style.Dim.Render("○"), err)
-			} else {
-				fmt.Printf("  %s pushed branch %s before nuke\n", style.Success.Render("✓"), branchToDelete)
-			}
-		}
 	}
 
 	// Step 3: Delete worktree (nuclear=true to bypass safety checks for stale polecats)
