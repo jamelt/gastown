@@ -423,11 +423,15 @@ func TestWorktreeGitdirCheck_FixRepairsLinkWithoutReplacingWorktree(t *testing.T
 	tmpDir, rigDir, bareRepo, worktree := setupRepairableWorktree(t)
 	branch := "polecat/alpha/gt-yuwe+test"
 
-	// The existing admin entry and index must survive; only the link is stale.
-	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: /old/town/testrig/.repo.git/worktrees/alpha\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(worktree, "README.md"), []byte("local edit\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(worktree, "sentinel"), []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The existing admin entry and index must survive; only the link is stale.
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: /old/town/testrig/.repo.git/worktrees/alpha\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -443,8 +447,11 @@ func TestWorktreeGitdirCheck_FixRepairsLinkWithoutReplacingWorktree(t *testing.T
 	if got := doctorGit(t, worktree, "branch", "--show-current"); got != branch {
 		t.Errorf("branch = %q, want %q", got, branch)
 	}
-	if got := doctorGit(t, worktree, "status", "--porcelain"); got != "?? sentinel" {
-		t.Errorf("status = %q, want only untracked sentinel", got)
+	if got := doctorGit(t, worktree, "status", "--porcelain"); got != "M README.md\n?? sentinel" {
+		t.Errorf("status = %q, want preserved tracked and untracked changes", got)
+	}
+	if got := doctorGit(t, worktree, "diff", "--", "README.md"); !strings.Contains(got, "+local edit") {
+		t.Errorf("tracked edit was not preserved: %s", got)
 	}
 	if got := doctorGit(t, worktree, "ls-files", "--stage"); got == "" {
 		t.Error("repaired worktree has an empty index")

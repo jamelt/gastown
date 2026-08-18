@@ -344,13 +344,17 @@ func (c *WorktreeGitdirCheck) fixOneWorktree(bw brokenWorktree, repoPath string)
 	// the evidence Git needs to preserve this worktree's branch and index.
 	cmd := exec.Command("git", "-C", repoPath, "worktree", "repair", bw.worktreePath)
 	if output, err := cmd.CombinedOutput(); err != nil {
+		repairOutput := strings.TrimSpace(string(output))
+		if strings.Contains(repairOutput, "is not a git command") {
+			return fmt.Errorf("%s: unable to repair worktree links safely: git worktree repair requires Git 2.29 or newer; the worktree was left unchanged and requires manual recovery", bw.worktreePath)
+		}
 		// Git reports the broken link it just repaired as an error on some
 		// versions. Accept it only when Git can subsequently use the worktree.
 		if verifyErr := exec.Command("git", "-C", bw.worktreePath, "status", "--porcelain").Run(); verifyErr == nil {
 			return nil
 		}
 		return fmt.Errorf("%s: unable to repair worktree links safely; the worktree was left unchanged and requires manual recovery: %s",
-			bw.worktreePath, strings.TrimSpace(string(output)))
+			bw.worktreePath, repairOutput)
 	}
 	return nil
 }
