@@ -2100,11 +2100,20 @@ func noteVerifiedPushSkipped(sourceBD *beads.Beads, cwd, issueID, branch, commit
 func prCreateArgs(g *git.Git, defaultBranch, branch, title, body string) []string {
 	headRef := branch
 	args := []string{"pr", "create", "--base", defaultBranch}
-	if resolvedHead, headErr := g.PRHeadRef(branch); headErr == nil {
+	resolvedHead, headErr := g.PRHeadRef(branch)
+	if headErr != nil {
+		// Can't determine whether this is a fork PR — fall back to gh's own
+		// inference from the local origin remote. On a genuine fork rig this
+		// would misdirect the PR at origin (the fork) instead of upstream, so
+		// surface it instead of failing silently.
+		style.PrintWarning("could not resolve fork-aware PR head/repo, falling back to gh's default inference: %v", headErr)
+	} else {
 		headRef = resolvedHead
 		if strings.Contains(resolvedHead, ":") {
 			if targetRepo, repoErr := g.PRTargetRepo(); repoErr == nil && targetRepo != "" {
 				args = append(args, "--repo", targetRepo)
+			} else if repoErr != nil {
+				style.PrintWarning("could not resolve PR target repo, omitting --repo: %v", repoErr)
 			}
 		}
 	}
