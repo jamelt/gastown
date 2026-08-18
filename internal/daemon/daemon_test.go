@@ -36,6 +36,56 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestDispatchQueuedWorkUsesResolvedGTPath(t *testing.T) {
+	townRoot := t.TempDir()
+	marker := filepath.Join(townRoot, "scheduler-invocation")
+	gtPath := filepath.Join(townRoot, "resolved-gt")
+	if err := os.WriteFile(gtPath, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s' \"$PWD\" \"$1\" \"$2\" \"$GT_DAEMON\" > "+marker+"\n"), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	d := &Daemon{
+		config: DefaultConfig(townRoot),
+		gtPath: gtPath,
+		logger: log.New(io.Discard, "", 0),
+	}
+	d.dispatchQueuedWork()
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read scheduler invocation: %v", err)
+	}
+	want := townRoot + "|scheduler|run|1"
+	if string(got) != want {
+		t.Fatalf("scheduler invocation = %q, want %q", got, want)
+	}
+}
+
+func TestSchedulerWakeMarker(t *testing.T) {
+	townRoot := t.TempDir()
+	RequestSchedulerWake(townRoot)
+	if !schedulerWakeRequested(townRoot) {
+		t.Fatal("scheduler wake marker was not created")
+	}
+	claim, ok := claimSchedulerWake(townRoot)
+	if !ok {
+		t.Fatal("scheduler wake marker was not claimed")
+	}
+	clearSchedulerWake(claim)
+	if schedulerWakeRequested(townRoot) {
+		t.Fatal("scheduler wake marker was not cleared")
+	}
+}
+
+func TestParseSchedulerDispatchCount(t *testing.T) {
+	if got := parseSchedulerDispatchCount("  Dispatching gt-123 → gastown...\n\n✓ Dispatched 3, failed 0 (reason: batch)\n"); got != 3 {
+		t.Fatalf("parseSchedulerDispatchCount = %d, want 3", got)
+	}
+	if got := parseSchedulerDispatchCount("No ready beads scheduled for dispatch"); got != 0 {
+		t.Fatalf("parseSchedulerDispatchCount no-op = %d, want 0", got)
+	}
+}
+
 func TestDaemonPathCandidatesIncludesLaunchdToolDirs(t *testing.T) {
 	home := filepath.Join("Users", "alice")
 	exePath := filepath.Join("opt", "homebrew", "bin", "gt")
