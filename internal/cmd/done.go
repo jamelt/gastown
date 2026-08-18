@@ -1533,23 +1533,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					prBodyBuilder.WriteString("---\n")
 					prBodyBuilder.WriteString(fmt.Sprintf("*Polecat: %s | Issue: %s*\n", worker, issueID))
 					prBody := prBodyBuilder.String()
-					// Resolve --head/--repo for a fork PR flow: when the PR target
-					// repo (upstream) differs from the push destination (origin),
-					// gh needs an explicit --repo and an owner-qualified --head —
-					// otherwise gh infers both from the local origin remote, which
-					// is correct as-is for non-fork rigs (headRef stays the bare
-					// branch name and prArgs gains no --repo).
-					headRef := branch
-					prArgs := []string{"pr", "create", "--base", defaultBranch}
-					if resolvedHead, headErr := g.PRHeadRef(branch); headErr == nil {
-						headRef = resolvedHead
-						if strings.Contains(resolvedHead, ":") {
-							if targetRepo, repoErr := g.PRTargetRepo(); repoErr == nil && targetRepo != "" {
-								prArgs = append(prArgs, "--repo", targetRepo)
-							}
-						}
-					}
-					prArgs = append(prArgs, "--head", headRef, "--title", prTitle, "--body", prBody)
+					prArgs := prCreateArgs(g, defaultBranch, branch, prTitle, prBody)
 					ghCmd := exec.CommandContext(context.Background(), "gh", prArgs...)
 					ghCmd.Dir = cwd
 					prOutput, prErr := ghCmd.Output()
@@ -2106,6 +2090,25 @@ func noteVerifiedPushSkipped(sourceBD *beads.Beads, cwd, issueID, branch, commit
 		bd, _, _ = routedIssueBeads(cwd, issueID)
 	}
 	_ = bd.AddComment(issueID, msg)
+}
+
+// prCreateArgs builds the `gh pr create` argument list for a fork-aware PR
+// flow. When the PR target repo (upstream) differs from the push destination
+// (origin), gh needs an explicit --repo and an owner-qualified --head —
+// otherwise gh infers both from the local origin remote, which is correct
+// as-is for non-fork rigs (no --repo, bare --head branch name).
+func prCreateArgs(g *git.Git, defaultBranch, branch, title, body string) []string {
+	headRef := branch
+	args := []string{"pr", "create", "--base", defaultBranch}
+	if resolvedHead, headErr := g.PRHeadRef(branch); headErr == nil {
+		headRef = resolvedHead
+		if strings.Contains(resolvedHead, ":") {
+			if targetRepo, repoErr := g.PRTargetRepo(); repoErr == nil && targetRepo != "" {
+				args = append(args, "--repo", targetRepo)
+			}
+		}
+	}
+	return append(args, "--head", headRef, "--title", title, "--body", body)
 }
 
 func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, remote, branch, commit string) error {
