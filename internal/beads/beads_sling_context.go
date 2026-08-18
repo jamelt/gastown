@@ -1,8 +1,6 @@
 package beads
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -40,15 +38,8 @@ func (b *Beads) CreateSlingContext(workBeadTitle, workBeadID string, fields *cap
 	}
 
 	description := FormatSlingContextDescription(fields)
-	var entropy [5]byte
-	if _, err := rand.Read(entropy[:]); err != nil {
-		return nil, fmt.Errorf("generating sling context id: %w", err)
-	}
-	id := fmt.Sprintf("%s-sc-%s", detectPrefix(b.getResolvedBeadsDir()), hex.EncodeToString(entropy[:]))
 
 	args := []string{"create", "--json",
-		"--id=" + id,
-		"--force",
 		"--ephemeral",
 		"--title=" + title,
 		"--description=" + description,

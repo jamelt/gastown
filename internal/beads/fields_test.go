@@ -61,22 +61,6 @@ func TestAttachmentFieldsModeRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAttachmentFieldsDispatchReceiptRoundTrip(t *testing.T) {
-	original := &AttachmentFields{
-		DispatchedBy:    "mayor/",
-		DispatchContext: "gt-sc-123",
-		DispatchActor:   "gastown/witness",
-	}
-	formatted := FormatAttachmentFields(original)
-	parsed := ParseAttachmentFields(&Issue{Description: formatted})
-	if parsed == nil {
-		t.Fatal("ParseAttachmentFields returned nil")
-	}
-	if parsed.DispatchedBy != original.DispatchedBy || parsed.DispatchContext != original.DispatchContext || parsed.DispatchActor != original.DispatchActor {
-		t.Fatalf("dispatch receipt round trip = %+v, want %+v", parsed, original)
-	}
-}
-
 func TestSetAttachmentFieldsPreservesMode(t *testing.T) {
 	issue := &Issue{
 		Description: "mode: ralph\nattached_molecule: gt-wisp-old\nSome other content",

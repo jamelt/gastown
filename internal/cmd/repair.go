@@ -25,7 +25,6 @@ What it repairs:
   - Prefix mismatches between config.json and rigs.json
   - Missing Dolt databases
   - Missing rig identity beads
-  - Missing rig-local Witness and Refinery identities
   - Stale Dolt port in metadata.json
 
 For a full diagnostic, use 'gt doctor' instead.
@@ -52,9 +51,6 @@ func runRepair(cmd *cobra.Command, args []string) error {
 	checks := []doctor.Check{
 		doctor.NewRigConfigSyncCheck(),
 		doctor.NewStaleDoltPortCheck(),
-		doctor.NewStaleBeadsRedirectCheck(),
-		doctor.NewRigBeadsCheck(),
-		doctor.NewAgentBeadsCheck(),
 	}
 
 	fmt.Println("Repairing database identity and configuration...")

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,7 +36,6 @@ type redirectIssue struct {
 	townRoot       string // Town root for SetupRedirect
 	currentTarget  string // Current redirect target (empty if missing)
 	expectedTarget string // Expected redirect target
-	rigContainer   bool   // Reconcile <rig>/.beads without touching manager DB
 }
 
 // NewStaleBeadsRedirectCheck creates a new stale beads redirect check.
@@ -163,13 +163,7 @@ func (c *StaleBeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 	// Create missing redirects
 	for _, issue := range c.missingRedirects {
-		var err error
-		if issue.rigContainer {
-			err = beads.ReconcileRigContainerRedirect(issue.worktreePath)
-		} else {
-			err = beads.SetupRedirect(issue.townRoot, issue.worktreePath)
-		}
-		if err != nil {
+		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
 			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
 			return fmt.Errorf("creating redirect for %s: %w", relPath, err)
 		}
@@ -177,13 +171,7 @@ func (c *StaleBeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 	// Fix incorrect redirects (same as creating - SetupRedirect overwrites)
 	for _, issue := range c.incorrectRedirects {
-		var err error
-		if issue.rigContainer {
-			err = beads.ReconcileRigContainerRedirect(issue.worktreePath)
-		} else {
-			err = beads.SetupRedirect(issue.townRoot, issue.worktreePath)
-		}
-		if err != nil {
+		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
 			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
 			return fmt.Errorf("fixing redirect for %s: %w", relPath, err)
 		}
@@ -322,6 +310,11 @@ func cleanStaleBeadsFiles(beadsDir string) error {
 		return fmt.Errorf("no redirect file found - refusing to clean")
 	}
 
+	// Preserve redirect-local metadata only when it agrees with the redirect
+	// target. If it points at a different DB, it is stale drift and must be
+	// removed so bd follows the canonical target metadata.
+	preserveMetadata := shouldPreserveRedirectMetadata(beadsDir)
+
 	// Remove files matching stale patterns
 	for _, pattern := range staleFilePatterns {
 		matches, err := filepath.Glob(filepath.Join(beadsDir, pattern))
@@ -329,6 +322,9 @@ func cleanStaleBeadsFiles(beadsDir string) error {
 			continue
 		}
 		for _, match := range matches {
+			if preserveMetadata && filepath.Base(match) == "metadata.json" {
+				continue
+			}
 			if err := os.RemoveAll(match); err != nil {
 				return fmt.Errorf("removing %s: %w", filepath.Base(match), err)
 			}
@@ -346,6 +342,50 @@ func cleanStaleBeadsFiles(beadsDir string) error {
 	return nil
 }
 
+// metadataDoltDatabase returns the metadata.json dolt_database value, if any.
+func metadataDoltDatabase(beadsDir string) string {
+	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(meta.DoltDatabase)
+}
+
+func shouldPreserveRedirectMetadata(beadsDir string) bool {
+	db := metadataDoltDatabase(beadsDir)
+	if db == "" {
+		return false
+	}
+
+	targetDir := redirectTargetDir(beadsDir)
+	if targetDir == "" {
+		return true
+	}
+	targetDB := metadataDoltDatabase(targetDir)
+	return targetDB == "" || targetDB == db
+}
+
+func redirectTargetDir(beadsDir string) string {
+	data, err := os.ReadFile(filepath.Join(beadsDir, "redirect"))
+	if err != nil {
+		return ""
+	}
+	target := strings.TrimSpace(string(data))
+	if target == "" {
+		return ""
+	}
+	if filepath.IsAbs(target) {
+		return filepath.Clean(target)
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(beadsDir), target))
+}
+
 // verifyRedirectTopology checks that all worktrees in a rig have correct redirects.
 // Returns lists of missing and incorrect redirect issues.
 func (c *StaleBeadsRedirectCheck) verifyRedirectTopology(ctx *CheckContext, rigDir string) (missing, incorrect []redirectIssue) {
@@ -358,25 +398,6 @@ func (c *StaleBeadsRedirectCheck) verifyRedirectTopology(ctx *CheckContext, rigD
 	// If neither location has beads, skip this rig (not configured)
 	if !dirExists(rigBeadsPath) && !dirExists(mayorBeadsPath) {
 		return nil, nil
-	}
-
-	// When manager beads exist they are authoritative. The rig-root .beads is
-	// only a redirect container and must never retain an independent project ID.
-	if dirExists(mayorBeadsPath) {
-		expected := "mayor/rig/.beads"
-		actual := readRedirectTarget(rigDir)
-		issue := redirectIssue{
-			worktreePath:   rigDir,
-			townRoot:       townRoot,
-			currentTarget:  actual,
-			expectedTarget: expected,
-			rigContainer:   true,
-		}
-		if actual == "" {
-			missing = append(missing, issue)
-		} else if normalizeRedirectPath(actual) != normalizeRedirectPath(expected) {
-			incorrect = append(incorrect, issue)
-		}
 	}
 
 	// Get all worktrees that should have redirects

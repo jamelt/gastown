@@ -185,7 +185,7 @@ func TestCleanStaleBeadsFiles_RemovesMetadataDriftFromRedirect(t *testing.T) {
 	}
 }
 
-func TestCleanStaleBeadsFiles_RemovesMatchingDBWithStaleProjectIdentity(t *testing.T) {
+func TestCleanStaleBeadsFiles_PreservesMatchingRedirectMetadata(t *testing.T) {
 	townRoot := t.TempDir()
 	canonicalBeads := filepath.Join(townRoot, "myrig", "mayor", "rig", ".beads")
 	redirectBeads := filepath.Join(townRoot, "myrig", ".beads")
@@ -195,22 +195,22 @@ func TestCleanStaleBeadsFiles_RemovesMatchingDBWithStaleProjectIdentity(t *testi
 	if err := os.MkdirAll(redirectBeads, 0755); err != nil {
 		t.Fatal(err)
 	}
-	metadata := []byte(`{"dolt_database":"myrig","project_id":"authoritative"}`)
+	metadata := []byte(`{"dolt_database":"myrig"}`)
 	if err := os.WriteFile(filepath.Join(canonicalBeads, "metadata.json"), metadata, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(redirectBeads, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(redirectBeads, "metadata.json"), []byte(`{"dolt_database":"myrig","project_id":"stale"}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(redirectBeads, "metadata.json"), metadata, 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := cleanStaleBeadsFiles(redirectBeads); err != nil {
 		t.Fatalf("cleanStaleBeadsFiles failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(redirectBeads, "metadata.json")); !os.IsNotExist(err) {
-		t.Fatalf("redirect-local project identity should be removed, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(redirectBeads, "metadata.json")); err != nil {
+		t.Fatalf("matching redirect metadata should be preserved: %v", err)
 	}
 }
 

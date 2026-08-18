@@ -101,10 +101,8 @@ func TestParentExcludeJoin(t *testing.T) {
 	if contains(joinClause, "wd.depends_on_id") {
 		t.Error("parentExcludeJoin should not use legacy depends_on_id")
 	}
-	for _, depType := range []string{"parent-child", "tracks"} {
-		if !contains(joinClause, depType) {
-			t.Errorf("parentExcludeJoin should protect active %s dependencies", depType)
-		}
+	if !contains(joinClause, "parent-child") {
+		t.Error("parentExcludeJoin should filter on parent-child type")
 	}
 	if !contains(joinClause, "'open', 'hooked', 'in_progress'") {
 		t.Error("parentExcludeJoin should check for open parent statuses")

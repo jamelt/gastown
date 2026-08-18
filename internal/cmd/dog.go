@@ -776,7 +776,7 @@ func closePluginMails(dogName string) {
 	}
 
 	if closed > 0 {
-		fmt.Printf("  Archived %d stale plugin mail(s) from inbox\n", closed)
+		fmt.Printf("  Closed %d stale plugin mail(s) from inbox\n", closed)
 	}
 }
 

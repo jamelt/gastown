@@ -266,27 +266,6 @@ Examples:
 	RunE: runDoltPull,
 }
 
-var doltReconcileCmd = &cobra.Command{
-	Use:   "reconcile",
-	Short: "Diagnose divergent Beads histories and create a preservation plan",
-	Long: `Inspect a rig database and its configured remote without mutating either.
-
-When histories have no common ancestor, the default invocation prints both
-heads and unique commit/record counts, then stops. Creating a preservation
-bundle requires both an explicit authoritative choice and the head-bound
-approval token printed by the command.
-
-An approved run exports every table and the complete commit log from both
-tracked heads, hashes each artifact, and writes an audit receipt. It never
-fetches, merges, resets, deletes, or pushes. Reconstruction remains a separate,
-reviewed operation so no live Dolt database is replaced implicitly.
-
-Examples:
-  gt dolt reconcile --db gastown
-  gt dolt reconcile --db gastown --authoritative remote --approve RECONCILE-gastown-<local>-<remote>`,
-	RunE: runDoltReconcile,
-}
-
 var doltCleanupCmd = &cobra.Command{
 	Use:   "cleanup",
 	Short: "Remove orphaned databases from .dolt-data/",
@@ -351,20 +330,16 @@ var (
 	doltCleanupDry   bool
 	doltCleanupForce bool
 
-	doltMigrateWispsDry    bool
-	doltMigrateWispsDB     string
-	doltRollbackDry        bool
-	doltRollbackList       bool
-	doltSyncDry            bool
-	doltSyncForce          bool
-	doltSyncDB             string
-	doltSyncGC             bool
-	doltPullDry            bool
-	doltPullDB             string
-	doltReconcileDB        string
-	doltReconcileAuthority string
-	doltReconcileApproval  string
-	doltReconcileOutput    string
+	doltMigrateWispsDry bool
+	doltMigrateWispsDB  string
+	doltRollbackDry     bool
+	doltRollbackList    bool
+	doltSyncDry         bool
+	doltSyncForce       bool
+	doltSyncDB          string
+	doltSyncGC          bool
+	doltPullDry         bool
+	doltPullDB          string
 )
 
 func init() {
@@ -383,7 +358,6 @@ func init() {
 	doltCmd.AddCommand(doltFixMetadataCmd)
 	doltCmd.AddCommand(doltRecoverCmd)
 	doltCmd.AddCommand(doltCleanupCmd)
-	doltCmd.AddCommand(doltReconcileCmd)
 	doltCmd.AddCommand(doltRollbackCmd)
 	doltCmd.AddCommand(doltSyncCmd)
 	doltCmd.AddCommand(doltPullCmd)
@@ -405,10 +379,6 @@ func init() {
 	doltSyncCmd.Flags().BoolVar(&doltSyncForce, "force", false, "Force-push to remotes")
 	doltSyncCmd.Flags().StringVar(&doltSyncDB, "db", "", "Sync a single database instead of all")
 	doltSyncCmd.Flags().BoolVar(&doltSyncGC, "gc", false, "Purge closed ephemeral beads before push (requires bd purge)")
-	doltReconcileCmd.Flags().StringVar(&doltReconcileDB, "db", "", "Database to inspect (required)")
-	doltReconcileCmd.Flags().StringVar(&doltReconcileAuthority, "authoritative", "", "Authoritative history: local or remote")
-	doltReconcileCmd.Flags().StringVar(&doltReconcileApproval, "approve", "", "Head-bound approval token printed by the diagnostic run")
-	doltReconcileCmd.Flags().StringVar(&doltReconcileOutput, "output", "", "Preservation bundle directory (default: .runtime/dolt-reconciliation/...)")
 
 	doltPullCmd.Flags().BoolVar(&doltPullDry, "dry-run", false, "Preview what would be pulled without pulling")
 	doltPullCmd.Flags().StringVar(&doltPullDB, "db", "", "Pull a single database instead of all")
@@ -1719,54 +1689,6 @@ func runDoltSync(cmd *cobra.Command, args []string) error {
 	if failed > 0 {
 		return fmt.Errorf("%d database(s) failed to sync", failed)
 	}
-	return nil
-}
-
-func runDoltReconcile(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-	if doltReconcileDB == "" {
-		return fmt.Errorf("--db is required")
-	}
-	if !doltserver.DatabaseExists(townRoot, doltReconcileDB) {
-		return fmt.Errorf("database %q not found in .dolt-data/", doltReconcileDB)
-	}
-	if running, _, _ := doltserver.IsRunning(townRoot); !running {
-		return fmt.Errorf("Dolt server must be running for read-only reconciliation diagnostics")
-	}
-
-	report, err := doltserver.InspectLineageSQL(townRoot, doltReconcileDB)
-	if err != nil {
-		return fmt.Errorf("inspecting Dolt lineage: %w", err)
-	}
-	fmt.Printf("%s\n", report.Diagnostic())
-	if report.State != doltserver.LineageDiverged {
-		if report.Shared() {
-			fmt.Printf("%s Histories share lineage; no reconciliation is needed.\n", style.Bold.Render("✓"))
-			return nil
-		}
-		return fmt.Errorf("remote lineage is not verified; initialize from the configured remote before accepting work")
-	}
-
-	token := doltserver.ReconciliationApprovalToken(report)
-	if doltReconcileAuthority == "" || doltReconcileApproval == "" {
-		fmt.Printf("\nNo data was changed. Review both heads and unique-record counts above.\n")
-		fmt.Printf("To create a complete preservation bundle, choose authority explicitly:\n")
-		fmt.Printf("  gt dolt reconcile --db %s --authoritative <local|remote> --approve %s\n", doltReconcileDB, token)
-		return fmt.Errorf("independent histories require explicit authority and approval")
-	}
-
-	bundle, err := doltserver.CreateReconciliationBundle(
-		townRoot, report, strings.ToLower(strings.TrimSpace(doltReconcileAuthority)),
-		doltReconcileApproval, doltReconcileOutput,
-	)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("%s Preservation bundle and audit receipt written to %s\n", style.Bold.Render("✓"), bundle)
-	fmt.Printf("No Dolt branch or remote was mutated. Follow receipt.json for the reviewed reconstruction step.\n")
 	return nil
 }
 

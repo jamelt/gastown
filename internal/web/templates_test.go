@@ -113,7 +113,7 @@ func TestConvoyTemplate_LastActivityColors(t *testing.T) {
 	}
 }
 
-func TestConvoyTemplate_DoesNotAutoRefresh(t *testing.T) {
+func TestConvoyTemplate_HtmxAutoRefresh(t *testing.T) {
 	tmpl, err := LoadTemplates()
 	if err != nil {
 		t.Fatalf("LoadTemplates() error = %v", err)
@@ -137,10 +137,18 @@ func TestConvoyTemplate_DoesNotAutoRefresh(t *testing.T) {
 
 	output := buf.String()
 
-	for _, unwanted := range []string{"hx-get", "hx-trigger", "dashboard-update", "htmx.org", "idiomorph"} {
-		if strings.Contains(output, unwanted) {
-			t.Errorf("Template should not contain automatic refresh dependency %q", unwanted)
-		}
+	// Check for htmx attributes
+	if !strings.Contains(output, "hx-get") {
+		t.Error("Template should contain hx-get for auto-refresh")
+	}
+	if !strings.Contains(output, "hx-trigger") {
+		t.Error("Template should contain hx-trigger for auto-refresh")
+	}
+	if !strings.Contains(output, "sse:dashboard-update") {
+		t.Error("Template should contain SSE dashboard-update trigger")
+	}
+	if !strings.Contains(output, "every 30s") {
+		t.Error("Template should contain polling fallback trigger")
 	}
 }
 

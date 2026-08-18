@@ -197,12 +197,9 @@ func OpenDB(host string, port int, dbName string, readTimeout, writeTimeout time
 // The LEFT JOIN approach runs the subquery once and hash-joins: O(n+m).
 //
 // Semantics (unchanged from parentCheckWhere):
-//   - No parent-child or tracks dependency → eligible (orphan wisps)
+//   - No parent-child dependency → eligible (orphan wisps)
 //   - Parent status is 'closed' → eligible (parent already reaped)
 //   - Parent row missing (dangling ref) → eligible (parent already purged)
-//
-// A sling context tracks its source issue. Treating tracks as protective keeps
-// the context's dispatch history available while that source remains active.
 //
 // The inverse is simpler: exclude wisps that have an OPEN parent.
 //
@@ -215,7 +212,7 @@ func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
 		SELECT DISTINCT wd.issue_id
 		FROM wisp_dependencies wd
 		LEFT JOIN wisps pw ON pw.id = wd.depends_on_wisp_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
-		WHERE wd.type IN ('parent-child', 'tracks')
+		WHERE wd.type = 'parent-child'
 		AND (pw.status IN ('open', 'hooked', 'in_progress') OR pi.status IN ('open', 'hooked', 'in_progress') OR wd.depends_on_external IS NOT NULL)
 	) open_parent ON open_parent.issue_id = w.id`
 	whereCondition = "open_parent.issue_id IS NULL"

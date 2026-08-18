@@ -210,9 +210,8 @@ func TestBrowser_LastActivityColors(t *testing.T) {
 	t.Log("PASSED: Activity colors display correctly")
 }
 
-// TestBrowser_DoesNotAutoRefresh verifies that dashboard interaction state is
-// not replaced by a periodic whole-page request.
-func TestBrowser_DoesNotAutoRefresh(t *testing.T) {
+// TestBrowser_HtmxAutoRefresh tests that htmx auto-refresh attributes are present
+func TestBrowser_HtmxAutoRefresh(t *testing.T) {
 	fetcher := &mockFetcher{
 		convoys: []ConvoyRow{
 			{
@@ -240,12 +239,25 @@ func TestBrowser_DoesNotAutoRefresh(t *testing.T) {
 
 	page.MustWaitLoad()
 
+	// Check for htmx attributes
 	html := page.MustHTML()
-	for _, unwanted := range []string{"hx-get", "hx-trigger", "dashboard-update", "htmx.org", "idiomorph"} {
-		if strings.Contains(html, unwanted) {
-			t.Errorf("Page should not contain automatic refresh dependency %q", unwanted)
-		}
+
+	if !strings.Contains(html, "hx-get") {
+		t.Error("Expected hx-get attribute for auto-refresh")
 	}
+	if !strings.Contains(html, "hx-trigger") {
+		t.Error("Expected hx-trigger attribute for auto-refresh")
+	}
+	if !strings.Contains(html, "every 30s") {
+		t.Error("Expected 'every 30s' trigger for auto-refresh")
+	}
+
+	// Verify htmx library is loaded
+	if !strings.Contains(html, "htmx.org") {
+		t.Error("Expected htmx library to be loaded")
+	}
+
+	t.Log("PASSED: htmx auto-refresh attributes present")
 }
 
 // TestBrowser_EmptyState tests the empty state when no convoys exist

@@ -1,11 +1,6 @@
 package beads
 
 import (
-	"os"
-	"path/filepath"
-	"regexp"
-	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -161,54 +156,5 @@ func TestFormatSlingContextDescription_SpecialChars(t *testing.T) {
 	}
 	if parsed.LastFailure != fields.LastFailure {
 		t.Errorf("LastFailure roundtrip failed:\ngot:  %q\nwant: %q", parsed.LastFailure, fields.LastFailure)
-	}
-}
-
-func TestCreateSlingContextUsesExplicitSanitizedID(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses POSIX fake bd")
-	}
-	workDir := t.TempDir()
-	beadsDir := filepath.Join(workDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("prefix: gt\nissue-prefix: gt\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	script := `#!/bin/sh
-printf '%s\n' "$*" >> "$BD_LOG"
-if [ "$1" = "--allow-stale" ]; then shift; fi
-case "$1" in
-  version|dep) exit 0 ;;
-  create)
-    id=''
-    for arg in "$@"; do case "$arg" in --id=*) id="${arg#--id=}" ;; esac; done
-    printf '{"id":"%s","title":"context","issue_type":"task","status":"open"}\n' "$id"
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
-
-	issue, err := NewIsolated(workDir).CreateSlingContext("unsafe / title --flag", "gt-work-1", &capacity.SlingContextFields{WorkBeadID: "gt-work-1"})
-	if err != nil {
-		t.Fatalf("CreateSlingContext: %v", err)
-	}
-	if !regexp.MustCompile(`^gt-sc-[0-9a-f]{10}$`).MatchString(issue.ID) {
-		t.Fatalf("sling context id = %q", issue.ID)
-	}
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	log := string(logBytes)
-	if !strings.Contains(log, "--id="+issue.ID) || !strings.Contains(log, "--force") {
-		t.Fatalf("create did not pin sanitized id:\n%s", log)
 	}
 }

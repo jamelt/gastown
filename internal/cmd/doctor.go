@@ -105,7 +105,6 @@ Session hook checks:
 Dolt checks:
   - dolt-binary              Check that dolt is installed and meets minimum version
   - dolt-metadata            Check dolt metadata tables exist
-  - dolt-lineage             Detect rig Beads histories with no common ancestor
   - dolt-server-reachable    Check dolt sql-server is reachable
   - dolt-orphaned-databases  Detect orphaned dolt databases
 
@@ -310,7 +309,6 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 
 	// Dolt data health checks (binary + server reachability moved to top as prerequisites)
 	d.Register(doctor.NewDoltMetadataCheck())
-	d.Register(doctor.NewDoltLineageCheck())
 	d.Register(doctor.NewDoltOrphanedDatabaseCheck())
 	d.Register(doctor.NewUnregisteredBeadsDirsCheck())
 	d.Register(doctor.NewNullAssigneeCheck())

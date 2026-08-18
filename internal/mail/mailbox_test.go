@@ -2,7 +2,6 @@ package mail
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -440,184 +439,6 @@ func TestNewMailboxWithBeadsDir(t *testing.T) {
 	}
 }
 
-// TestMailboxArchivePreservesActiveMoleculeGraph is a subprocess-boundary
-// regression for gt-3rn. The fake bd models the reported upstream failure by
-// destroying an active graph whenever `bd close` is invoked. Mail archival
-// must only label the exact validated message IDs, even when one target fails.
-func TestMailboxArchivePreservesActiveMoleculeGraph(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fake bd is POSIX-only")
-	}
-
-	beadsDir := t.TempDir()
-	workDir := t.TempDir()
-	binDir := t.TempDir()
-	graphPath := filepath.Join(t.TempDir(), "active-graph")
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	wantGraph := "root=active-formula status=hooked hook=deacon\nchildren=26 dependencies=25\n"
-	if err := os.WriteFile(graphPath, []byte(wantGraph), 0644); err != nil {
-		t.Fatalf("write graph fixture: %v", err)
-	}
-
-	script := `#!/bin/sh
-printf '%s\n' "$*" >> "$BD_LOG"
-case "$1" in
-  show)
-    case "$2" in
-      mail-one|mail-two|mail-three|mail-four|mail-fail)
-        printf '[{"id":"%s","title":"mail","description":"body","assignee":"gastown/polecats/nitro","priority":2,"status":"open","created_at":"2026-08-16T20:00:00Z","labels":["gt:message","from:mayor/"]}]\n' "$2"
-        ;;
-      active-formula)
-        printf '[{"id":"active-formula","title":"patrol","description":"","assignee":"deacon/","priority":1,"status":"hooked","created_at":"2026-08-16T19:00:00Z","labels":["gt:formula"]}]\n'
-        ;;
-      *)
-        echo 'no issue found' >&2
-        exit 1
-        ;;
-    esac
-    ;;
-  label)
-    if [ "$2" != "add" ] || [ "$4" != "archived" ]; then
-      echo "unexpected label mutation: $*" >&2
-      exit 1
-    fi
-    if [ "$3" = "mail-fail" ]; then
-      echo 'simulated label failure' >&2
-      exit 1
-    fi
-    ;;
-  close)
-    printf 'CORRUPTED by close %s\n' "$2" > "$ACTIVE_GRAPH"
-    ;;
-  *)
-    echo "unexpected bd command: $*" >&2
-    exit 1
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("ACTIVE_GRAPH", graphPath)
-
-	mailbox := NewMailboxWithBeadsDir("gastown/polecats/nitro", workDir, beadsDir)
-	for _, id := range []string{"mail-one", "mail-two", "mail-three", "mail-four"} {
-		if err := mailbox.Archive(id); err != nil {
-			t.Fatalf("Archive(%s): %v", id, err)
-		}
-	}
-	if err := mailbox.Archive("active-formula"); !errors.Is(err, ErrNotInboxMessage) {
-		t.Fatalf("Archive(active-formula) error = %v, want ErrNotInboxMessage", err)
-	}
-	if err := mailbox.Archive("mail-fail"); err == nil || errors.Is(err, ErrMessageNotFound) {
-		t.Fatalf("Archive(mail-fail) error = %v, want surfaced mutation failure", err)
-	}
-
-	graph, err := os.ReadFile(graphPath)
-	if err != nil {
-		t.Fatalf("read graph fixture: %v", err)
-	}
-	if string(graph) != wantGraph {
-		t.Fatalf("active molecule graph changed:\n%s", graph)
-	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd log: %v", err)
-	}
-	log := string(logBytes)
-	if strings.Contains(log, "close ") {
-		t.Fatalf("archive invoked destructive close:\n%s", log)
-	}
-	if strings.Contains(log, "label add active-formula") {
-		t.Fatalf("archive mutated non-mail molecule root:\n%s", log)
-	}
-	for _, id := range []string{"mail-one", "mail-two", "mail-three", "mail-four", "mail-fail"} {
-		if got := strings.Count(log, "label add "+id+" archived"); got != 1 {
-			t.Fatalf("archive mutations for %s = %d, want 1; log:\n%s", id, got, log)
-		}
-	}
-}
-
-// TestMailboxCanonicalMutationActor verifies that town-level mailbox
-// operations use the same canonical identity as mail creation and lookup. A
-// Deacon session is launched with the legacy actor "deacon", while direct mail
-// is assigned to the canonical "deacon/" identity.
-func TestMailboxCanonicalMutationActor(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fake bd is POSIX-only")
-	}
-
-	beadsDir := t.TempDir()
-	workDir := t.TempDir()
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-
-	script := `#!/bin/sh
-case "$1" in
-  show)
-    printf '%s\n' '[{"id":"mail-deacon","title":"handoff","description":"body","assignee":"deacon/","priority":2,"status":"open","created_at":"2026-08-16T20:00:00Z","labels":["gt:message","from:mayor/","delivery:pending"]}]'
-    ;;
-  label)
-    printf '%s actor=%s\n' "$*" "$BD_ACTOR" >> "$BD_LOG"
-    if [ "$BD_ACTOR" != "deacon/" ]; then
-      echo "assignee is deacon/, actor is $BD_ACTOR" >&2
-      exit 1
-    fi
-    ;;
-  close)
-    printf '%s actor=%s\n' "$*" "$BD_ACTOR" >> "$BD_LOG"
-    if [ "$BD_ACTOR" != "deacon/" ]; then
-      echo "assignee is deacon/, actor is $BD_ACTOR" >&2
-      exit 1
-    fi
-    ;;
-  *)
-    echo "unexpected bd command: $*" >&2
-    exit 1
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("BD_ACTOR", "deacon")
-
-	deacon := NewMailboxWithBeadsDir("deacon", workDir, beadsDir)
-	if err := deacon.Archive("mail-deacon"); err != nil {
-		t.Fatalf("Deacon Archive error: %v", err)
-	}
-	if err := deacon.Delete("mail-deacon"); err != nil {
-		t.Fatalf("Deacon Delete error: %v", err)
-	}
-
-	unrelated := NewMailboxWithBeadsDir("gastown/witness", workDir, beadsDir)
-	if err := unrelated.Archive("mail-deacon"); !errors.Is(err, ErrNotInboxMessage) {
-		t.Fatalf("unrelated Archive error = %v, want ErrNotInboxMessage", err)
-	}
-	if err := unrelated.Delete("mail-deacon"); !errors.Is(err, ErrNotInboxMessage) {
-		t.Fatalf("unrelated Delete error = %v, want ErrNotInboxMessage", err)
-	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd log: %v", err)
-	}
-	log := string(logBytes)
-	for _, mutation := range []string{
-		"label add mail-deacon archived actor=deacon/",
-		"close mail-deacon actor=deacon/",
-	} {
-		if got := strings.Count(log, mutation); got != 1 {
-			t.Fatalf("mutation %q count = %d, want 1; log:\n%s", mutation, got, log)
-		}
-	}
-}
-
 func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fake bd is POSIX-only")
@@ -636,7 +457,7 @@ printf '%s\n' "$*" >> "$BD_LOG"
 if [ "$1" = "list" ]; then
   case "$*" in
     *"--assignee gastown/synth"*)
-      printf '%s\n' '[{"id":"issue-direct-open","title":"Direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:05Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-hooked","title":"Direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:04Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-archived","title":"Direct archived","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:03Z","labels":["gt:message","from:mayor/","archived"]},{"id":"issue-direct-closed","title":"Direct closed","description":"","status":"closed","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:02Z","labels":["gt:message","from:mayor/"]}]'
+      printf '%s\n' '[{"id":"issue-direct-open","title":"Direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:05Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-hooked","title":"Direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:04Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-closed","title":"Direct closed","description":"","status":"closed","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:03Z","labels":["gt:message","from:mayor/"]}]'
       exit 0
       ;;
     *"--label cc:gastown/synth"*)
@@ -648,7 +469,7 @@ if [ "$1" = "list" ]; then
   exit 0
 fi
 if [ "$1" = "sql" ]; then
-  printf '%s\n' '[{"id":"wisp-direct-open","title":"Wisp direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0},{"id":"wisp-direct-hooked","title":"Wisp direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:59Z","updated_at":"2026-06-12T11:59:59Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0},{"id":"wisp-direct-archived","title":"Wisp direct archived","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:58Z","updated_at":"2026-06-12T11:59:58Z","labels_csv":"gt:message,from:mayor/,archived","assignee_match":1,"cc_match":0},{"id":"wisp-cc-open","title":"Wisp CC open","description":"","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:57Z","updated_at":"2026-06-12T11:59:57Z","labels_csv":"gt:message,cc:gastown/synth,from:mayor/","assignee_match":0,"cc_match":1},{"id":"wisp-cc-hooked","title":"Wisp CC hooked","description":"","status":"hooked","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:56Z","updated_at":"2026-06-12T11:59:56Z","labels_csv":"gt:message,cc:gastown/synth,from:mayor/","assignee_match":0,"cc_match":1},{"id":"issue-direct-open","title":"Duplicate wisp","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:55Z","updated_at":"2026-06-12T11:59:55Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0}]'
+  printf '%s\n' '[{"id":"wisp-direct-open","title":"Wisp direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0},{"id":"wisp-direct-hooked","title":"Wisp direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:59Z","updated_at":"2026-06-12T11:59:59Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0},{"id":"wisp-cc-open","title":"Wisp CC open","description":"","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:58Z","updated_at":"2026-06-12T11:59:58Z","labels_csv":"gt:message,cc:gastown/synth,from:mayor/","assignee_match":0,"cc_match":1},{"id":"wisp-cc-hooked","title":"Wisp CC hooked","description":"","status":"hooked","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:57Z","updated_at":"2026-06-12T11:59:57Z","labels_csv":"gt:message,cc:gastown/synth,from:mayor/","assignee_match":0,"cc_match":1},{"id":"issue-direct-open","title":"Duplicate wisp","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:56Z","updated_at":"2026-06-12T11:59:56Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0}]'
   exit 0
 fi
 printf 'unexpected bd args: %s\n' "$*" >&2
@@ -685,9 +506,7 @@ exit 1
 	}
 	wantAbsent := []string{
 		"issue-direct-closed",
-		"issue-direct-archived",
 		"issue-cc-hooked",
-		"wisp-direct-archived",
 		"wisp-cc-hooked",
 	}
 	for _, id := range wantAbsent {

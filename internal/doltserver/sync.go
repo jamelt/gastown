@@ -468,21 +468,6 @@ func SyncDatabases(townRoot string, opts SyncOptions) []SyncResult {
 			}
 		}
 
-		// Fail closed before committing or pushing when local and remote are
-		// independent histories. --force must never turn reconciliation into
-		// an implicit history replacement.
-		lineage, err := InspectLineageCLI(dbDir, db)
-		if err != nil {
-			result.Error = fmt.Errorf("checking Dolt lineage: %w", err)
-			results = append(results, result)
-			continue
-		}
-		if !lineage.SafeToPush() {
-			result.Error = unsafeLineagePushError(lineage, db)
-			results = append(results, result)
-			continue
-		}
-
 		if opts.DryRun {
 			result.DryRun = true
 			results = append(results, result)
@@ -575,20 +560,6 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 			}
 		}
 
-		// Inspect before PushDatabaseSQL stages or commits anything. This also
-		// blocks --force for unrelated histories.
-		lineage, err := InspectLineageSQL(townRoot, db)
-		if err != nil {
-			result.Error = fmt.Errorf("checking Dolt lineage: %w", err)
-			results = append(results, result)
-			continue
-		}
-		if !lineage.SafeToPush() {
-			result.Error = unsafeLineagePushError(lineage, db)
-			results = append(results, result)
-			continue
-		}
-
 		if opts.DryRun {
 			result.DryRun = true
 			results = append(results, result)
@@ -607,13 +578,6 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 	}
 
 	return results
-}
-
-func unsafeLineagePushError(lineage LineageReport, db string) error {
-	if lineage.State == LineageDiverged {
-		return fmt.Errorf("refusing push: %s; run 'gt dolt reconcile --db %s'", lineage.Diagnostic(), db)
-	}
-	return fmt.Errorf("refusing push: %s; bootstrap from or fetch and verify the configured remote before pushing", lineage.Diagnostic())
 }
 
 // PurgeClosedEphemerals runs "bd purge" for a specific rig database to remove

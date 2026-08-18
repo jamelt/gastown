@@ -370,12 +370,6 @@ func startRigAgents(rigs []*rig.Rig, mu *sync.Mutex) {
 	var wg sync.WaitGroup
 
 	for _, r := range rigs {
-		if err := r.EnsureIdentities(); err != nil {
-			mu.Lock()
-			fmt.Printf("  %s %s managers not started: identity preflight failed: %v\n", style.Dim.Render("○"), r.Name, err)
-			mu.Unlock()
-			continue
-		}
 		wg.Add(2) // Witness + Refinery
 
 		// Start Witness in goroutine

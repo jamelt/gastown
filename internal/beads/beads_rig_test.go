@@ -223,7 +223,7 @@ func TestValidRigState(t *testing.T) {
 	}
 }
 
-func TestCreateRigBeadUsesDurableBuiltInType(t *testing.T) {
+func TestCreateRigBeadUsesDurableRigType(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses POSIX shell fake bd")
 	}
@@ -242,8 +242,11 @@ case "$1:$2:$3" in
     exit 0
     ;;
 esac
+if [ "$1" = "config" ]; then
+  exit 0
+fi
 if [ "$1" = "create" ]; then
-  printf '%s\n' '{"id":"gt-rig-gastown","title":"gastown","issue_type":"task","status":"open","priority":2,"created_at":"2026-07-07T00:00:00Z","updated_at":"2026-07-07T00:00:00Z","labels":["gt:rig"]}'
+  printf '%s\n' '{"id":"gt-rig-gastown","title":"gastown","issue_type":"rig","status":"open","priority":2,"created_at":"2026-07-07T00:00:00Z","updated_at":"2026-07-07T00:00:00Z","labels":["gt:rig"]}'
   exit 0
 fi
 exit 0
@@ -265,22 +268,22 @@ exit 0
 	if err != nil {
 		t.Fatalf("CreateRigBead: %v", err)
 	}
-	if issue.Type != "task" || issue.Ephemeral {
-		t.Fatalf("created issue type/ephemeral = %q/%v, want task/false", issue.Type, issue.Ephemeral)
+	if issue.Type != "rig" || issue.Ephemeral {
+		t.Fatalf("created issue type/ephemeral = %q/%v, want rig/false", issue.Type, issue.Ephemeral)
 	}
 
 	log := string(mustReadFile(t, logPath))
-	for _, want := range []string{"create --json", "--labels=gt:rig", "--type=task"} {
+	for _, want := range []string{"config set types.custom", "config set types.infra agent,role,message", "create --json", "--labels=gt:rig", "--type=rig"} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q in:\n%s", want, log)
 		}
 	}
-	if strings.Contains(log, "--type=rig") || strings.Contains(log, "config set types.custom") {
-		t.Fatalf("rig bead creation depended on custom rig type:\n%s", log)
+	if strings.Contains(log, "--type=task") {
+		t.Fatalf("rig bead creation used task type:\n%s", log)
 	}
 }
 
-func TestCreateRigBeadDoesNotRequireCustomTypeConfig(t *testing.T) {
+func TestCreateRigBeadFailsClosedWhenTypeConfigFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses POSIX shell fake bd")
 	}
@@ -290,11 +293,20 @@ func TestCreateRigBeadDoesNotRequireCustomTypeConfig(t *testing.T) {
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$BD_LOG"
 if [ "$1" = "config" ]; then
-  echo 'custom types unavailable' >&2
-  exit 1
+  case "$2:$3" in
+    get:types.custom)
+      printf '%s\n' 'agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request'
+      exit 0
+      ;;
+    get:types.infra)
+      printf '%s\n' 'agent,rig,role,message'
+      exit 0
+      ;;
+  esac
+  exit 0
 fi
 if [ "$1" = "create" ]; then
-  printf '%s\n' '{"id":"gt-rig-gastown","title":"gastown","issue_type":"task","status":"open","labels":["gt:rig"]}'
+  printf '%s\n' '{"id":"should-not-create"}'
   exit 0
 fi
 exit 0
@@ -312,14 +324,14 @@ exit 0
 	}
 	ResetEnsuredDirs()
 
-	issue, err := NewIsolated(workDir).CreateRigBead("gastown", &RigFields{Prefix: "gt"})
-	if err != nil {
-		t.Fatalf("CreateRigBead: %v", err)
+	_, err := NewIsolated(workDir).CreateRigBead("gastown", &RigFields{Prefix: "gt"})
+	if err == nil {
+		t.Fatal("expected CreateRigBead to fail when types.infra verification fails")
 	}
-	if issue.Type != "task" {
-		t.Fatalf("issue type = %q, want task", issue.Type)
+	if !strings.Contains(err.Error(), "types.infra not persisted") {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if log := string(mustReadFile(t, logPath)); strings.Contains(log, "config ") || !strings.Contains(log, "--type=task") {
-		t.Fatalf("unexpected bd calls:\n%s", log)
+	if log := string(mustReadFile(t, logPath)); strings.Contains(log, "create --json") {
+		t.Fatalf("CreateRigBead called bd create after config failure:\n%s", log)
 	}
 }

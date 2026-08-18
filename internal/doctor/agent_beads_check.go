@@ -102,7 +102,7 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Load rig-level agents
 	for _, info := range prefixToRig {
 		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-		bd := beads.New(rigBeadsPath).ForLocalBeads()
+		bd := beads.New(rigBeadsPath)
 		if rigAgents, err := bd.ListAgentBeads(); err == nil {
 			for id, issue := range rigAgents {
 				allAgentBeads[id] = issue
@@ -360,7 +360,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// Load existing rig-level agent beads and wisp IDs before fixing
 	for _, info := range prefixToRig {
 		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-		bd := beads.New(rigBeadsPath).ForLocalBeads()
+		bd := beads.New(rigBeadsPath)
 		if rigAgents, err := bd.ListAgentBeads(); err == nil {
 			for id, issue := range rigAgents {
 				allAgentBeads[id] = issue
@@ -376,12 +376,11 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// Fix agents for each rig
 	for prefix, info := range prefixToRig {
 		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-		rigBD := beads.New(rigBeadsPath).ForLocalBeads()
-		lifecycleBD := beads.New(rigBeadsPath)
+		bd := beads.New(rigBeadsPath)
 		rigName := info.name
 
 		witnessID := beads.WitnessBeadIDWithPrefix(prefix, rigName)
-		if err := fixAgentBead(rigBD, rigBeadsPath, witnessID,
+		if err := fixAgentBead(bd, rigBeadsPath, witnessID,
 			fmt.Sprintf("Witness for %s - monitors polecat health and progress.", rigName),
 			&beads.AgentFields{RoleType: "witness", Rig: rigName, AgentState: "idle"},
 		); err != nil {
@@ -389,7 +388,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		}
 
 		refineryID := beads.RefineryBeadIDWithPrefix(prefix, rigName)
-		if err := fixAgentBead(rigBD, rigBeadsPath, refineryID,
+		if err := fixAgentBead(bd, rigBeadsPath, refineryID,
 			fmt.Sprintf("Refinery for %s - processes merge queue.", rigName),
 			&beads.AgentFields{RoleType: "refinery", Rig: rigName, AgentState: "idle"},
 		); err != nil {
@@ -399,7 +398,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		crewWorkers := listCrewWorkers(ctx.TownRoot, rigName)
 		for _, workerName := range crewWorkers {
 			crewID := beads.CrewBeadIDWithPrefix(prefix, rigName, workerName)
-			if err := fixAgentBead(lifecycleBD, rigBeadsPath, crewID,
+			if err := fixAgentBead(bd, rigBeadsPath, crewID,
 				fmt.Sprintf("Crew worker %s in %s - human-managed persistent workspace.", workerName, rigName),
 				&beads.AgentFields{RoleType: "crew", Rig: rigName, AgentState: "idle"},
 			); err != nil {
@@ -410,7 +409,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		polecatWorkers := listPolecats(ctx.TownRoot, rigName)
 		for _, polecatName := range polecatWorkers {
 			polecatID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-			if err := fixAgentBead(lifecycleBD, rigBeadsPath, polecatID,
+			if err := fixAgentBead(bd, rigBeadsPath, polecatID,
 				fmt.Sprintf("Polecat worker %s in %s - autonomous worker with persistent identity.", polecatName, rigName),
 				&beads.AgentFields{RoleType: "polecat", Rig: rigName, AgentState: "idle"},
 			); err != nil {

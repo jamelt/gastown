@@ -234,9 +234,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		OnSuccess: func(b capacity.PendingBead) error {
 			// OnSuccess may be retried — only do the close here, no side effects.
 			// Route to the correct rig's beads dir (GH#3468).
-			reason := fmt.Sprintf("dispatched source=%s assignee=%s/polecats/%s actor=%s context=%s",
-				b.WorkBeadID, b.TargetRig, polecatNames[b.ID], actor, b.ID)
-			return beadsForPendingContext(townRoot, b).CloseSlingContext(b.ID, reason)
+			return beadsForPendingContext(townRoot, b).CloseSlingContext(b.ID, "dispatched")
 		},
 		OnFailure: func(b capacity.PendingBead, err error) {
 			var onSuccessErr *capacity.ErrOnSuccessFailed
@@ -684,7 +682,7 @@ func readySlingContextsFromAssessments(assessments []scheduledContextAssessment)
 // dispatchSingleBead dispatches one scheduled bead via executeSling.
 // Context fields are already parsed (from PendingBead.Context).
 // Returns the SlingResult (including PolecatName) on success.
-func dispatchSingleBead(b capacity.PendingBead, townRoot, actor string) (*SlingResult, error) {
+func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResult, error) {
 	if b.Context == nil {
 		return nil, fmt.Errorf("missing sling context for %s", b.ID)
 	}
@@ -715,15 +713,10 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, actor string) (*SlingR
 		Mode:             dp.Mode,
 		FormulaFailFatal: true,
 		CallerContext:    "scheduler-dispatch",
-		DispatchContext:  b.ID,
-		DispatchedBy:     dp.EnqueuedBy,
 		NoConvoy:         true,
 		NoBoot:           true,
 		TownRoot:         townRoot,
 		BeadsDir:         targetBeadsDir,
-	}
-	if params.DispatchedBy == "" {
-		params.DispatchedBy = actor
 	}
 
 	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, b.TargetRig)

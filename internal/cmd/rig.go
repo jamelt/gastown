@@ -588,6 +588,58 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s Could not update daemon.json patrols: %v\n", style.Warning.Render("!"), err)
 	}
 
+	// Route registration is now handled inside AddRig (before agent bead creation)
+	// to avoid "no route found" warnings (#1424). Determine beadsWorkDir for rig identity bead.
+	var beadsWorkDir string
+	if newRig.Config.Prefix != "" {
+		mayorRigBeads := filepath.Join(townRoot, name, "mayor", "rig", ".beads")
+		if _, err := os.Stat(mayorRigBeads); err == nil {
+			beadsWorkDir = filepath.Join(townRoot, name, "mayor", "rig")
+		} else {
+			beadsWorkDir = filepath.Join(townRoot, name)
+		}
+	}
+
+	// Create rig identity bead
+	if newRig.Config.Prefix != "" && beadsWorkDir != "" {
+		bd := beads.New(beadsWorkDir)
+		fields := &beads.RigFields{
+			Repo:   gitURL,
+			Prefix: newRig.Config.Prefix,
+			State:  beads.RigStateActive,
+		}
+		if _, err := bd.CreateRigBead(name, fields); err != nil {
+			// Non-fatal: rig is functional without the identity bead
+			fmt.Printf("  %s Could not create rig identity bead: %v\n", style.Warning.Render("!"), err)
+		} else {
+			rigBeadID := beads.RigBeadIDWithPrefix(newRig.Config.Prefix, name)
+			fmt.Printf("  Created rig identity bead: %s\n", rigBeadID)
+		}
+
+		// Create agent beads for the rig (witness, refinery)
+		// This ensures they exist before the daemon tries to start them
+		prefix := newRig.Config.Prefix
+		witnessID := beads.WitnessBeadIDWithPrefix(prefix, name)
+		if _, err := bd.CreateAgentBead(witnessID,
+			fmt.Sprintf("Witness for %s - monitors polecat health and progress.", name),
+			&beads.AgentFields{RoleType: "witness", Rig: name, AgentState: "idle"},
+		); err != nil {
+			fmt.Printf("  %s Could not create witness agent bead: %v\n", style.Warning.Render("!"), err)
+		} else {
+			fmt.Printf("  Created agent bead: %s\n", witnessID)
+		}
+
+		refineryID := beads.RefineryBeadIDWithPrefix(prefix, name)
+		if _, err := bd.CreateAgentBead(refineryID,
+			fmt.Sprintf("Refinery for %s - processes merge queue.", name),
+			&beads.AgentFields{RoleType: "refinery", Rig: name, AgentState: "idle"},
+		); err != nil {
+			fmt.Printf("  %s Could not create refinery agent bead: %v\n", style.Warning.Render("!"), err)
+		} else {
+			fmt.Printf("  Created agent bead: %s\n", refineryID)
+		}
+	}
+
 	// Auto-assign a namepool theme that doesn't collide with other rigs (gas-21k).
 	autoAssignNamepoolTheme(townRoot, name, mgr)
 
@@ -1259,34 +1311,57 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 		}
 	}
 
-	// Adopt is not complete until the authoritative database and all three
-	// rig-local identities have been read back. If the manager worktree already
-	// owns a database, preserve it and only reconcile the rig container redirect;
-	// never bd init or replace an adopted project identity.
-	if result.BeadsPrefix == "" {
-		return fmt.Errorf("adopted rig %q has no beads prefix", name)
-	}
-	managerBeadsDir := filepath.Join(rigPath, "mayor", "rig", ".beads")
-	_, managerBeadsErr := os.Stat(managerBeadsDir)
-	if os.IsNotExist(managerBeadsErr) {
-		if _, err := exec.LookPath("dolt"); err == nil {
-			if _, _, err := doltserver.InitRig(townRoot, name, result.BeadsPrefix); err != nil {
-				return fmt.Errorf("initializing adopted rig database: %w", err)
+	// Create rig identity bead if prefix is set
+	if result.BeadsPrefix != "" {
+		mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
+		beadsWorkDir := rigPath
+		if _, err := os.Stat(mayorRigBeads); err == nil {
+			beadsWorkDir = filepath.Join(rigPath, "mayor", "rig")
+		}
+
+		bd := beads.New(beadsWorkDir)
+		rigBeadID := beads.RigBeadIDWithPrefix(result.BeadsPrefix, name)
+
+		// Check if bead already exists
+		if _, err := bd.Show(rigBeadID); err != nil {
+			fields := &beads.RigFields{
+				Repo:   result.GitURL,
+				Prefix: result.BeadsPrefix,
+				State:  beads.RigStateActive,
+			}
+			if _, err := bd.CreateRigBead(name, fields); err != nil {
+				fmt.Printf("  %s Could not create rig identity bead: %v\n", style.Warning.Render("!"), err)
+			} else {
+				fmt.Printf("  %s Created rig identity bead: %s\n", style.Success.Render("✓"), rigBeadID)
 			}
 		}
-	} else if managerBeadsErr != nil {
-		return fmt.Errorf("checking authoritative manager database: %w", managerBeadsErr)
-	}
-	if err := mgr.InitBeads(rigPath, result.BeadsPrefix, name); err != nil {
-		return fmt.Errorf("initializing adopted rig beads: %w", err)
-	}
-	if os.IsNotExist(managerBeadsErr) {
-		if err := doltserver.EnsureMetadata(townRoot, name); err != nil {
-			return fmt.Errorf("setting adopted rig database metadata: %w", err)
+
+		// Create agent beads for the rig (witness, refinery)
+		// This ensures they exist before the daemon tries to start them
+		prefix := result.BeadsPrefix
+		witnessID := beads.WitnessBeadIDWithPrefix(prefix, name)
+		if _, err := bd.Show(witnessID); err != nil {
+			if _, err := bd.CreateAgentBead(witnessID,
+				fmt.Sprintf("Witness for %s - monitors polecat health and progress.", name),
+				&beads.AgentFields{RoleType: "witness", Rig: name, AgentState: "idle"},
+			); err != nil {
+				fmt.Printf("  %s Could not create witness agent bead: %v\n", style.Warning.Render("!"), err)
+			} else {
+				fmt.Printf("  %s Created agent bead: %s\n", style.Success.Render("✓"), witnessID)
+			}
 		}
-	}
-	if err := rig.EnsureRigIdentities(rigPath, name, result.BeadsPrefix, result.GitURL); err != nil {
-		return fmt.Errorf("initializing adopted rig identities: %w", err)
+
+		refineryID := beads.RefineryBeadIDWithPrefix(prefix, name)
+		if _, err := bd.Show(refineryID); err != nil {
+			if _, err := bd.CreateAgentBead(refineryID,
+				fmt.Sprintf("Refinery for %s - processes merge queue.", name),
+				&beads.AgentFields{RoleType: "refinery", Rig: name, AgentState: "idle"},
+			); err != nil {
+				fmt.Printf("  %s Could not create refinery agent bead: %v\n", style.Warning.Render("!"), err)
+			} else {
+				fmt.Printf("  %s Created agent bead: %s\n", style.Success.Render("✓"), refineryID)
+			}
+		}
 	}
 
 	// Auto-assign a namepool theme that doesn't collide with other rigs (gas-21k).
@@ -1624,11 +1699,6 @@ func runRigStart(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Printf("Starting rig %s...\n", style.Bold.Render(rigName))
-		if err := r.EnsureIdentities(); err != nil {
-			fmt.Printf("  %s Identity preflight failed; Witness and Refinery remain stopped: %v\n", style.Warning.Render("⚠"), err)
-			failedRigs = append(failedRigs, rigName)
-			continue
-		}
 
 		var started []string
 		var skipped []string

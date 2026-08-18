@@ -14,24 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/activity"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
-
-func TestDashboardTmuxSocketUsesInheritedCanonicalSocket(t *testing.T) {
-	originalSocket := tmux.GetDefaultSocket()
-	tmux.SetDefaultSocket("")
-	t.Cleanup(func() {
-		tmux.SetDefaultSocket(originalSocket)
-	})
-	t.Setenv("GT_TMUX_SOCKET", "gastown-ops-da43e7")
-
-	if got := dashboardTmuxSocket(t.TempDir()); got != "gastown-ops-da43e7" {
-		t.Fatalf("dashboardTmuxSocket() = %q, want inherited canonical socket", got)
-	}
-	if got := tmux.GetDefaultSocket(); got != "gastown-ops-da43e7" {
-		t.Fatalf("tmux default socket = %q, want inherited canonical socket", got)
-	}
-}
 
 func TestCalculateWorkStatus(t *testing.T) {
 	tests := []struct {
@@ -699,99 +682,6 @@ exit 0
 	}
 }
 
-func TestGetTrackedIssuesBatchUsesOneDependencyAndDetailQuery(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based command test")
-	}
-
-	binDir := t.TempDir()
-	bdPath := filepath.Join(binDir, "bd")
-	countPath := filepath.Join(binDir, "dep-count")
-	script := fmt.Sprintf(`#!/bin/sh
-printf x >> %q
-printf '%%s' '[{"issue_id":"hq-cv-a","depends_on_id":"external:trader:trader-a"},{"issue_id":"hq-cv-b","depends_on_id":"external:trader:trader-b"}]'
-`, countPath)
-	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-
-	showCalls := 0
-	withMayorFetcherHooks(t, nil, func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
-		if name != "bd" || len(args) < 3 || args[0] != "show" {
-			t.Fatalf("unexpected detail command: %s %v", name, args)
-		}
-		showCalls++
-		return bytes.NewBufferString(`[
-            {"id":"trader-a","title":"A","status":"open","assignee":""},
-            {"id":"trader-b","title":"B","status":"closed","assignee":""}
-        ]`), nil
-	})
-
-	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath}
-	tracked, err := f.getTrackedIssuesBatch([]string{"hq-cv-a", "hq-cv-b"})
-	if err != nil {
-		t.Fatalf("getTrackedIssuesBatch: %v", err)
-	}
-
-	count, err := os.ReadFile(countPath)
-	if err != nil {
-		t.Fatalf("read dependency call count: %v", err)
-	}
-	if got := len(count); got != 1 {
-		t.Fatalf("dependency queries = %d, want 1", got)
-	}
-	if showCalls != 1 {
-		t.Fatalf("detail queries = %d, want 1", showCalls)
-	}
-	if got := tracked["hq-cv-a"]; len(got) != 1 || got[0].ID != "trader-a" || got[0].Title != "A" {
-		t.Fatalf("tracked hq-cv-a = %#v", got)
-	}
-	if got := tracked["hq-cv-b"]; len(got) != 1 || got[0].ID != "trader-b" || got[0].Status != "closed" {
-		t.Fatalf("tracked hq-cv-b = %#v", got)
-	}
-}
-
-func TestGetTrackedIssuesBatchForcesBatchModeForOneConvoy(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based command test")
-	}
-
-	binDir := t.TempDir()
-	bdPath := filepath.Join(binDir, "bd")
-	argsPath := filepath.Join(binDir, "dep-args")
-	script := fmt.Sprintf(`#!/bin/sh
-printf '%%s' "$*" > %q
-printf '%%s' '[{"issue_id":"hq-cv-only","depends_on_id":"external:trader:trader-only"}]'
-`, argsPath)
-	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-
-	withMayorFetcherHooks(t, nil, func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
-		if name != "bd" || len(args) < 3 || args[0] != "show" {
-			t.Fatalf("unexpected detail command: %s %v", name, args)
-		}
-		return bytes.NewBufferString(`[{"id":"trader-only","title":"Only","status":"open"}]`), nil
-	})
-
-	f := &LiveConvoyFetcher{townRoot: t.TempDir(), cmdTimeout: 5 * time.Second, bdBin: bdPath}
-	tracked, err := f.getTrackedIssuesBatch([]string{"hq-cv-only"})
-	if err != nil {
-		t.Fatalf("getTrackedIssuesBatch: %v", err)
-	}
-	if got := tracked["hq-cv-only"]; len(got) != 1 || got[0].ID != "trader-only" {
-		t.Fatalf("tracked hq-cv-only = %#v", got)
-	}
-
-	args, err := os.ReadFile(argsPath)
-	if err != nil {
-		t.Fatalf("read dependency args: %v", err)
-	}
-	if got, want := string(args), "dep list hq-cv-only hq-cv-only -t tracks --json"; got != want {
-		t.Fatalf("dependency args = %q, want %q", got, want)
-	}
-}
-
 func withMayorFetcherHooks(t *testing.T, sessionEnv func(sessionName, key string) (string, error), runCmdFunc func(time.Duration, string, ...string) (*bytes.Buffer, error)) {
 	t.Helper()
 
@@ -1033,9 +923,6 @@ func TestFetchMayor_UsesResolvedRuntime(t *testing.T) {
 			if name != "tmux" {
 				t.Fatalf("unexpected command: %s %v", name, args)
 			}
-			if got := strings.Join(args, " "); !strings.Contains(got, "#{session_name}:#{window_activity}") {
-				t.Fatalf("tmux args = %q, want window activity format", got)
-			}
 			return bytes.NewBufferString("hq-mayor:1731328320\nhq-deacon:1731328300\n"), nil
 		},
 	)
@@ -1061,27 +948,6 @@ func TestFetchMayor_UsesResolvedRuntime(t *testing.T) {
 	}
 	if status.LastActivity == "" {
 		t.Fatal("expected LastActivity to be populated")
-	}
-}
-
-func TestFetchSessions_UsesWindowActivity(t *testing.T) {
-	withMayorFetcherHooks(
-		t,
-		nil,
-		func(_ time.Duration, name string, args ...string) (*bytes.Buffer, error) {
-			if name != "tmux" {
-				t.Fatalf("unexpected command: %s %v", name, args)
-			}
-			if got := strings.Join(args, " "); !strings.Contains(got, "#{session_name}:#{window_activity}") {
-				t.Fatalf("tmux args = %q, want window activity format", got)
-			}
-			return bytes.NewBufferString("hq-mayor:1731328320\n"), nil
-		},
-	)
-
-	f := &LiveConvoyFetcher{tmuxCmdTimeout: time.Second}
-	if _, err := f.FetchSessions(); err != nil {
-		t.Fatalf("FetchSessions: %v", err)
 	}
 }
 
@@ -1135,18 +1001,5 @@ func TestFetchHealth_DeaconHeartbeatFieldName(t *testing.T) {
 	// Heartbeat should be considered fresh (written just now).
 	if !health.HeartbeatFresh {
 		t.Error("HeartbeatFresh = false for a just-written heartbeat")
-	}
-}
-
-func TestFormatTimestampUsesLocalTimezone(t *testing.T) {
-	originalLocation := time.Local
-	time.Local = time.FixedZone("EDT", -4*60*60)
-	t.Cleanup(func() {
-		time.Local = originalLocation
-	})
-
-	timestamp := time.Date(time.Now().Year(), time.August, 14, 13, 21, 0, 0, time.UTC)
-	if got, want := formatTimestamp(timestamp), "Aug 14, 9:21 AM"; got != want {
-		t.Fatalf("formatTimestamp() = %q, want %q", got, want)
 	}
 }

@@ -592,23 +592,6 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 	return &Beads{workDir: workDir, beadsDir: beadsDir}
 }
 
-// ForLocalBeads returns a wrapper whose agent-bead operations remain pinned to
-// the wrapper's selected database. Most agent lifecycle records intentionally
-// live in town state, so CreateAgentBead normally re-roots through
-// ForAgentBead. Rig singleton identities (Witness and Refinery) are the
-// exception: they must be durable records in the rig database so patrol and
-// resolver commands can find them from either town or rig contexts.
-func (b *Beads) ForLocalBeads() *Beads {
-	return &Beads{
-		workDir:    b.workDir,
-		beadsDir:   b.beadsDir,
-		isolated:   b.isolated,
-		serverPort: b.serverPort,
-		store:      b.store,
-		noRoute:    true,
-	}
-}
-
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
 //
 // Agent beads (labeled gt:agent) live in the TOWN database, but their IDs

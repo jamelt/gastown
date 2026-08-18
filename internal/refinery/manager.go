@@ -191,10 +191,6 @@ func (m *Manager) start(foreground bool, agentOverride string, allowForkRig bool
 		}
 	}
 
-	if err := m.rig.EnsureIdentities(); err != nil {
-		return fmt.Errorf("rig identity preflight failed; refinery not started: %w", err)
-	}
-
 	// Note: No PID check per ZFC - tmux session is the source of truth
 
 	// Background mode: spawn a Claude agent in a tmux session
@@ -343,13 +339,6 @@ func (m *Manager) start(foreground bool, agentOverride string, allowForkRig bool
 func (m *Manager) ForkRigStartError() error {
 	cfg, err := rig.LoadRigConfig(m.rig.Path)
 	if err != nil || cfg == nil || strings.TrimSpace(cfg.UpstreamURL) == "" {
-		return nil
-	}
-	// A fork remote describes transport, not necessarily workflow. Operators
-	// may explicitly authorize the local Refinery/MQ in rig-local settings for
-	// an authoritative fork. Absent that explicit opt-in, retain PR-only safety.
-	if settings, settingsErr := config.LoadRigSettings(config.RigSettingsPath(m.rig.Path)); settingsErr == nil &&
-		settings != nil && settings.MergeQueue != nil && settings.MergeQueue.Enabled {
 		return nil
 	}
 	return NewForkRigError(m.rig.Name, cfg.UpstreamURL)

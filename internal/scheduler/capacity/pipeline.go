@@ -21,7 +21,6 @@ type SlingContextFields struct {
 	Version          int    `json:"version"`
 	WorkBeadID       string `json:"work_bead_id"`
 	TargetRig        string `json:"target_rig"`
-	EnqueuedBy       string `json:"enqueued_by,omitempty"`
 	Formula          string `json:"formula,omitempty"`
 	Args             string `json:"args,omitempty"`
 	Vars             string `json:"vars,omitempty"`
@@ -229,7 +228,6 @@ type DispatchParams struct {
 	NoMerge      bool
 	ReviewOnly   bool
 	HookRawBead  bool
-	EnqueuedBy   string
 }
 
 // ReconstructFromContext builds DispatchParams from sling context fields.
@@ -248,7 +246,6 @@ func ReconstructFromContext(ctx *SlingContextFields) DispatchParams {
 		NoMerge:      ctx.NoMerge,
 		ReviewOnly:   ctx.ReviewOnly,
 		HookRawBead:  ctx.HookRawBead,
-		EnqueuedBy:   ctx.EnqueuedBy,
 	}
 	if ctx.Vars != "" {
 		p.Vars = splitVars(ctx.Vars)
