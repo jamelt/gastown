@@ -2764,8 +2764,9 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	// notifyRefineryMergeReady takes workDir and calls workspace.Find(workDir) internally
 	notifyRefineryMergeReady(townRoot, "dashboard", result)
 
-	// Verify that a MERGE_READY event file was created in the refinery channel
-	eventDir := filepath.Join(townRoot, "events", "refinery")
+	// Verify that a MERGE_READY event file was created in the rig-scoped
+	// refinery channel (gt-v5d4: channel must not be shared across rigs).
+	eventDir := filepath.Join(townRoot, "events", "refinery-dashboard")
 	entries, err := os.ReadDir(eventDir)
 	if err != nil {
 		t.Fatalf("reading event dir: %v", err)
@@ -2779,7 +2780,7 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 
 	if len(eventFiles) == 0 {
-		t.Fatal("expected at least one .event file in ~/gt/events/refinery/, got none")
+		t.Fatal("expected at least one .event file in ~/gt/events/refinery-dashboard/, got none")
 	}
 
 	// Read and verify the event content
@@ -2796,8 +2797,8 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	if event["type"] != "MERGE_READY" {
 		t.Errorf("event type = %v, want MERGE_READY", event["type"])
 	}
-	if event["channel"] != "refinery" {
-		t.Errorf("event channel = %v, want refinery", event["channel"])
+	if event["channel"] != "refinery-dashboard" {
+		t.Errorf("event channel = %v, want refinery-dashboard", event["channel"])
 	}
 
 	payload, ok := event["payload"].(map[string]interface{})
@@ -2809,6 +2810,35 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 	if payload["rig"] != "dashboard" {
 		t.Errorf("payload.rig = %v, want dashboard", payload["rig"])
+	}
+}
+
+// TestNotifyRefineryMergeReady_DoesNotCrossRigChannels is the gt-v5d4
+// regression test: an emit for rig A's refinery must land only in rig A's
+// channel directory, never in rig B's. Before the fix, every rig shared the
+// literal "refinery" channel, so any rig's MQ_SUBMIT/MERGE_READY woke every
+// other rig's refinery await-event loop, resetting its idle backoff and
+// causing a fleet-wide busy loop.
+func TestNotifyRefineryMergeReady_DoesNotCrossRigChannels(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
+
+	notifyRefineryMergeReady(townRoot, "rig-a", &HandlerResult{})
+
+	rigAEventDir := filepath.Join(townRoot, "events", "refinery-rig-a")
+	if entries, err := os.ReadDir(rigAEventDir); err != nil || len(entries) == 0 {
+		t.Fatalf("expected an event in %s, got entries=%v err=%v", rigAEventDir, entries, err)
+	}
+
+	rigBEventDir := filepath.Join(townRoot, "events", "refinery-rig-b")
+	if _, err := os.ReadDir(rigBEventDir); err == nil {
+		t.Fatalf("rig A's emit must not create rig B's channel dir %s", rigBEventDir)
 	}
 }
 

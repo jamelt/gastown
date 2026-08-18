@@ -210,7 +210,7 @@ func TestEnsureRefineryRunningSafetyStoppedDoesNotSpawn(t *testing.T) {
 	townRoot := t.TempDir()
 	writeDaemonTownFile(t, townRoot, "mayor/town.json", `{"name":"test"}`)
 	writeDaemonTownFile(t, townRoot, ".beads/metadata.json", `{"prefix":"hq"}`)
-	writeDaemonTownFile(t, townRoot, "events/refinery/pending.event", "{}")
+	writeDaemonTownFile(t, townRoot, "events/refinery-testrig/pending.event", "{}")
 	if err := os.MkdirAll(filepath.Join(townRoot, "testrig"), 0o755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestEnsureRefineryRunningForkRigDoesNotSpawn(t *testing.T) {
 		t.Skip("mock tmux script uses POSIX shell")
 	}
 	townRoot := t.TempDir()
-	writeDaemonTownFile(t, townRoot, "events/refinery/pending.event", "{}")
+	writeDaemonTownFile(t, townRoot, "events/refinery-testrig/pending.event", "{}")
 	writeDaemonTownFile(t, townRoot, "testrig/config.json", `{"upstream_url":"https://github.com/upstream/repo","beads":{"prefix":"gt"}}`)
 
 	binDir := t.TempDir()
