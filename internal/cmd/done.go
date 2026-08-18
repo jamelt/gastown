@@ -1142,14 +1142,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		contam, err := g.CheckBranchContamination(contaminationBase)
 		if err == nil && contam.Behind > 0 {
-			const warnThreshold = 50
-			const blockThreshold = 200
-			if contam.Behind >= blockThreshold {
+			if contam.Behind >= git.ContaminationBlockBehind {
 				return fmt.Errorf("branch contamination: %d commits behind %s (threshold: %d)\n"+
 					"The branch is severely stale and will include unrelated changes in the PR.\n"+
 					"Fix: git fetch %s && git rebase %s",
-					contam.Behind, contaminationBase, blockThreshold, fetchRemote, contaminationBase)
-			} else if contam.Behind >= warnThreshold {
+					contam.Behind, contaminationBase, git.ContaminationBlockBehind, fetchRemote, contaminationBase)
+			} else if contam.Behind >= git.ContaminationWarnBehind {
 				style.PrintWarning("branch is %d commits behind %s — consider rebasing to avoid PR contamination", contam.Behind, contaminationBase)
 			}
 

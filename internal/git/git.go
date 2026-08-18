@@ -2558,6 +2558,65 @@ type BranchContamination struct {
 	Ahead  int // commits HEAD is ahead of base
 }
 
+// Contamination thresholds shared by every caller that gates on branch
+// divergence (gt done's preflight, gt pr-sheriff-check --merge-gate, and the
+// branch-hygiene tap guard). Behind thresholds were established for GH#2220.
+// Ahead thresholds close a gap GH#2220 left open: a branch can carry commits
+// unrelated to its intended diff without ever falling behind. The known
+// contamination cases (PR #4238: ~86 ahead, PR #4257: ~98 ahead) were both
+// well past these Ahead thresholds; a small legitimate replacement/fixup
+// branch is expected to stay in the low single-to-double digits.
+const (
+	ContaminationWarnBehind  = 50
+	ContaminationBlockBehind = 200
+	ContaminationWarnAhead   = 20
+	ContaminationBlockAhead  = 50
+)
+
+// ContaminationSeverity classifies how severe a BranchContamination reading is.
+type ContaminationSeverity int
+
+const (
+	SeverityClean ContaminationSeverity = iota
+	SeverityWarn
+	SeverityBlock
+)
+
+// Evaluate classifies a contamination reading against the shared thresholds,
+// returning the worst severity found across both dimensions (Behind and
+// Ahead) plus a human-readable reason for each dimension that is at or above
+// its warn threshold.
+func (bc BranchContamination) Evaluate() (ContaminationSeverity, []string) {
+	severity := SeverityClean
+	var reasons []string
+
+	raise := func(s ContaminationSeverity) {
+		if s > severity {
+			severity = s
+		}
+	}
+
+	switch {
+	case bc.Behind >= ContaminationBlockBehind:
+		raise(SeverityBlock)
+		reasons = append(reasons, fmt.Sprintf("%d commits behind (block threshold: %d)", bc.Behind, ContaminationBlockBehind))
+	case bc.Behind >= ContaminationWarnBehind:
+		raise(SeverityWarn)
+		reasons = append(reasons, fmt.Sprintf("%d commits behind (warn threshold: %d)", bc.Behind, ContaminationWarnBehind))
+	}
+
+	switch {
+	case bc.Ahead >= ContaminationBlockAhead:
+		raise(SeverityBlock)
+		reasons = append(reasons, fmt.Sprintf("%d commits ahead, likely unrelated changes (block threshold: %d)", bc.Ahead, ContaminationBlockAhead))
+	case bc.Ahead >= ContaminationWarnAhead:
+		raise(SeverityWarn)
+		reasons = append(reasons, fmt.Sprintf("%d commits ahead, check for unrelated changes (warn threshold: %d)", bc.Ahead, ContaminationWarnAhead))
+	}
+
+	return severity, reasons
+}
+
 // CheckBranchContamination checks whether the current branch has diverged
 // significantly from a base ref (typically origin/main). Returns the number
 // of commits behind and ahead, letting callers decide severity thresholds.
