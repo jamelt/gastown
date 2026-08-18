@@ -183,21 +183,25 @@ func TestNoRetryPolicy(t *testing.T) {
 
 func TestReconstructFromContext(t *testing.T) {
 	ctx := &SlingContextFields{
-		WorkBeadID:  "bead-123",
-		TargetRig:   "prod-rig",
-		TargetAgent: "prod-rig/polecats/garnet",
-		Formula:     "mol-polecat-work",
-		Args:        "do stuff",
-		Vars:        "x=1\ny=2",
-		Merge:       "mr",
-		BaseBranch:  "main",
-		Account:     "acme",
-		Agent:       "codex",
-		Mode:        "ralph",
-		NoMerge:     true,
-		ReviewOnly:  true,
-		HookRawBead: true,
-		EnqueuedBy:  "mayor/",
+		WorkBeadID:    "bead-123",
+		TargetRig:     "prod-rig",
+		TargetAgent:   "prod-rig/polecats/garnet",
+		Formula:       "mol-polecat-work",
+		Args:          "do stuff",
+		Vars:          "x=1\ny=2",
+		Merge:         "mr",
+		BaseBranch:    "main",
+		BaseRef:       "upstream/main",
+		PublishRemote: "origin",
+		PublishRef:    "polecat/garnet/bead-123",
+		PRTargetRef:   "upstream/main",
+		Account:       "acme",
+		Agent:         "codex",
+		Mode:          "ralph",
+		NoMerge:       true,
+		ReviewOnly:    true,
+		HookRawBead:   true,
+		EnqueuedBy:    "mayor/",
 	}
 
 	params := ReconstructFromContext(ctx)
@@ -225,6 +229,18 @@ func TestReconstructFromContext(t *testing.T) {
 	}
 	if params.BaseBranch != "main" {
 		t.Errorf("BaseBranch: got %q, want %q", params.BaseBranch, "main")
+	}
+	if params.BaseRef != "upstream/main" {
+		t.Errorf("BaseRef: got %q, want %q", params.BaseRef, "upstream/main")
+	}
+	if params.PublishRemote != "origin" {
+		t.Errorf("PublishRemote: got %q, want %q", params.PublishRemote, "origin")
+	}
+	if params.PublishRef != "polecat/garnet/bead-123" {
+		t.Errorf("PublishRef: got %q, want %q", params.PublishRef, "polecat/garnet/bead-123")
+	}
+	if params.PRTargetRef != "upstream/main" {
+		t.Errorf("PRTargetRef: got %q, want %q", params.PRTargetRef, "upstream/main")
 	}
 	if params.Account != "acme" {
 		t.Errorf("Account: got %q, want %q", params.Account, "acme")
