@@ -382,7 +382,7 @@ func ensureDatabaseInitialized(beadsDir string) error {
 	// bd init must run from the parent directory (not inside .beads/).
 	// Use --server to match all production callers (rig/manager.go, doctor/rig_check.go, cmd/install.go).
 	parentDir := filepath.Dir(beadsDir)
-	initArgs := []string{"init"}
+	initArgs := []string{"init", "--skip-agents", "--skip-hooks"}
 	if prefix != "" {
 		initArgs = append(initArgs, "--prefix", prefix)
 	}
@@ -448,7 +448,6 @@ func ensureDatabaseInitialized(beadsDir string) error {
 //  4. Default: "gt"
 //
 // All candidates are validated against prefixRe before use.
-//
 func detectPrefix(beadsDir string) string {
 	resolvedBeadsDir := ResolveBeadsDir(beadsDir)
 	townRoot := FindTownRoot(filepath.Dir(resolvedBeadsDir))
