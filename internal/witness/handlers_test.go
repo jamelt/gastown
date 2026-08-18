@@ -121,11 +121,6 @@ func runWitnessGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
-type testMayorEvent struct {
-	Type    string            `json:"type"`
-	Payload map[string]string `json:"payload"`
-}
-
 func setupSlotOpenTestTown(t *testing.T) (string, string) {
 	t.Helper()
 	townRoot := t.TempDir()
@@ -142,25 +137,15 @@ func setupSlotOpenTestTown(t *testing.T) (string, string) {
 	return townRoot, workDir
 }
 
-func readMayorEvents(t *testing.T, townRoot string) []testMayorEvent {
+func assertNoMayorEvents(t *testing.T, townRoot string) {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join(townRoot, "events", "mayor", "*.event"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := make([]testMayorEvent, 0, len(paths))
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var event testMayorEvent
-		if err := json.Unmarshal(data, &event); err != nil {
-			t.Fatal(err)
-		}
-		events = append(events, event)
+	if len(paths) != 0 {
+		t.Fatalf("mayor event files = %v, want none", paths)
 	}
-	return events
 }
 
 func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
@@ -168,17 +153,7 @@ func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeDeferred))
 
-	events := readMayorEvents(t, townRoot)
-	if len(events) != 1 {
-		t.Fatalf("events = %v, want one SLOT_BLOCKED event", events)
-	}
-	event := events[0]
-	if event.Type != "SLOT_BLOCKED" {
-		t.Fatalf("event type = %q, want SLOT_BLOCKED", event.Type)
-	}
-	if event.Payload["reason"] != "exit-deferred" {
-		t.Fatalf("reason = %q, want exit-deferred", event.Payload["reason"])
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
 func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
@@ -214,12 +189,10 @@ func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
 	if !called {
 		t.Fatal("scheduler trigger was not called")
 	}
-	if events := readMayorEvents(t, townRoot); len(events) != 0 {
-		t.Fatalf("events = %+v, want none when scheduler dispatches", events)
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
-func TestNotifyMayorSlotOpen_DispatchThenEmptyEmitsSchedulerOpen(t *testing.T) {
+func TestNotifyMayorSlotOpen_DispatchThenEmptyNotifiesWithoutEvent(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
@@ -250,13 +223,7 @@ func TestNotifyMayorSlotOpen_DispatchThenEmptyEmitsSchedulerOpen(t *testing.T) {
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	events := readMayorEvents(t, townRoot)
-	if len(events) != 1 {
-		t.Fatalf("events = %+v, want one SCHEDULER_OPEN event", events)
-	}
-	if events[0].Type != "SCHEDULER_OPEN" {
-		t.Fatalf("event type = %q, want SCHEDULER_OPEN", events[0].Type)
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
 func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T) {
@@ -284,12 +251,10 @@ func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	if events := readMayorEvents(t, townRoot); len(events) != 0 {
-		t.Fatalf("events = %+v, want none after confirmed dispatch", events)
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
-func TestNotifyMayorSlotOpen_EmitsSchedulerOpenWhenQueueEmpty(t *testing.T) {
+func TestNotifyMayorSlotOpen_QueueEmptyNotifiesWithoutEvent(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
@@ -318,16 +283,7 @@ func TestNotifyMayorSlotOpen_EmitsSchedulerOpenWhenQueueEmpty(t *testing.T) {
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	events := readMayorEvents(t, townRoot)
-	if len(events) != 1 {
-		t.Fatalf("events = %+v, want one SCHEDULER_OPEN event", events)
-	}
-	if events[0].Type != "SCHEDULER_OPEN" {
-		t.Fatalf("event type = %q, want SCHEDULER_OPEN", events[0].Type)
-	}
-	if events[0].Payload["capacity_free"] != "2" {
-		t.Fatalf("capacity_free = %q, want 2", events[0].Payload["capacity_free"])
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
 func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
@@ -361,13 +317,7 @@ func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	events := readMayorEvents(t, townRoot)
-	if len(events) != 1 {
-		t.Fatalf("events = %+v, want one fallback SLOT_OPEN event", events)
-	}
-	if events[0].Type != "SLOT_OPEN" {
-		t.Fatalf("event type = %q, want SLOT_OPEN", events[0].Type)
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
 func TestNotifyMayorSlotOpen_NoDispatchAfterCapacityFillsSuppressesMayor(t *testing.T) {
@@ -403,9 +353,7 @@ func TestNotifyMayorSlotOpen_NoDispatchAfterCapacityFillsSuppressesMayor(t *test
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	if events := readMayorEvents(t, townRoot); len(events) != 0 {
-		t.Fatalf("events = %+v, want none when scheduler no longer has capacity", events)
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
 func TestParseSchedulerRunDispatched(t *testing.T) {

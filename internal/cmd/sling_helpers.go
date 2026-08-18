@@ -1025,15 +1025,6 @@ func nudgeWitness(rigName, message string) {
 		return // Don't actually nudge tmux in tests
 	}
 
-	// Emit a file event so the witness's await-event unblocks instantly.
-	townRoot, _ := workspace.FindFromCwd()
-	if townRoot != "" {
-		_, _ = channelevents.EmitToTown(townRoot, "witness", "POLECAT_DONE", []string{
-			"source=polecat",
-			"message=" + message,
-		})
-	}
-
 	t := tmux.NewTmux()
 	if err := t.NudgeSession(witnessSession, message); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge witness %s: %v\n", witnessSession, err)
