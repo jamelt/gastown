@@ -45,3 +45,33 @@ func TestDoltLineageCheckReportsIndependentHistories(t *testing.T) {
 		t.Fatalf("unexpected fix hint: %s", result.FixHint)
 	}
 }
+
+func TestDoltLineageCheckWarnsOnUnregisteredRemote(t *testing.T) {
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, "testrig", ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("sync.remote: file:///remote\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"rigdb"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	original := inspectDoltLineageFn
+	t.Cleanup(func() { inspectDoltLineageFn = original })
+	inspectDoltLineageFn = func(_, _ string) (doltserver.LineageReport, error) {
+		return doltserver.LineageReport{Database: "rigdb", State: doltserver.LineageNoRemote}, nil
+	}
+
+	result := NewDoltLineageCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "testrig"})
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "no registered remote") {
+		t.Fatalf("unexpected message: %s", result.Message)
+	}
+	if !strings.Contains(result.FixHint, "rigdb") {
+		t.Fatalf("unexpected fix hint: %s", result.FixHint)
+	}
+}
