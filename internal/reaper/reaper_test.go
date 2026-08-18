@@ -503,6 +503,34 @@ func TestScanFlagsReapCandidateSpike(t *testing.T) {
 	}
 }
 
+// TestScanNoSpikeAtThresholdBoundary verifies the comparison is strictly
+// greater-than: a backlog exactly AT DefaultAlertThreshold must not fire.
+func TestScanNoSpikeAtThresholdBoundary(t *testing.T) {
+	now := time.Now().UTC()
+	n := DefaultAlertThreshold
+	wisps := make(map[string]*fakeWisp, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("stale-orphan-%d", i)
+		wisps[id] = &fakeWisp{id: id, status: "open", issueType: "task", createdAt: now.Add(-48 * time.Hour)}
+	}
+	state := &fakeReaperState{wisps: wisps, ops: map[int][]string{}}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	scan, err := Scan(db, "testdb", 24*time.Hour, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scan.ReapCandidates != n {
+		t.Fatalf("ReapCandidates = %d, want %d", scan.ReapCandidates, n)
+	}
+	for _, a := range scan.Anomalies {
+		if a.Type == "reap_candidate_spike" {
+			t.Fatalf("ReapCandidates exactly at threshold (%d) should not trip reap_candidate_spike, got: %#v", n, scan.Anomalies)
+		}
+	}
+}
+
 // TestScanNoSpikeOnHealthyVolume verifies that a large but healthy open-wisp
 // volume (recent, non-stale wisps) does NOT trip the reap_candidate_spike
 // anomaly. This is the exact false-positive-flood scenario this fix targets:
@@ -541,6 +569,10 @@ func TestScanNoSpikeOnHealthyVolume(t *testing.T) {
 // of molecule-step closures (e.g. one big molecule finishing) does not trip
 // reap_candidate_spike. MoleculeStepCandidates has no age filter (see Reap()),
 // so it is bursty by nature — deliberately excluded from the threshold check.
+// Step wisps are backdated past max_age (not just "open") so this test
+// actually isolates the closedMoleculeStepExcludeJoin exclusion in the
+// reap-candidates query — with a recent createdAt alone, the age filter
+// would already zero out ReapCandidates regardless of the exclusion.
 func TestScanNoSpikeFromMoleculeStepBurst(t *testing.T) {
 	now := time.Now().UTC()
 	n := DefaultAlertThreshold + 50
@@ -549,7 +581,7 @@ func TestScanNoSpikeFromMoleculeStepBurst(t *testing.T) {
 	deps := make([]fakeDep, 0, n)
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("step-%d", i)
-		wisps[id] = &fakeWisp{id: id, status: "open", issueType: "task", createdAt: now.Add(-1 * time.Hour)}
+		wisps[id] = &fakeWisp{id: id, status: "open", issueType: "task", createdAt: now.Add(-48 * time.Hour)}
 		deps = append(deps, fakeDep{issueID: id, dependsOnID: "big-mol", depType: "parent-child"})
 	}
 	state := &fakeReaperState{wisps: wisps, deps: deps, ops: map[int][]string{}}
