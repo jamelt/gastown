@@ -31,6 +31,10 @@ type SlingContextFields struct {
 	Convoy           string `json:"convoy,omitempty"`
 	BaseBranch       string `json:"base_branch,omitempty"`
 	ResumeBranch     string `json:"resume_branch,omitempty"`
+	BaseRef          string `json:"base_ref,omitempty"`
+	PublishRemote    string `json:"publish_remote,omitempty"`
+	PublishRef       string `json:"publish_ref,omitempty"`
+	PRTargetRef      string `json:"pr_target_ref,omitempty"`
 	NoMerge          bool   `json:"no_merge,omitempty"`
 	ReviewOnly       bool   `json:"review_only,omitempty"`
 	Account          string `json:"account,omitempty"`
@@ -257,42 +261,50 @@ func FilterCircuitBroken(beads []PendingBead, maxFailures int) ([]PendingBead, i
 // DispatchParams captures what the scheduler needs to tell the dispatcher.
 // Mirrors the relevant fields from cmd.SlingParams but is scheduler-owned.
 type DispatchParams struct {
-	BeadID       string
-	FormulaName  string
-	RigName      string
-	TargetAgent  string
-	Args         string
-	Vars         []string
-	Merge        string
-	BaseBranch   string
-	ResumeBranch string
-	Account      string
-	Agent        string
-	Mode         string
-	NoMerge      bool
-	ReviewOnly   bool
-	HookRawBead  bool
-	EnqueuedBy   string
+	BeadID        string
+	FormulaName   string
+	RigName       string
+	TargetAgent   string
+	Args          string
+	Vars          []string
+	Merge         string
+	BaseBranch    string
+	ResumeBranch  string
+	BaseRef       string
+	PublishRemote string
+	PublishRef    string
+	PRTargetRef   string
+	Account       string
+	Agent         string
+	Mode          string
+	NoMerge       bool
+	ReviewOnly    bool
+	HookRawBead   bool
+	EnqueuedBy    string
 }
 
 // ReconstructFromContext builds DispatchParams from sling context fields.
 func ReconstructFromContext(ctx *SlingContextFields) DispatchParams {
 	p := DispatchParams{
-		BeadID:       ctx.WorkBeadID,
-		RigName:      ctx.TargetRig,
-		TargetAgent:  ctx.TargetAgent,
-		FormulaName:  ctx.Formula,
-		Args:         ctx.Args,
-		Merge:        ctx.Merge,
-		BaseBranch:   ctx.BaseBranch,
-		ResumeBranch: ctx.ResumeBranch,
-		Account:      ctx.Account,
-		Agent:        ctx.Agent,
-		Mode:         ctx.Mode,
-		NoMerge:      ctx.NoMerge,
-		ReviewOnly:   ctx.ReviewOnly,
-		HookRawBead:  ctx.HookRawBead,
-		EnqueuedBy:   ctx.EnqueuedBy,
+		BeadID:        ctx.WorkBeadID,
+		RigName:       ctx.TargetRig,
+		TargetAgent:   ctx.TargetAgent,
+		FormulaName:   ctx.Formula,
+		Args:          ctx.Args,
+		Merge:         ctx.Merge,
+		BaseBranch:    ctx.BaseBranch,
+		ResumeBranch:  ctx.ResumeBranch,
+		BaseRef:       ctx.BaseRef,
+		PublishRemote: ctx.PublishRemote,
+		PublishRef:    ctx.PublishRef,
+		PRTargetRef:   ctx.PRTargetRef,
+		Account:       ctx.Account,
+		Agent:         ctx.Agent,
+		Mode:          ctx.Mode,
+		NoMerge:       ctx.NoMerge,
+		ReviewOnly:    ctx.ReviewOnly,
+		HookRawBead:   ctx.HookRawBead,
+		EnqueuedBy:    ctx.EnqueuedBy,
 	}
 	if ctx.Vars != "" {
 		p.Vars = splitVars(ctx.Vars)

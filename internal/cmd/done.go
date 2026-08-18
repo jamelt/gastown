@@ -712,6 +712,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// CheckUncommittedWork.UnpushedCommits doesn't work for branches
 			// without upstream tracking (common for polecats). Use the more
 			// robust BranchPushedToRemote which compares against origin/main.
+			// workRefs isn't resolved yet this early in the flow (needs the rig's
+			// defaultBranch, computed further down) — origin is correct here anyway
+			// since PublishRemote always resolves to origin (see ResolveWorkRefs).
 			pushed, unpushedCount, pushErr := g.BranchPushedToRemote(branch, "origin")
 			if pushErr != nil {
 				style.PrintWarning("could not check if branch is pushed: %v", pushErr)
@@ -945,6 +948,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		defaultBranch = rigCfg.DefaultBranch
 	}
 	baseRef := g.CleanBaseRef("origin", defaultBranch, doneTarget)
+	// workRefs resolves where this work publishes to and what a PR/MR targets,
+	// built on the same fork-detection primitives as baseRef above. Rig
+	// defaults only for now — explicit per-bead publish overrides are read
+	// from formula vars where individual call sites need them.
+	workRefs := g.ResolveWorkRefs(defaultBranch, git.WorkRefs{})
 
 	// For COMPLETED, we need an issue ID and branch must not be the default branch
 	var mrID string
@@ -1031,7 +1039,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// In that case, treat as "MR already submitted" and fall through. (GH#wd7)
 				branchPushedWithWork := false
 				if branch != defaultBranch {
-					pushed, unpushed, pushErr := g.BranchPushedToRemote(branch, "origin")
+					pushed, unpushed, pushErr := g.BranchPushedToRemote(branch, workRefs.PublishRemote)
 					branchPushedWithWork = pushErr == nil && pushed && unpushed == 0
 				}
 				if !branchPushedWithWork {
@@ -1085,7 +1093,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						if g.ForkBackedRemote("origin") {
 							return fmt.Errorf("cannot close no-MR code bead in fork/upstream mode: %s has no commits ahead of %s; use the fork PR flow instead", branch, baseRef)
 						}
-						if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, noMRCommitSHA); verifyErr != nil {
+						if verifyErr := g.VerifyPushedCommitReachableFromPushTarget(workRefs.PublishRemote, defaultBranch, noMRCommitSHA); verifyErr != nil {
 							noteVerifiedPushFailure(bd, cwd, issueID, defaultBranch, noMRCommitSHA, verifyErr)
 							return fmt.Errorf("cannot close no-MR code bead: %w", verifyErr)
 						}
@@ -1218,7 +1226,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// Push submodule changes before direct push (gt-dzs)
 			pushSubmoduleChanges(g, baseRef)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := g.Push("origin", directRefspec, false)
+			if guardErr := g.RefuseForkBackedDefaultPush(workRefs.PublishRemote, directRefspec, defaultBranch); guardErr != nil {
+				pushFailed = true
+				doneErrors = append(doneErrors, guardErr.Error())
+				style.PrintWarning("%s", guardErr.Error())
+				goto notifyWitness
+			}
+			directPushErr := g.Push(workRefs.PublishRemote, directRefspec, false)
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
@@ -1229,7 +1243,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			directCommitSHA, _ := g.Rev("HEAD")
 			if doneSkipVerify {
 				noteVerifiedPushSkipped(directBd, cwd, issueID, defaultBranch, directCommitSHA, "--skip-verify on direct merge")
-			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, directCommitSHA); verifyErr != nil {
+			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget(workRefs.PublishRemote, defaultBranch, directCommitSHA); verifyErr != nil {
 				pushFailed = true
 				errMsg := verifyErr.Error()
 				doneErrors = append(doneErrors, errMsg)
@@ -1318,7 +1332,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 			pushSubmoduleChanges(g, baseRef)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := g.Push("origin", directRefspec, false)
+			if guardErr := g.RefuseForkBackedDefaultPush(workRefs.PublishRemote, directRefspec, defaultBranch); guardErr != nil {
+				pushFailed = true
+				doneErrors = append(doneErrors, guardErr.Error())
+				style.PrintWarning("%s", guardErr.Error())
+				goto notifyWitness
+			}
+			directPushErr := g.Push(workRefs.PublishRemote, directRefspec, false)
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
@@ -1329,7 +1349,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			directCommitSHA, _ := g.Rev("HEAD")
 			if doneSkipVerify {
 				noteVerifiedPushSkipped(directBd, cwd, issueID, defaultBranch, directCommitSHA, "--skip-verify on late direct merge")
-			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, directCommitSHA); verifyErr != nil {
+			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget(workRefs.PublishRemote, defaultBranch, directCommitSHA); verifyErr != nil {
 				pushFailed = true
 				errMsg := verifyErr.Error()
 				doneErrors = append(doneErrors, errMsg)
@@ -1404,7 +1424,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		fmt.Printf("Pushing branch to remote...\n")
 		refspec = branch + ":" + branch
 		pushedCommitSHA, _ = g.Rev("HEAD")
-		pushErr = g.Push("origin", refspec, false)
+		pushErr = g.Push(workRefs.PublishRemote, refspec, false)
 		if pushErr != nil {
 			// Primary push failed — try fallback from the bare repo (GH #1348).
 			// When polecat sessions are reused or worktrees are stale, the worktree's
@@ -1415,7 +1435,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			bareRepoPath := filepath.Join(rigPath, ".repo.git")
 			if _, statErr := os.Stat(bareRepoPath); statErr == nil {
 				bareGit := git.NewGitWithDir(bareRepoPath, "")
-				pushErr = bareGit.Push("origin", refspec, false)
+				pushErr = bareGit.Push(workRefs.PublishRemote, refspec, false)
 				if pushErr != nil {
 					style.PrintWarning("bare repo push also failed: %v", pushErr)
 				} else {
@@ -1441,7 +1461,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		if doneSkipVerify {
 			noteVerifiedPushSkipped(sourceBD, cwd, issueID, branch, pushedCommitSHA, "--skip-verify on branch push")
-		} else if verifyErr := verifyPushedCommitWithBareFallback(g, townRoot, rigName, branch, pushedCommitSHA); verifyErr != nil {
+		} else if verifyErr := verifyPushedCommitWithBareFallback(g, townRoot, rigName, workRefs.PublishRemote, branch, pushedCommitSHA); verifyErr != nil {
 			pushFailed = true
 			errMsg := verifyErr.Error()
 			doneErrors = append(doneErrors, errMsg)
@@ -1513,12 +1533,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					prBodyBuilder.WriteString("---\n")
 					prBodyBuilder.WriteString(fmt.Sprintf("*Polecat: %s | Issue: %s*\n", worker, issueID))
 					prBody := prBodyBuilder.String()
-					ghCmd := exec.CommandContext(context.Background(), "gh", "pr", "create",
-						"--base", defaultBranch,
-						"--head", branch,
-						"--title", prTitle,
-						"--body", prBody,
-					)
+					prArgs := prCreateArgs(g, defaultBranch, branch, prTitle, prBody)
+					ghCmd := exec.CommandContext(context.Background(), "gh", prArgs...)
 					ghCmd.Dir = cwd
 					prOutput, prErr := ghCmd.Output()
 					if prErr != nil {
@@ -2076,8 +2092,36 @@ func noteVerifiedPushSkipped(sourceBD *beads.Beads, cwd, issueID, branch, commit
 	_ = bd.AddComment(issueID, msg)
 }
 
-func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, commit string) error {
-	verifyErr := g.VerifyPushedCommit("origin", branch, commit)
+// prCreateArgs builds the `gh pr create` argument list for a fork-aware PR
+// flow. When the PR target repo (upstream) differs from the push destination
+// (origin), gh needs an explicit --repo and an owner-qualified --head —
+// otherwise gh infers both from the local origin remote, which is correct
+// as-is for non-fork rigs (no --repo, bare --head branch name).
+func prCreateArgs(g *git.Git, defaultBranch, branch, title, body string) []string {
+	headRef := branch
+	args := []string{"pr", "create", "--base", defaultBranch}
+	resolvedHead, headErr := g.PRHeadRef(branch)
+	if headErr != nil {
+		// Can't determine whether this is a fork PR — fall back to gh's own
+		// inference from the local origin remote. On a genuine fork rig this
+		// would misdirect the PR at origin (the fork) instead of upstream, so
+		// surface it instead of failing silently.
+		style.PrintWarning("could not resolve fork-aware PR head/repo, falling back to gh's default inference: %v", headErr)
+	} else {
+		headRef = resolvedHead
+		if strings.Contains(resolvedHead, ":") {
+			if targetRepo, repoErr := g.PRTargetRepo(); repoErr == nil && targetRepo != "" {
+				args = append(args, "--repo", targetRepo)
+			} else if repoErr != nil {
+				style.PrintWarning("could not resolve PR target repo, omitting --repo: %v", repoErr)
+			}
+		}
+	}
+	return append(args, "--head", headRef, "--title", title, "--body", body)
+}
+
+func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, remote, branch, commit string) error {
+	verifyErr := g.VerifyPushedCommit(remote, branch, commit)
 	if verifyErr == nil {
 		return nil
 	}
