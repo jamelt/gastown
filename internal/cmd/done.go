@@ -1533,12 +1533,24 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					prBodyBuilder.WriteString("---\n")
 					prBodyBuilder.WriteString(fmt.Sprintf("*Polecat: %s | Issue: %s*\n", worker, issueID))
 					prBody := prBodyBuilder.String()
-					ghCmd := exec.CommandContext(context.Background(), "gh", "pr", "create",
-						"--base", defaultBranch,
-						"--head", branch,
-						"--title", prTitle,
-						"--body", prBody,
-					)
+					// Resolve --head/--repo for a fork PR flow: when the PR target
+					// repo (upstream) differs from the push destination (origin),
+					// gh needs an explicit --repo and an owner-qualified --head —
+					// otherwise gh infers both from the local origin remote, which
+					// is correct as-is for non-fork rigs (headRef stays the bare
+					// branch name and prArgs gains no --repo).
+					headRef := branch
+					prArgs := []string{"pr", "create", "--base", defaultBranch}
+					if resolvedHead, headErr := g.PRHeadRef(branch); headErr == nil {
+						headRef = resolvedHead
+						if strings.Contains(resolvedHead, ":") {
+							if targetRepo, repoErr := g.PRTargetRepo(); repoErr == nil && targetRepo != "" {
+								prArgs = append(prArgs, "--repo", targetRepo)
+							}
+						}
+					}
+					prArgs = append(prArgs, "--head", headRef, "--title", prTitle, "--body", prBody)
+					ghCmd := exec.CommandContext(context.Background(), "gh", prArgs...)
 					ghCmd.Dir = cwd
 					prOutput, prErr := ghCmd.Output()
 					if prErr != nil {
