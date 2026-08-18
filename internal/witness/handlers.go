@@ -888,16 +888,6 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 		return
 	}
 	if exitType != string(ExitTypeCompleted) {
-		decision := slotOpenDecisionForNotify(workDir, townRoot, rigName, polecatName, exitType)
-		if !decision.Reusable {
-			_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_BLOCKED", []string{
-				"source=witness",
-				"rig=" + rigName,
-				"polecat=" + polecatName,
-				"exit=" + exitType,
-				"reason=" + decision.Reason,
-			})
-		}
 		return
 	}
 	if ok, reason := shouldNotifyMayorSlotOpen(workDir, rigName, polecatName); !ok {
@@ -906,13 +896,6 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	}
 	decision := slotOpenDecisionForNotify(workDir, townRoot, rigName, polecatName, exitType)
 	if !decision.Reusable {
-		_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_BLOCKED", []string{
-			"source=witness",
-			"rig=" + rigName,
-			"polecat=" + polecatName,
-			"exit=" + exitType,
-			"reason=" + decision.Reason,
-		})
 		return
 	}
 	if result, err := runSchedulerForSlotOpen(townRoot); err != nil {
@@ -931,14 +914,6 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	} else if status := schedulerStatusAfterSlot(result); status.Capacity.Max > 0 && (status.Paused || status.Capacity.Free <= 0) {
 		return
 	}
-
-	// Emit SLOT_OPEN channel event so Mayor's await-event unblocks instantly.
-	_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_OPEN", []string{
-		"source=witness",
-		"rig=" + rigName,
-		"polecat=" + polecatName,
-		"exit=" + exitType,
-	})
 
 	// Try nudge first — lightweight, no Dolt commit.
 	mayorSession := session.MayorSessionName()
@@ -973,15 +948,6 @@ func schedulerStatusAfterSlot(result slotOpenSchedulerResult) slotOpenSchedulerS
 }
 
 func notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType string, status slotOpenSchedulerStatus) {
-	_, _ = channelevents.EmitToTown(townRoot, "mayor", "SCHEDULER_OPEN", []string{
-		"source=witness",
-		"rig=" + rigName,
-		"polecat=" + polecatName,
-		"exit=" + exitType,
-		"capacity_free=" + strconv.Itoa(status.Capacity.Free),
-		"queued_ready=" + strconv.Itoa(status.QueuedReady),
-	})
-
 	mayorSession := session.MayorSessionName()
 	t := tmux.NewTmux()
 	msg := fmt.Sprintf("SCHEDULER_OPEN: %s/%s completed (exit=%s); scheduler has capacity but no eligible queued beads remain.", rigName, polecatName, exitType)
