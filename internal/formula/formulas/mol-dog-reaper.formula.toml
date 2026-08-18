@@ -23,7 +23,7 @@ This is infrastructure cleanup work:
 | purge_age | config | Max closed wisp age before purging (default 7d) |
 | stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
 | mail_delete_age | config | Max closed mail age before purging (default 7d) |
-| alert_threshold | config | Open wisp count that triggers escalation (default 3000) |
+| alert_threshold | config | Reap-candidate backlog count, per database, that triggers escalation (default 150) |
 | dry_run | config | If "true", report without acting |
 | databases | config | Comma-separated DB list (default: auto-discover) |
 | db_delay | config | Delay between databases to reduce Dolt load (default 250ms) |
@@ -38,9 +38,20 @@ issues that are not P0/P1, not epics, and have no active dependencies.
 
 The Dog should watch for and flag:
 - Dangling parent references (wisps referencing purged parents)
-- Sudden spikes in reap candidates (suggests a wisp lifecycle problem)
-- Open wisp counts exceeding alert_threshold
+- `reap_candidate_spike` anomalies (a database's `reap_candidates` exceeds
+  alert_threshold — suggests stale wisps aren't getting cleaned up)
 - Dolt commit failures (data may not be persisted)
+
+Total open wisp volume (`open_wisps`) is NOT by itself an anomaly — it scales
+with healthy town activity and stays high in a normal, busy town. Two prior
+fixes tried alerting on it directly (500->800->3000) and each was outgrown by
+normal growth, producing a recurring false-alarm escalation flood (see
+gt-reaper-alert-flood-root-cause). Only flag `open_wisps` if a single database
+looks like truly unbounded/runaway growth — e.g. far beyond any plausible
+healthy volume for this town, suggesting a leak of wisps stuck behind a
+parent that never closes (those are invisible to reap_candidates by design).
+This is a judgment call, not a hard threshold — when in doubt, don't escalate
+on volume alone.
 
 NOT anomalies (do NOT escalate these):
 - Scan/reap count mismatch (scan finds N, reap closes M < N): this is a benign
@@ -76,11 +87,15 @@ gt reaper scan --db=<name> \\
 ```
 
 **3. Inspect results for anomalies:**
-- Check the `anomalies` array in the JSON output
+- Check the `anomalies` array in the JSON output (per database)
 - Treat an absent `molecule_step_candidates` field as zero
 - Flag any `dangling_parent_ref` anomalies — these indicate wisps with
   parent dependency records pointing to purged/missing parents
-- If `open_wisps` exceeds {{alert_threshold}}, escalate
+- Flag any `reap_candidate_spike` anomalies — this database's `reap_candidates`
+  exceeded {{alert_threshold}}, i.e. stale wisps are backing up
+- Do NOT flag `open_wisps` alone — see "Anomaly Detection" above. Only note
+  it if a single database's volume looks like genuine unbounded/runaway
+  growth (use judgment, not a threshold)
 
 **4. Decide whether to proceed:**
 - If no candidates found across all databases, including `molecule_step_candidates`, skip remaining steps
@@ -109,9 +124,8 @@ gt reaper reap --db=<name> \\
 - Only escalate if reap returns an actual error (not a zero count).
 - Check for any anomalies in the response
 
-**3. Alert check:**
-If total open wisps across all databases exceed {{alert_threshold}},
-log a warning and consider escalating.
+Anomalies (including `reap_candidate_spike`) are already identified during
+the scan step — no separate alert check is needed here.
 
 **Exit criteria:** All stale wisps closed (or dry-run counts reported)."""
 
@@ -213,12 +227,22 @@ Generate summary and signal completion.
 **Anomalies**: (list any anomalies found)
 ```
 
-**2. If anomalies were found, escalate:**
+**2. If anomalies were found, escalate — one call per (database, anomaly type):**
 ```bash
-gt escalate "Reaper anomalies detected" -s MEDIUM -m "<anomaly details>"
+gt escalate "Reaper: <anomaly-type> in <database>" -s MEDIUM -m "<anomaly details>" \\
+  --fingerprint "reaper:<database>:<anomaly-type>"
 ```
 
-**Exit criteria:** Report generated, anomalies escalated if any."""
+The fingerprint MUST be stable across runs of the SAME underlying condition
+(no counts, no timestamps) so a persistent/recurring condition collapses into
+ONE open escalation instead of flooding a new bead + Mayor mail every cycle
+(`gt escalate` suppresses duplicates against any still-open bead with the
+same fingerprint). It MUST also be scoped to the specific database and
+anomaly type — a bare "reaper" fingerprint would silently swallow a NEW
+problem in a different database or of a different type. Example:
+`reaper:hq:reap_candidate_spike`.
+
+**Exit criteria:** Report generated, anomalies escalated (deduplicated) if any."""
 
 [vars]
 [vars.max_age]
@@ -238,8 +262,8 @@ description = "Max closed mail age before purging (e.g., '168h' = 7 days)"
 default = "168h"
 
 [vars.alert_threshold]
-description = "Open wisp count that triggers escalation warning"
-default = "3000"
+description = "Reap-candidate backlog count, per database, that triggers escalation (NOT open wisp volume — see reaper.DefaultAlertThreshold)"
+default = "150"
 
 [vars.dry_run]
 description = "If 'true', report without modifying data"

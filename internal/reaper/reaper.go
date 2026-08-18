@@ -157,16 +157,42 @@ const (
 	DefaultQueryTimeout = 30 * time.Second
 	// DefaultBatchSize is the number of rows per batch DELETE operation.
 	DefaultBatchSize = 100
-	// DefaultAlertThreshold is the open-wisp count above which callers should
-	// surface a warning. This must fire on genuine runaway accumulation, NOT on
-	// normal operation. The open-wisp count is dominated by healthy, recent
-	// wisps (observed steady-state ~1966 open in a busy town); actionable wisps
-	// are limited to stale open-parent-free wisps past max-age plus closed
-	// molecule-step wisps (typically ~15-25). The previous value of 800 sat below
-	// the healthy open count, so it false-alarmed HIGH every scan despite nothing
-	// being wrong. Raised to 3000 so the alert tracks runaway growth rather than
-	// the normal working set. See hq-57jr8.
-	DefaultAlertThreshold = 3000
+	// DefaultAlertThreshold is the actionable reap-candidate backlog
+	// (ReapCandidates, PER DATABASE) above which callers should flag a
+	// possible wisp-lifecycle problem. ReapCandidates is gated on age +
+	// orphaned/closed parent (see parentExcludeJoin) and stays low under
+	// healthy operation — typically ~15-25 per database. This threshold
+	// gives headroom against cycle-to-cycle jitter while still catching
+	// order-of-magnitude backlog spikes.
+	//
+	// Deliberately excludes MoleculeStepCandidates: a single large molecule
+	// finishing closes all of its child steps in one batch with no age
+	// filter (see Reap()), which is a legitimate bulk event, not a
+	// lifecycle problem, and would otherwise false-trip this check.
+	//
+	// This must NOT be compared against total open-wisp volume (OpenWisps):
+	// that number scales with healthy town activity (observed steady-state
+	// ~1966-3000+ open in a busy town) and is not itself a problem — two
+	// prior fixes (hq-57jr8, then #4451) raised a volume-based threshold
+	// (500->800->3000) and each was outgrown by normal activity, producing
+	// a recurring false-alarm escalation flood. See DefaultOpenWispSafetyThreshold
+	// for the separate, coarse volume check this supersedes for alerting
+	// purposes. See gt-reaper-alert-flood-root-cause.
+	DefaultAlertThreshold = 150
+
+	// DefaultOpenWispSafetyThreshold is a coarse, rarely-tripped safety net
+	// for unbounded open-wisp growth that DefaultAlertThreshold's backlog
+	// check cannot see: wisps stuck behind a parent that never closes are
+	// permanently excluded from ReapCandidates by design (parentExcludeJoin),
+	// so a leak on that path would grow OpenWisps forever without ever
+	// tripping the backlog check. Intentionally a raw-volume, low-sensitivity
+	// check, evaluated PER DATABASE — pair with escalation de-duplication
+	// (gt escalate --fingerprint) so a sustained trip creates one open
+	// escalation, not a flood of repeats. May need recalibration if a much
+	// busier town's healthy volume grows to approach it; that is an honest
+	// limit of a static threshold, not a reason to fold it back into
+	// DefaultAlertThreshold.
+	DefaultOpenWispSafetyThreshold = 3000
 )
 
 // ValidateDBName returns an error if the database name is unsafe.
@@ -175,6 +201,17 @@ func ValidateDBName(dbName string) error {
 		return fmt.Errorf("invalid database name: %q", dbName)
 	}
 	return nil
+}
+
+// ExceedsOpenWispSafetyThreshold reports whether a single database's open-wisp
+// count indicates a possible unbounded-growth leak (e.g. wisps stuck behind a
+// parent that never closes) rather than normal healthy volume. This is the
+// coarse, rarely-tripped safety net — see DefaultOpenWispSafetyThreshold.
+// Callers must evaluate this per database, not against a cross-database sum:
+// summing first makes the check scale with the number of monitored databases
+// rather than with any single database's health.
+func ExceedsOpenWispSafetyThreshold(openWisps int) bool {
+	return openWisps > DefaultOpenWispSafetyThreshold
 }
 
 // OpenDB opens a connection to the Dolt server for a given database.
@@ -390,6 +427,16 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	openQuery := "SELECT COUNT(*) FROM wisps WHERE status IN ('open', 'hooked', 'in_progress')"
 	if err := db.QueryRowContext(ctx, openQuery).Scan(&result.OpenWisps); err != nil {
 		return nil, fmt.Errorf("count open wisps: %w", err)
+	}
+
+	// Anomaly detection: reap-candidate backlog spike. Excludes
+	// MoleculeStepCandidates deliberately — see DefaultAlertThreshold doc.
+	if result.ReapCandidates > DefaultAlertThreshold {
+		result.Anomalies = append(result.Anomalies, Anomaly{
+			Type:    "reap_candidate_spike",
+			Message: fmt.Sprintf("%d wisp(s) are past max-age and eligible for reap (threshold %d) — stale wisps may not be getting cleaned up", result.ReapCandidates, DefaultAlertThreshold),
+			Count:   result.ReapCandidates,
+		})
 	}
 
 	// Anomaly detection: dangling parent references.

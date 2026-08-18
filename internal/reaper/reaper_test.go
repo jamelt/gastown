@@ -465,6 +465,165 @@ func TestClosedMoleculeStepReapBehavior(t *testing.T) {
 	}
 }
 
+// TestScanFlagsReapCandidateSpike verifies that Scan() flags a
+// reap_candidate_spike anomaly when a database's actionable reap-candidate
+// backlog exceeds DefaultAlertThreshold. Regression coverage for
+// gt-reaper-alert-flood-root-cause: the alert must be keyed on the
+// actionable backlog, not on total open-wisp volume.
+func TestScanFlagsReapCandidateSpike(t *testing.T) {
+	now := time.Now().UTC()
+	n := DefaultAlertThreshold + 1
+	wisps := make(map[string]*fakeWisp, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("stale-orphan-%d", i)
+		wisps[id] = &fakeWisp{id: id, status: "open", issueType: "task", createdAt: now.Add(-48 * time.Hour)}
+	}
+	state := &fakeReaperState{wisps: wisps, ops: map[int][]string{}}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	scan, err := Scan(db, "testdb", 24*time.Hour, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scan.ReapCandidates != n {
+		t.Fatalf("ReapCandidates = %d, want %d", scan.ReapCandidates, n)
+	}
+	var got *Anomaly
+	for i := range scan.Anomalies {
+		if scan.Anomalies[i].Type == "reap_candidate_spike" {
+			got = &scan.Anomalies[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("expected reap_candidate_spike anomaly, got: %#v", scan.Anomalies)
+	}
+	if got.Count != n {
+		t.Fatalf("reap_candidate_spike Count = %d, want %d", got.Count, n)
+	}
+}
+
+// TestScanNoSpikeAtThresholdBoundary verifies the comparison is strictly
+// greater-than: a backlog exactly AT DefaultAlertThreshold must not fire.
+func TestScanNoSpikeAtThresholdBoundary(t *testing.T) {
+	now := time.Now().UTC()
+	n := DefaultAlertThreshold
+	wisps := make(map[string]*fakeWisp, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("stale-orphan-%d", i)
+		wisps[id] = &fakeWisp{id: id, status: "open", issueType: "task", createdAt: now.Add(-48 * time.Hour)}
+	}
+	state := &fakeReaperState{wisps: wisps, ops: map[int][]string{}}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	scan, err := Scan(db, "testdb", 24*time.Hour, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scan.ReapCandidates != n {
+		t.Fatalf("ReapCandidates = %d, want %d", scan.ReapCandidates, n)
+	}
+	for _, a := range scan.Anomalies {
+		if a.Type == "reap_candidate_spike" {
+			t.Fatalf("ReapCandidates exactly at threshold (%d) should not trip reap_candidate_spike, got: %#v", n, scan.Anomalies)
+		}
+	}
+}
+
+// TestScanNoSpikeOnHealthyVolume verifies that a large but healthy open-wisp
+// volume (recent, non-stale wisps) does NOT trip the reap_candidate_spike
+// anomaly. This is the exact false-positive-flood scenario this fix targets:
+// total open-wisp volume scales with normal town activity and must not be
+// mistaken for an actionable backlog.
+func TestScanNoSpikeOnHealthyVolume(t *testing.T) {
+	now := time.Now().UTC()
+	n := DefaultAlertThreshold * 3
+	wisps := make(map[string]*fakeWisp, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("healthy-open-%d", i)
+		wisps[id] = &fakeWisp{id: id, status: "open", issueType: "task", createdAt: now.Add(-1 * time.Hour)}
+	}
+	state := &fakeReaperState{wisps: wisps, ops: map[int][]string{}}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	scan, err := Scan(db, "testdb", 24*time.Hour, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scan.OpenWisps != n {
+		t.Fatalf("OpenWisps = %d, want %d", scan.OpenWisps, n)
+	}
+	if scan.ReapCandidates != 0 {
+		t.Fatalf("ReapCandidates = %d, want 0", scan.ReapCandidates)
+	}
+	for _, a := range scan.Anomalies {
+		if a.Type == "reap_candidate_spike" {
+			t.Fatalf("healthy high-volume open wisps should not trip reap_candidate_spike, got: %#v", scan.Anomalies)
+		}
+	}
+}
+
+// TestScanNoSpikeFromMoleculeStepBurst verifies that a large legitimate batch
+// of molecule-step closures (e.g. one big molecule finishing) does not trip
+// reap_candidate_spike. MoleculeStepCandidates has no age filter (see Reap()),
+// so it is bursty by nature — deliberately excluded from the threshold check.
+// Step wisps are backdated past max_age (not just "open") so this test
+// actually isolates the closedMoleculeStepExcludeJoin exclusion in the
+// reap-candidates query — with a recent createdAt alone, the age filter
+// would already zero out ReapCandidates regardless of the exclusion.
+func TestScanNoSpikeFromMoleculeStepBurst(t *testing.T) {
+	now := time.Now().UTC()
+	n := DefaultAlertThreshold + 50
+	wisps := make(map[string]*fakeWisp, n+1)
+	wisps["big-mol"] = &fakeWisp{id: "big-mol", status: "closed", issueType: "molecule", createdAt: now}
+	deps := make([]fakeDep, 0, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("step-%d", i)
+		wisps[id] = &fakeWisp{id: id, status: "open", issueType: "task", createdAt: now.Add(-48 * time.Hour)}
+		deps = append(deps, fakeDep{issueID: id, dependsOnID: "big-mol", depType: "parent-child"})
+	}
+	state := &fakeReaperState{wisps: wisps, deps: deps, ops: map[int][]string{}}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	scan, err := Scan(db, "testdb", 24*time.Hour, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scan.MoleculeStepCandidates != n {
+		t.Fatalf("MoleculeStepCandidates = %d, want %d", scan.MoleculeStepCandidates, n)
+	}
+	if scan.ReapCandidates != 0 {
+		t.Fatalf("ReapCandidates = %d, want 0", scan.ReapCandidates)
+	}
+	for _, a := range scan.Anomalies {
+		if a.Type == "reap_candidate_spike" {
+			t.Fatalf("molecule-step batch closure should not trip reap_candidate_spike, got: %#v", scan.Anomalies)
+		}
+	}
+}
+
+// TestExceedsOpenWispSafetyThreshold covers the coarse volume safety-net
+// helper shared by the reap CLI command and the daemon inline fallback.
+func TestExceedsOpenWispSafetyThreshold(t *testing.T) {
+	cases := []struct {
+		openWisps int
+		want      bool
+	}{
+		{0, false},
+		{DefaultOpenWispSafetyThreshold, false},
+		{DefaultOpenWispSafetyThreshold + 1, true},
+		{DefaultOpenWispSafetyThreshold * 10, true},
+	}
+	for _, c := range cases {
+		if got := ExceedsOpenWispSafetyThreshold(c.openWisps); got != c.want {
+			t.Errorf("ExceedsOpenWispSafetyThreshold(%d) = %v, want %v", c.openWisps, got, c.want)
+		}
+	}
+}
+
 var fakeReaperDriverID uint64
 
 func openFakeReaperDB(t *testing.T, state *fakeReaperState) *sql.DB {
