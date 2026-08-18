@@ -617,7 +617,6 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		sourceBdEnv := bdSubprocessEnv(sourceBeadsDir, opts.Name)
 		sourceDatabaseAuthoritative = bdDatabaseExists(sourceBeadsDir)
 		if !sourceDatabaseAuthoritative {
-			syncRemote := beadsConfigSyncRemote(sourceBeadsConfig)
 			initArgs := []string{"init"}
 			if opts.BeadsPrefix != "" {
 				initArgs = append(initArgs, "--prefix", opts.BeadsPrefix)
@@ -630,20 +629,20 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			// server. Without this, bd auto-starts its own server on a random
 			// port, causing "database not found" errors. (GH #2405)
 			initArgs = append(initArgs, "--server-port", strconv.Itoa(bdInitServerPort(m.townRoot)))
-			// A configured remote is the authoritative bootstrap source. Cloning
-			// it establishes shared lineage; reinitializing locally with
-			// --discard-remote creates an independent history that cannot later
-			// be pushed safely.
-			if syncRemote != "" {
-				initArgs = append(initArgs, "--remote", syncRemote)
+			// If the cloned repo's config.yaml has sync.remote, bd init blocks
+			// waiting for interactive confirmation (stdin is /dev/null here).
+			// Pass explicit flags to bypass the safety check. (GH #3873)
+			if beadsConfigHasSyncRemote(sourceBeadsConfig) {
+				initArgs = append(initArgs,
+					"--reinit-local",
+					"--discard-remote",
+					"--destroy-token=DESTROY-"+opts.BeadsPrefix,
+				)
 			}
 			cmd := exec.Command("bd", initArgs...)
 			cmd.Dir = mayorRigPath
 			cmd.Env = sourceBdEnv
 			if output, err := cmd.CombinedOutput(); err != nil {
-				if syncRemote != "" {
-					return nil, fmt.Errorf("bootstrapping Beads database from configured remote %q: %w (%s)", syncRemote, err, strings.TrimSpace(string(output)))
-				}
 				fmt.Printf("  Warning: Could not init bd database: %v (%s)\n", err, strings.TrimSpace(string(output)))
 			}
 			// Drop orphan databases created by bd init (gh#3562, gt-sv1h).
@@ -1514,13 +1513,14 @@ func detectBeadsPrefixFromConfig(configPath string) string {
 	return ""
 }
 
-// beadsConfigSyncRemote returns the configured sync.remote URL, if any.
-// Callers use the URL as the bootstrap source so a fresh rig shares the remote
-// history instead of creating an independent local root.
-func beadsConfigSyncRemote(configPath string) string {
+// beadsConfigHasSyncRemote reports whether the given beads config.yaml contains
+// a non-empty sync.remote entry. bd init blocks waiting for interactive
+// confirmation when it detects this, so callers must pass --reinit-local
+// --discard-remote --destroy-token to suppress the prompt. (GH #3873)
+func beadsConfigHasSyncRemote(configPath string) bool {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return ""
+		return false
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -1529,16 +1529,10 @@ func beadsConfigSyncRemote(configPath string) string {
 		}
 		if strings.HasPrefix(line, "sync.remote:") {
 			value := strings.TrimSpace(strings.TrimPrefix(line, "sync.remote:"))
-			return strings.TrimSpace(strings.Trim(value, `"'`))
+			return strings.Trim(value, `"'`) != ""
 		}
 	}
-	return ""
-}
-
-// beadsConfigHasSyncRemote is retained for callers and tests that only need a
-// presence check.
-func beadsConfigHasSyncRemote(configPath string) bool {
-	return beadsConfigSyncRemote(configPath) != ""
+	return false
 }
 
 // RemoveRig unregisters a rig (does not delete files).

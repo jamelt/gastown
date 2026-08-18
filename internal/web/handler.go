@@ -51,7 +51,7 @@ type ConvoyHandler struct {
 	csrfToken    string
 
 	// Response cache: prevents cascading bd process storms when multiple
-	// browser tabs or repeated manual requests arrive faster than fetches
+	// browser tabs or htmx auto-refresh requests arrive faster than fetches
 	// complete. See GH#2618.
 	cacheMu    sync.Mutex
 	cacheBody  []byte
@@ -88,7 +88,7 @@ func NewConvoyHandler(fetcher ConvoyFetcher, fetchTimeout time.Duration, csrfTok
 
 // ServeHTTP handles GET / requests and renders the convoy dashboard.
 // Uses a response cache to prevent bd process storms from overlapping
-// requests (reloads, multiple tabs). Only one fetch cycle
+// requests (htmx auto-refresh, multiple tabs). Only one fetch cycle
 // runs at a time; concurrent requests get the cached response.
 func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check for expand parameter — expanded views render a different template
@@ -123,33 +123,10 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.expandCacheMu.Unlock()
 	}
 
-	// Serialize fetch cycles. If a rebuild is already running, serve the last
-	// successful response immediately instead of queueing browser requests
-	// behind a slow bd/Dolt command. This keeps buttons and reloads responsive
-	// during a degraded backend cycle.
-	if !h.cacheInUse.TryLock() {
-		if expandPanel == "" {
-			h.cacheMu.Lock()
-			body := h.cacheBody
-			h.cacheMu.Unlock()
-			if len(body) > 0 {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.Header().Set("X-Gastown-Cache", "stale-while-refreshing")
-				if _, err := w.Write(body); err != nil {
-					log.Printf("dashboard: stale response write failed: %v", err)
-				}
-				return
-			}
-		}
-		http.Error(w, "Dashboard refresh is already in progress", http.StatusServiceUnavailable)
-		return
-	}
-	releaseFetchLock := true
-	defer func() {
-		if releaseFetchLock {
-			h.cacheInUse.Unlock()
-		}
-	}()
+	// Serialize fetch cycles: only one request triggers a full fetch at a time.
+	// Others wait and will likely hit the cache when this one finishes.
+	h.cacheInUse.Lock()
+	defer h.cacheInUse.Unlock()
 
 	// Double-check cache after acquiring lock (another request may have populated it).
 	if expandPanel == "" {
@@ -178,33 +155,8 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.expandCacheMu.Unlock()
 	}
 
-	body, pending := h.fetchAndRender(r, expandPanel)
+	body := h.fetchAndRender(r, expandPanel)
 	if body == nil {
-		if pending != nil {
-			// Keep the single-flight lock until timed-out workers actually exit.
-			// Other requests can continue receiving the previous cached response,
-			// but no overlapping fetch storm can begin behind this one.
-			releaseFetchLock = false
-			go func() {
-				<-pending
-				h.cacheInUse.Unlock()
-			}()
-		}
-		// A previous successful response is preferable to an error page when a
-		// fetch exceeds its deadline. A later request can try again.
-		if expandPanel == "" {
-			h.cacheMu.Lock()
-			staleBody := h.cacheBody
-			h.cacheMu.Unlock()
-			if len(staleBody) > 0 {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.Header().Set("X-Gastown-Cache", "stale-after-timeout")
-				if _, err := w.Write(staleBody); err != nil {
-					log.Printf("dashboard: stale timeout response write failed: %v", err)
-				}
-				return
-			}
-		}
 		http.Error(w, "Failed to render template", http.StatusInternalServerError)
 		return
 	}
@@ -232,7 +184,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // fetchAndRender runs all 14 fetchers in parallel and renders the template.
 // Returns the rendered HTML bytes, or nil on template error.
-func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) ([]byte, <-chan struct{}) {
+func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []byte {
 	ctx, cancel := context.WithTimeout(r.Context(), h.fetchTimeout)
 	defer cancel()
 
@@ -382,10 +334,9 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) ([]b
 		// All fetches completed
 	case <-ctx.Done():
 		log.Printf("dashboard: fetch timeout after %v", h.fetchTimeout)
-		// Do not read the result variables while workers may still be writing.
-		// Returning nil lets ServeHTTP use the last successful cached response,
-		// so the configured timeout is a real upper bound for the HTTP request.
-		return nil, done
+		// Goroutines may still be writing to shared result variables.
+		// Wait for them to finish to avoid a data race on read below.
+		<-done
 	}
 
 	// Compute summary from already-fetched data
@@ -414,10 +365,10 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) ([]b
 	var buf bytes.Buffer
 	if err := h.template.ExecuteTemplate(&buf, "convoy.html", data); err != nil {
 		log.Printf("dashboard: template execution failed: %v", err)
-		return nil, nil
+		return nil
 	}
 
-	return buf.Bytes(), nil
+	return buf.Bytes()
 }
 
 // computeSummary calculates dashboard stats and alerts from fetched data.

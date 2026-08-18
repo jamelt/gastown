@@ -108,7 +108,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 17
+version = 16
 
 [vars]
 [vars.wisp_type]
@@ -187,15 +187,11 @@ default = "gt"
 id = "inbox-check"
 title = "Check refinery mail"
 description = """
-First, preview and clean up CLOSED wisps from previous cycles:
+First, clean up wisps from previous cycles (closed wisps + abandoned wisps):
 ```bash
-bd mol wisp gc --closed --dry-run --json
 bd mol wisp gc --closed --force
+bd mol wisp gc --age 1h --force
 ```
-
-The JSON preview is the auditable deletion digest. Review it before running the
-forced command. Age-based GC is disabled in live patrols pending a Beads
-primitive that proves ownership and excludes all live operational records.
 
 Then check mail for MERGE_READY submissions, escalations, and messages.
 

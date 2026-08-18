@@ -16,9 +16,9 @@ var (
 	mailType          string
 	mailReplyTo       string
 	mailNotify        bool
-	mailNoNotify      bool   // Suppress auto-nudge notification to recipient
-	mailTo            string // --to flag (alternative to positional arg)
-	mailFrom          string // --from flag (override sender, for relay/bridge use)
+	mailNoNotify      bool // Suppress auto-nudge notification to recipient
+	mailTo            string   // --to flag (alternative to positional arg)
+	mailFrom          string   // --from flag (override sender, for relay/bridge use)
 	mailSendSelf      bool
 	mailCC            []string // CC recipients
 	mailInboxJSON     bool
@@ -215,7 +215,7 @@ var mailArchiveCmd = &cobra.Command{
 	Short: "Archive messages",
 	Long: `Archive one or more messages.
 
-Removes the messages from your inbox without closing their beads rows.
+Removes the messages from your inbox by closing them in beads.
 
 Use --stale to archive messages sent before your current session started.
 

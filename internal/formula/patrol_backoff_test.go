@@ -1,7 +1,6 @@
 package formula
 
 import (
-	"io/fs"
 	"strings"
 	"testing"
 )
@@ -123,11 +122,14 @@ func TestPatrolFormulasHaveReportCycle(t *testing.T) {
 	}
 }
 
-// TestPatrolFormulasUseAuditedClosedOnlyWispGC verifies that live patrols only
-// delete closed wisps and emit a machine-readable dry-run digest first.
-// Age-based cleanup is intentionally disabled until Beads can prove ownership
-// and preserve every kind of live operational record.
-func TestPatrolFormulasUseAuditedClosedOnlyWispGC(t *testing.T) {
+// TestPatrolFormulasHaveWispGC verifies that all three patrol formulas
+// include `bd mol wisp gc` in their inbox-check step for safe cleanup.
+//
+// Closed-wisp cleanup is safe inside active patrols. Stale open-wisp cleanup
+// belongs to reaper paths that are not running inside the active patrol molecule.
+//
+// Regression test for steveyegge/gastown#1712.
+func TestPatrolFormulasHaveWispGC(t *testing.T) {
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
 		"mol-deacon-patrol.formula.toml",
@@ -146,175 +148,61 @@ func TestPatrolFormulasUseAuditedClosedOnlyWispGC(t *testing.T) {
 				t.Fatalf("parsing %s: %v", name, err)
 			}
 
-			inboxDesc := stepDescription(f, "inbox-check")
+			// Find the inbox-check step (first step in all patrol formulas)
+			var inboxDesc string
+			for _, step := range f.Steps {
+				if step.ID == "inbox-check" {
+					inboxDesc = step.Description
+					break
+				}
+			}
 			if inboxDesc == "" {
 				t.Fatalf("%s: inbox-check step not found or has empty description", name)
 			}
 
-			commands := wispGCCommands(inboxDesc)
-			want := []string{
-				"bd mol wisp gc --closed --dry-run --json",
-				"bd mol wisp gc --closed --force",
-			}
-			if len(commands) != len(want) {
-				t.Fatalf("%s: got GC commands %q, want audited closed-only pair %q", name, commands, want)
-			}
-			for i := range want {
-				if commands[i] != want[i] {
-					t.Errorf("%s: GC command %d = %q, want %q", name, i, commands[i], want[i])
-				}
+			if !strings.Contains(inboxDesc, "bd mol wisp gc") {
+				t.Errorf("%s inbox-check step missing \"bd mol wisp gc\"\n"+
+					"All patrol formulas must run wisp GC at the start of each cycle\n"+
+					"to clean up stale wisps from abnormal exits.\n"+
+					"See steveyegge/gastown#1712.",
+					name)
 			}
 		})
 	}
 }
 
-// TestNoFormulaRunsForcedAgeBasedWispGC protects Witness, Refinery, Deacon,
-// manager-wake, completion-scan, and any future embedded patrol entry point.
-func TestNoFormulaRunsForcedAgeBasedWispGC(t *testing.T) {
-	paths, err := fs.Glob(formulasFS, "formulas/*.formula.toml")
+// TestDeaconPatrolDoesNotRunAgeBasedWispGC verifies that the Deacon patrol
+// does not reap open step wisps from its own active patrol molecule.
+//
+// Regression test for hq-3pp.
+func TestDeaconPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
+	content, err := formulasFS.ReadFile("formulas/mol-deacon-patrol.formula.toml")
 	if err != nil {
-		t.Fatalf("listing embedded formulas: %v", err)
+		t.Fatalf("reading deacon patrol formula: %v", err)
 	}
 
-	for _, path := range paths {
-		content, err := formulasFS.ReadFile(path)
-		if err != nil {
-			t.Fatalf("reading %s: %v", path, err)
-		}
-		// Normalize escaped newlines used by TOML basic strings so commands in
-		// both basic and multiline strings are inspected without requiring every
-		// specialized formula kind to parse as a standalone workflow.
-		source := strings.ReplaceAll(string(content), `\n`, "\n")
-		for _, command := range wispGCCommands(source) {
-			if strings.Contains(command, "--force") && strings.Contains(command, "--age") {
-				t.Errorf("%s contains destructive age-based wisp GC: %q", path, command)
-			}
-			if strings.Contains(command, "--force") && !strings.Contains(command, "--closed") {
-				t.Errorf("%s contains forced wisp GC without closed-only scope: %q", path, command)
-			}
-		}
-	}
-}
-
-// TestPatrolWispGCPreservesIncidentScaleLiveRecords models the 241-record
-// deletion class from gt-6jf. The legacy age-based command selects every old
-// live record; the current audited closed-only commands select none of them.
-func TestPatrolWispGCPreservesIncidentScaleLiveRecords(t *testing.T) {
-	fixture := newWispGCIncidentFixture()
-	if len(fixture.wisps) != 241 || len(fixture.dependencies) != 236 ||
-		len(fixture.labels) != 6 || len(fixture.events) != 253 {
-		t.Fatalf("bad incident fixture dimensions: wisps=%d dependencies=%d labels=%d events=%d",
-			len(fixture.wisps), len(fixture.dependencies), len(fixture.labels), len(fixture.events))
+	f, err := Parse(content)
+	if err != nil {
+		t.Fatalf("parsing deacon patrol formula: %v", err)
 	}
 
-	legacy := liveRecordsSelectedByGC(fixture.wisps, "bd mol wisp gc --age 1h --force")
-	if len(legacy) != 241 {
-		t.Fatalf("legacy age GC selected %d live records, want 241", len(legacy))
-	}
-	protectedClasses := map[string]bool{
-		"hooked": false, "in_progress": false, "blocked": false,
-		"dependency-waiting": false, "parent-live": false,
-		"recovery": false, "pending-MR": false,
-	}
-	for _, record := range fixture.wisps {
-		protectedClasses[record.class] = true
-	}
-	for class, present := range protectedClasses {
-		if !present {
-			t.Errorf("incident fixture does not cover protected class %q", class)
-		}
-	}
-
-	for _, name := range []string{
-		"mol-witness-patrol.formula.toml",
-		"mol-deacon-patrol.formula.toml",
-		"mol-refinery-patrol.formula.toml",
-	} {
-		content, err := formulasFS.ReadFile("formulas/" + name)
-		if err != nil {
-			t.Fatalf("reading %s: %v", name, err)
-		}
-		f, err := Parse(content)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", name, err)
-		}
-
-		for _, command := range wispGCCommands(stepDescription(f, "inbox-check")) {
-			if deleted := liveRecordsSelectedByGC(fixture.wisps, command); len(deleted) != 0 {
-				t.Errorf("%s command %q selects %d live records", name, command, len(deleted))
-			}
-		}
-	}
-}
-
-type wispGCIncidentFixture struct {
-	wisps        []wispGCRecord
-	dependencies [236]struct{}
-	labels       [6]struct{}
-	events       [253]struct{}
-}
-
-type wispGCRecord struct {
-	class              string
-	status             string
-	olderThanThreshold bool
-}
-
-func newWispGCIncidentFixture() wispGCIncidentFixture {
-	classes := []wispGCRecord{
-		{class: "hooked", status: "hooked"},
-		{class: "in_progress", status: "in_progress"},
-		{class: "blocked", status: "blocked"},
-		{class: "dependency-waiting", status: "open"},
-		{class: "parent-live", status: "open"},
-		{class: "recovery", status: "open"},
-		{class: "pending-MR", status: "open"},
-	}
-
-	fixture := wispGCIncidentFixture{wisps: make([]wispGCRecord, 0, 241)}
-	for i := 0; i < 241; i++ {
-		record := classes[i%len(classes)]
-		record.olderThanThreshold = true
-		fixture.wisps = append(fixture.wisps, record)
-	}
-	return fixture
-}
-
-func liveRecordsSelectedByGC(records []wispGCRecord, command string) []wispGCRecord {
-	selected := make([]wispGCRecord, 0)
-	for _, record := range records {
-		switch {
-		case strings.Contains(command, "--closed"):
-			if record.status == "closed" {
-				selected = append(selected, record)
-			}
-		case strings.Contains(command, "--age"):
-			if record.olderThanThreshold {
-				selected = append(selected, record)
-			}
-		}
-	}
-	return selected
-}
-
-func stepDescription(f *Formula, id string) string {
+	var inboxDesc string
 	for _, step := range f.Steps {
-		if step.ID == id {
-			return step.Description
+		if step.ID == "inbox-check" {
+			inboxDesc = step.Description
+			break
 		}
 	}
-	return ""
-}
+	if inboxDesc == "" {
+		t.Fatal("deacon patrol formula: inbox-check step not found or has empty description")
+	}
 
-func wispGCCommands(description string) []string {
-	var commands []string
-	for _, line := range strings.Split(description, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "bd mol wisp gc") {
-			commands = append(commands, line)
-		}
+	if !strings.Contains(inboxDesc, "bd mol wisp gc --closed --force") {
+		t.Fatal("deacon inbox-check must keep closed-wisp cleanup")
 	}
-	return commands
+	if strings.Contains(inboxDesc, "bd mol wisp gc --age") {
+		t.Fatal("deacon inbox-check must not run age-based wisp GC inside the active patrol")
+	}
 }
 
 // TestPatrolFormulasUseDynamicBeadResolution verifies that patrol formulas

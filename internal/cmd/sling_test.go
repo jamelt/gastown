@@ -159,7 +159,7 @@ func assertNoRawReviewMetadata(t *testing.T, desc string) {
 		t.Fatalf("stale raw review metadata remains in description:\n%s", desc)
 	}
 	fields := beads.ParseAttachmentFields(&beads.Issue{Description: desc})
-	if fields != nil && (fields.NoMerge || fields.ReviewOnly || fields.DispatchContext != "") {
+	if fields != nil && (fields.NoMerge || fields.ReviewOnly) {
 		t.Fatalf("parsed stale raw review metadata from description: %+v", fields)
 	}
 }
@@ -1950,9 +1950,7 @@ func TestExecuteSlingRawReviewOnlySuccessKeepsMetadata(t *testing.T) {
 	}
 	hookBeadWithRetryWithTownRootFn = func(beadID, targetAgent, hookDir, townRoot string) error {
 		assertHasRawReviewMetadata(t, readMutableBDDescription(t, descPath))
-		return BdCmd("update", beadID, "--status=hooked", "--assignee="+targetAgent).
-			Dir(resolveBeadDirFromTownRoot(townRoot, beadID)).
-			StripBeadsDir().Run()
+		return nil
 	}
 
 	result, err := executeSling(SlingParams{

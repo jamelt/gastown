@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -548,7 +547,9 @@ func TestConvoyHandler_ProgressBarRendering(t *testing.T) {
 	}
 }
 
-func TestConvoyHandler_DoesNotAutoRefresh(t *testing.T) {
+// Integration test for HTMX auto-refresh
+
+func TestConvoyHandler_HTMXAutoRefresh(t *testing.T) {
 	mock := &MockConvoyFetcher{
 		Convoys: []ConvoyRow{},
 	}
@@ -565,10 +566,18 @@ func TestConvoyHandler_DoesNotAutoRefresh(t *testing.T) {
 
 	body := w.Body.String()
 
-	for _, unwanted := range []string{"hx-get", "hx-trigger", "dashboard-update", "htmx.org", "idiomorph"} {
-		if strings.Contains(body, unwanted) {
-			t.Errorf("Response should not contain automatic refresh dependency %q", unwanted)
-		}
+	// Check htmx attributes for auto-refresh
+	if !strings.Contains(body, "hx-get") {
+		t.Error("Response should contain hx-get attribute for HTMX")
+	}
+	if !strings.Contains(body, "hx-trigger") {
+		t.Error("Response should contain hx-trigger attribute for HTMX")
+	}
+	if !strings.Contains(body, "sse:dashboard-update") {
+		t.Error("Response should contain 'sse:dashboard-update' trigger for SSE")
+	}
+	if !strings.Contains(body, "every 30s") {
+		t.Error("Response should contain 'every 30s' polling fallback")
 	}
 }
 
@@ -734,6 +743,7 @@ func TestE2E_Server_FullDashboard(t *testing.T) {
 		{"PR repo", "roxas"},
 		{"Polecats section", "Polecats"},
 		{"Polecat name", "furiosa"},
+		{"HTMX SSE trigger", `hx-trigger="sse:dashboard-update`},
 	}
 
 	for _, check := range checks {
@@ -918,6 +928,7 @@ func TestE2E_Server_HTMLStructure(t *testing.T) {
 		"<html",
 		"<head>",
 		"<title>Gas Town Control Center</title>",
+		"htmx.org",
 		"<body>",
 		"</body>",
 		"</html>",
@@ -1137,50 +1148,6 @@ func TestConvoyHandler_CachePreventsDuplicateFetches(t *testing.T) {
 	// Verify both responses contain the same content
 	if w1.Body.String() != w2.Body.String() {
 		t.Error("Cached response should match original response")
-	}
-}
-
-type blockingConvoyFetcher struct {
-	*MockConvoyFetcher
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
-}
-
-func (m *blockingConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
-	m.once.Do(func() { close(m.started) })
-	<-m.release
-	return nil, nil
-}
-
-func TestConvoyHandlerTimeoutServesStaleResponseWithoutWaitingForWorkers(t *testing.T) {
-	fetcher := &blockingConvoyFetcher{
-		MockConvoyFetcher: &MockConvoyFetcher{},
-		started:           make(chan struct{}),
-		release:           make(chan struct{}),
-	}
-	handler, err := NewConvoyHandler(fetcher, 50*time.Millisecond, "test-token")
-	if err != nil {
-		t.Fatalf("NewConvoyHandler: %v", err)
-	}
-	handler.cacheBody = []byte("stale dashboard")
-	handler.cacheTime = time.Now().Add(-time.Hour)
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-	start := time.Now()
-	handler.ServeHTTP(w, req)
-	elapsed := time.Since(start)
-	close(fetcher.release)
-
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("request took %v; configured timeout did not bound response", elapsed)
-	}
-	if got := w.Body.String(); got != "stale dashboard" {
-		t.Fatalf("body = %q, want stale dashboard", got)
-	}
-	if got := w.Header().Get("X-Gastown-Cache"); got != "stale-after-timeout" {
-		t.Fatalf("X-Gastown-Cache = %q, want stale-after-timeout", got)
 	}
 }
 

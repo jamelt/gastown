@@ -2743,8 +2743,8 @@ func getBeadStatus(bd *BdCli, workDir, beadID string) (string, bool) {
 
 // resetAbandonedBead resets a dead polecat's hooked bead so it can be re-dispatched.
 // If the bead is in "hooked" or "in_progress" status, it:
-//  0. Checks for durable successful-submission evidence and verifies the
-//     polecat's work is already on main — only then closes the bead
+//  0. Checks if the polecat's work is already on main — if so, closes
+//     the bead instead of resetting (prevents re-dispatch of completed work)
 //  1. Records the respawn in the witness spawn-count ledger
 //  2. Resets status to open
 //  3. Clears assignee
@@ -2768,27 +2768,15 @@ func resetAbandonedBead(bd *BdCli, workDir, rigName, hookBead, polecatName strin
 	}
 	maxRespawns := config.LoadOperationalConfig(trRoot).GetWitnessConfig().MaxBeadRespawnsV()
 
-	// A fresh zero-commit branch is an ancestor of main, so ancestry alone is
-	// not completion evidence. Require the successful gt done receipt written
-	// to the polecat bead before Witness is allowed to close source work.
-	prefix := beads.GetPrefixForRig(trRoot, rigName)
-	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-	completion := getAgentBeadFields(bd, workDir, agentBeadID)
-	if witnessHasCompletionEvidence(completion, hookBead) {
-		if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
-			reason := fmt.Sprintf("Work already on main (verified by %s/witness; polecat=%s; source=%s; mr=%s)", rigName, polecatName, hookBead, completion.MRID)
-			if err := bd.Run(workDir, "close", hookBead, "-r", reason); err != nil {
-				fmt.Fprintf(os.Stderr, "witness: failed to close bead %s (work already on main): %v\n", hookBead, err)
-			}
-			return false
+	// Guard: if the polecat's commit is already on the default branch,
+	// the work is done — close the bead instead of resetting for re-dispatch.
+	// This prevents the spawn-storm / duplicate-work loop described in #2036.
+	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+		reason := fmt.Sprintf("Work already on main (verified by witness, polecat %s)", polecatName)
+		if err := bd.Run(workDir, "close", hookBead, "-r", reason); err != nil {
+			fmt.Fprintf(os.Stderr, "witness: failed to close bead %s (work already on main): %v\n", hookBead, err)
 		}
-	}
-
-	// No successful completion receipt: this is an explicit aborted dispatch,
-	// and the source must remain resumable rather than being reported complete.
-	abortReason := fmt.Sprintf("DISPATCH_ABORTED: missing successful completion evidence; actor=%s/witness; polecat=%s; source=%s", rigName, polecatName, hookBead)
-	if err := bd.Run(workDir, "comments", "add", hookBead, abortReason); err != nil {
-		fmt.Fprintf(os.Stderr, "witness: failed to record recovery provenance for %s: %v\n", hookBead, err)
+		return false
 	}
 
 	// Circuit breaker (clown show #22): if this bead has already been
@@ -2876,20 +2864,6 @@ Please re-dispatch to an available polecat.`,
 	}
 
 	return true
-}
-
-// witnessHasCompletionEvidence reports whether an agent bead contains the
-// durable receipt required for Witness to turn recovery into source closure.
-// COMPLETED alone is intentionally insufficient: gt done can fail after it
-// records intent, and a zero-commit branch can still appear to be on main.
-func witnessHasCompletionEvidence(fields *beads.AgentFields, sourceIssue string) bool {
-	return fields != nil &&
-		fields.ExitType == string(ExitTypeCompleted) &&
-		fields.LastSourceIssue == sourceIssue &&
-		fields.MRID != "" &&
-		!fields.MRFailed &&
-		!fields.PushFailed &&
-		fields.CompletionTime != ""
 }
 
 // OrphanedBeadResult contains a single detected orphaned bead.

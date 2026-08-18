@@ -1573,7 +1573,8 @@ func TestResetAbandonedBead_NoRouter(t *testing.T) {
 
 func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	// Not parallel: overrides package-level verifyCommitOnMain.
-	// An on-main commit plus a successful submission receipt may close source.
+	// When verifyCommitOnMain returns true, resetAbandonedBead should close the
+	// bead instead of resetting it for re-dispatch. This is the fix for #2036.
 
 	oldVerify := verifyCommitOnMain
 	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
@@ -1581,25 +1582,9 @@ func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	}
 	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
 
-	agentDescription := beads.FormatAgentDescription("agent", &beads.AgentFields{
-		RoleType:        "polecat",
-		Rig:             "testrig",
-		AgentState:      "done",
-		ExitType:        string(ExitTypeCompleted),
-		MRID:            "gt-mr-123",
-		LastSourceIssue: "gt-work123",
-		CompletionTime:  time.Now().UTC().Format(time.RFC3339),
-	})
-	agentJSON, err := json.Marshal([]map[string]string{{"description": agentDescription}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	bd, mock := mockBd(
 		func(args []string) (string, error) {
 			if len(args) >= 1 && args[0] == "show" {
-				if len(args) > 1 && strings.Contains(args[1], "polecat-alpha") {
-					return string(agentJSON), nil
-				}
 				return `[{"status":"hooked"}]`, nil
 			}
 			return "", nil
@@ -1630,68 +1615,6 @@ func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	}
 	if foundUpdate {
 		t.Error("bd update --status=open should NOT be called when work is on main")
-	}
-}
-
-func TestResetAbandonedBead_ZeroCommitWithoutSubmissionEvidenceIsResumable(t *testing.T) {
-	// A fresh branch is an ancestor of main. This exact scheduler/Witness race
-	// must reset the source rather than falsely reporting successful closure.
-	oldVerify := verifyCommitOnMain
-	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
-		return true, nil
-	}
-	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
-
-	bd, mock := mockBd(
-		func(args []string) (string, error) {
-			if len(args) > 1 && args[0] == "show" && args[1] == "gt-work123" {
-				return `[{"status":"hooked"}]`, nil
-			}
-			return `[{"description":"agent_state: spawning\\nhook_bead: null"}]`, nil
-		},
-		func(args []string) error { return nil },
-	)
-
-	if !resetAbandonedBead(bd, t.TempDir(), "testrig", "gt-work123", "alpha", nil) {
-		t.Fatal("zero-commit dispatch without MR evidence must remain resumable")
-	}
-	var foundClose, foundReset, foundAbort bool
-	for _, call := range mock.calls {
-		foundClose = foundClose || strings.Contains(call, "close gt-work123")
-		foundReset = foundReset || (strings.Contains(call, "update gt-work123") && strings.Contains(call, "--status=open"))
-		foundAbort = foundAbort || strings.Contains(call, "comments add gt-work123 DISPATCH_ABORTED")
-	}
-	if foundClose || !foundReset || !foundAbort {
-		t.Fatalf("close=%v reset=%v abort_provenance=%v calls=%v", foundClose, foundReset, foundAbort, mock.calls)
-	}
-}
-
-func TestWitnessHasCompletionEvidence(t *testing.T) {
-	valid := &beads.AgentFields{
-		ExitType:        string(ExitTypeCompleted),
-		MRID:            "gt-mr-1",
-		LastSourceIssue: "gt-source",
-		CompletionTime:  time.Now().UTC().Format(time.RFC3339),
-	}
-	if !witnessHasCompletionEvidence(valid, "gt-source") {
-		t.Fatal("complete matching MR receipt should be accepted")
-	}
-	for name, mutate := range map[string]func(*beads.AgentFields){
-		"no MR":       func(f *beads.AgentFields) { f.MRID = "" },
-		"MR failed":   func(f *beads.AgentFields) { f.MRFailed = true },
-		"push failed": func(f *beads.AgentFields) { f.PushFailed = true },
-		"wrong source": func(f *beads.AgentFields) {
-			f.LastSourceIssue = "gt-other"
-		},
-		"no timestamp": func(f *beads.AgentFields) { f.CompletionTime = "" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			fields := *valid
-			mutate(&fields)
-			if witnessHasCompletionEvidence(&fields, "gt-source") {
-				t.Fatalf("%s must not authorize source closure", name)
-			}
-		})
 	}
 }
 

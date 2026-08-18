@@ -63,6 +63,24 @@
             color: var(--text-primary);
         }
 
+        .refresh-info {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+
+        .connection-live {
+            color: var(--green);
+        }
+        .connection-live::before {
+            content: "● ";
+        }
+        .connection-reconnecting {
+            color: var(--yellow);
+        }
+        .connection-reconnecting::before {
+            content: "○ ";
+        }
+
         /* Grid layout for panels - auto-fit responsive */
         .panels {
             display: grid;
@@ -1985,6 +2003,16 @@
 
         .empty-state p {
             font-size: 0.8rem;
+        }
+
+        /* htmx loading indicator */
+        .htmx-request .htmx-indicator {
+            opacity: 1;
+        }
+
+        .htmx-indicator {
+            opacity: 0;
+            transition: opacity 200ms ease-in;
         }
 
         /* Scrollbar styling */

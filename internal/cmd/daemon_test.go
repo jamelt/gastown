@@ -1,31 +1,10 @@
 package cmd
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
-
-func TestDaemonStatusJSONCompatibility(t *testing.T) {
-	if daemonStatusCmd.Flags().Lookup("json") == nil {
-		t.Fatal("gt daemon status is missing --json")
-	}
-
-	encoded, err := json.Marshal(daemonStatusOutput{Running: true, PID: 42, Town: "/tmp/town"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	for _, field := range []string{"running", "pid", "town", "binary_newer", "sessions"} {
-		if _, ok := decoded[field]; !ok {
-			t.Errorf("daemon status JSON missing %q", field)
-		}
-	}
-}
 
 func TestReadDaemonStartupFailure(t *testing.T) {
 	townRoot := t.TempDir()

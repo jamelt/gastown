@@ -1252,46 +1252,6 @@ func restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info
 	return true, nil
 }
 
-// restoreRollbackDispatchFieldsFromCurrent removes the dispatch receipt and
-// other metadata written before hook publication, restoring their prior values.
-// Molecule/formula fields remain owned by rollbackSlingArtifacts.
-func restoreRollbackDispatchFieldsFromCurrent(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo) {
-	current, err := getBeadInfoForRollback(beadID)
-	if err != nil || current == nil {
-		return
-	}
-	issue := &beads.Issue{Description: current.Description}
-	fields := beads.ParseAttachmentFields(issue)
-	if fields == nil {
-		return
-	}
-	original := &beads.AttachmentFields{}
-	if originalInfo != nil {
-		if parsed := beads.ParseAttachmentFields(&beads.Issue{Description: originalInfo.Description}); parsed != nil {
-			original = parsed
-		}
-	}
-	fields.AttachedArgs = original.AttachedArgs
-	fields.AttachedVars = append([]string(nil), original.AttachedVars...)
-	fields.DispatchedBy = original.DispatchedBy
-	fields.DispatchContext = original.DispatchContext
-	fields.DispatchActor = original.DispatchActor
-	fields.Mode = original.Mode
-	fields.FormulaVars = original.FormulaVars
-	newDesc := beads.SetAttachmentFields(issue, fields)
-	if newDesc == current.Description {
-		return
-	}
-	updateDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
-	if err := BdCmd("update", beadID, "--description="+newDesc).
-		Dir(updateDir).
-		StripBeadsDir().
-		WithAutoCommit().
-		Run(); err != nil {
-		fmt.Printf("  %s Could not restore dispatch metadata on %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
-	}
-}
-
 func clearRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info *beadInfo) (bool, error) {
 	return restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir, info, nil)
 }
