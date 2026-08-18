@@ -62,7 +62,6 @@ func init() {
 // bulk-archive. These are routine notifications that don't require individual
 // attention once the information is stale.
 var drainableSubjects = []string{
-	"CRASHED_POLECAT",
 	"POLECAT_DONE",
 	"POLECAT_STARTED",
 	"LIFECYCLE:",
@@ -75,11 +74,42 @@ var drainableSubjects = []string{
 // isDrainableMessage checks if a message subject matches a drainable protocol pattern.
 func isDrainableMessage(subject string) bool {
 	for _, prefix := range drainableSubjects {
-		if strings.HasPrefix(subject, prefix) {
+		if prefix == "LIFECYCLE:" && strings.HasPrefix(subject, prefix) {
+			return true
+		}
+		if subject == prefix || strings.HasPrefix(subject, prefix+" ") {
+			return true
+		}
+		if prefix == "POLECAT_STARTED" && strings.HasPrefix(subject, prefix+":") {
 			return true
 		}
 	}
 	return false
+}
+
+type drainCandidate struct {
+	Message *mail.Message
+	Reason  string
+}
+
+// selectMailDrainCandidates returns only stale messages with an explicitly
+// drainable protocol subject. Wisp and read status affect reporting only; they
+// must never expand the set of messages eligible for bulk archival.
+func selectMailDrainCandidates(messages []*mail.Message, cutoff time.Time, all bool) []drainCandidate {
+	var candidates []drainCandidate
+	for _, msg := range messages {
+		if !isDrainableMessage(msg.Subject) || (!all && msg.Timestamp.After(cutoff)) {
+			continue
+		}
+
+		reason := "protocol"
+		if msg.Wisp {
+			reason = "wisp+protocol"
+		}
+		candidates = append(candidates, drainCandidate{Message: msg, Reason: reason})
+	}
+
+	return candidates
 }
 
 func runMailDrain(cmd *cobra.Command, args []string) error {
@@ -111,40 +141,8 @@ func runMailDrain(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Find drainable messages
 	cutoff := time.Now().Add(-maxAge)
-	type drainCandidate struct {
-		Message *mail.Message
-		Reason  string
-	}
-	var candidates []drainCandidate
-
-	for _, msg := range messages {
-		if !isDrainableMessage(msg.Subject) {
-			continue
-		}
-
-		// Check age unless --all
-		if !mailDrainAll && msg.Timestamp.After(cutoff) {
-			continue
-		}
-
-		reason := "protocol"
-		if msg.Wisp {
-			reason = "wisp+protocol"
-		}
-		candidates = append(candidates, drainCandidate{Message: msg, Reason: reason})
-	}
-
-	// Also drain read wisps (non-protocol) if they're old enough
-	for _, msg := range messages {
-		if isDrainableMessage(msg.Subject) {
-			continue // already handled above
-		}
-		if msg.Wisp && msg.Read && (mailDrainAll || msg.Timestamp.Before(cutoff)) {
-			candidates = append(candidates, drainCandidate{Message: msg, Reason: "read-wisp"})
-		}
-	}
+	candidates := selectMailDrainCandidates(messages, cutoff, mailDrainAll)
 
 	if len(candidates) == 0 {
 		fmt.Printf("%s No drainable messages in %s (%d messages total)\n",
