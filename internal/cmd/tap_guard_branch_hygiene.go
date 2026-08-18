@@ -20,6 +20,13 @@ behind / ~86 ahead) and #4257 (~553 behind / ~98 ahead) get created and
 merge-recommended: nothing computed or gated on divergence before
 gh pr create ran.
 
+This raises the bar, it does not close every path: it only intercepts a
+literal "gh pr create" Bash invocation (Claude Code's PreToolUse matcher
+is a command-string prefix match), so an agent creating a PR through the
+GitHub API directly, a different tool, or shell indirection bypasses it.
+Combine with the gt pr-sheriff-check --merge-gate step in the pr-sheriff
+skill for the cases this hook can't see.
+
 Exit codes:
   0 - Operation allowed (clean/warn, or the contamination check itself
       could not be resolved)
@@ -50,15 +57,10 @@ func runTapGuardBranchHygiene(cmd *cobra.Command, args []string) error {
 	}
 	g := git.NewGit(cwd)
 
-	base := g.CleanBaseRef("origin", g.RemoteDefaultBranch(), "")
-	remote := git.RemoteForRef(base)
-	if remote == "" {
-		remote = "origin"
-	}
-	// Best-effort fetch: a fetch failure should not block on stale info alone.
-	_ = g.Fetch(remote)
-
-	contam, err := g.CheckBranchContamination(base)
+	// Best-effort fetch (fetchErr intentionally ignored): a fetch failure
+	// should not block on stale info alone, consistent with the documented
+	// fail-open contract.
+	base, contam, _, err := g.ResolveContaminationCheck("")
 	if err != nil {
 		return nil // fail open: can't determine contamination
 	}

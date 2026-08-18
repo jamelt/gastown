@@ -46,6 +46,44 @@ func initBranchHygieneTestRepo(t *testing.T) string {
 	return dir
 }
 
+// addStaleBehindCommits pushes n additional commits directly to the bare
+// "origin" remote of a repo created by initBranchHygieneTestRepo, without
+// touching the local checkout -- simulating a base branch that has moved on
+// while dir's local branch stayed put. Once ResolveContaminationCheck fetches
+// origin, this shows up as a genuine "Behind" reading from dir's perspective.
+func addStaleBehindCommits(t *testing.T, dir string, n int) {
+	t.Helper()
+	remoteOut, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		t.Fatalf("git remote get-url origin: %v", err)
+	}
+	upstreamDir := strings.TrimSpace(string(remoteOut))
+
+	scratch := t.TempDir()
+	if out, err := exec.Command("git", "clone", upstreamDir, scratch).CombinedOutput(); err != nil {
+		t.Fatalf("git clone: %v\n%s", err, out)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = scratch
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test")
+	for i := 0; i < n; i++ {
+		fname := filepath.Join(scratch, "upstream_"+strconv.Itoa(i)+".txt")
+		if err := os.WriteFile(fname, []byte("upstream progress"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", ".")
+		run("commit", "-m", "upstream commit")
+	}
+	run("push", "origin", "main")
+}
+
 func chdirForTest(t *testing.T, dir string) {
 	t.Helper()
 	oldCwd, err := os.Getwd()
@@ -174,6 +212,21 @@ func TestPRSheriffCheck_MergeGate_BlocksOnUnrelatedAhead(t *testing.T) {
 	}
 }
 
+func TestPRSheriffCheck_MergeGate_BlocksOnStaleBehind(t *testing.T) {
+	dir := initBranchHygieneTestRepo(t)
+	addStaleBehindCommits(t, dir, 210) // > ContaminationBlockBehind (200)
+	chdirForTest(t, dir)
+
+	cmd := newPRSheriffCheckTestCommand(t)
+	out, err := runPRSheriffCheckCommandTest(t, cmd, "--base", "origin/main", "--merge-gate")
+	if err == nil {
+		t.Fatalf("expected --merge-gate to block a stale-behind branch, got nil error (output: %q)", out)
+	}
+	if !containsAll(out, "BLOCK", "Behind: 210") {
+		t.Errorf("expected report to show BLOCK with Behind: 210, got: %q", out)
+	}
+}
+
 func TestPRSheriffCheck_WithoutMergeGate_NeverFailsOnBlock(t *testing.T) {
 	dir := initBranchHygieneTestRepo(t)
 	run := func(args ...string) {
@@ -204,7 +257,7 @@ func TestPRSheriffCheck_WithoutMergeGate_NeverFailsOnBlock(t *testing.T) {
 	}
 }
 
-func TestPRSheriffCheck_JSONOutput_Shape(t *testing.T) {
+func TestPRSheriffCheck_JSONOutput_Shape_CleanBranch(t *testing.T) {
 	dir := initBranchHygieneTestRepo(t)
 	chdirForTest(t, dir)
 
@@ -221,11 +274,77 @@ func TestPRSheriffCheck_JSONOutput_Shape(t *testing.T) {
 	if result.Base != "origin/main" {
 		t.Errorf("Base = %q, want origin/main", result.Base)
 	}
+	if result.Ahead != 0 || result.Behind != 0 {
+		t.Errorf("Ahead/Behind = %d/%d, want 0/0", result.Ahead, result.Behind)
+	}
 	if result.Severity != "clean" {
 		t.Errorf("Severity = %q, want clean", result.Severity)
 	}
+	if len(result.Reasons) != 0 {
+		t.Errorf("Reasons = %v, want empty", result.Reasons)
+	}
+	if result.MergeGate {
+		t.Errorf("MergeGate = true, want false (flag not passed)")
+	}
 	if !result.MergePathAllowed {
 		t.Errorf("MergePathAllowed = false, want true for a clean branch")
+	}
+	// The JSON encoding of Reasons must be an array, not null (nil slices
+	// marshal to null unless explicitly initialized).
+	if !strings.Contains(out, `"reasons":[]`) {
+		t.Errorf(`expected "reasons":[] in JSON output, got: %q`, out)
+	}
+}
+
+func TestPRSheriffCheck_JSONOutput_Shape_WarnLevel(t *testing.T) {
+	dir := initBranchHygieneTestRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// 25 is between ContaminationWarnAhead (20) and ContaminationBlockAhead
+	// (50): warn, not block.
+	for i := 0; i < 25; i++ {
+		fname := filepath.Join(dir, "unrelated_"+strconv.Itoa(i)+".txt")
+		if err := os.WriteFile(fname, []byte("unrelated"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", ".")
+		run("commit", "-m", "unrelated commit")
+	}
+	chdirForTest(t, dir)
+
+	cmd := newPRSheriffCheckTestCommand(t)
+	out, err := runPRSheriffCheckCommandTest(t, cmd, "--base", "origin/main", "--merge-gate", "--json")
+	if err != nil {
+		t.Fatalf("expected warn-level (not block) to not error even with --merge-gate, got: %v", err)
+	}
+
+	var result prSheriffCheckResult
+	if jsonErr := json.Unmarshal([]byte(out), &result); jsonErr != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %q", jsonErr, out)
+	}
+	if result.Ahead != 25 {
+		t.Errorf("Ahead = %d, want 25", result.Ahead)
+	}
+	if result.Behind != 0 {
+		t.Errorf("Behind = %d, want 0", result.Behind)
+	}
+	if result.Severity != "warn" {
+		t.Errorf("Severity = %q, want warn", result.Severity)
+	}
+	if len(result.Reasons) != 1 {
+		t.Errorf("Reasons = %v, want exactly 1 reason", result.Reasons)
+	}
+	if !result.MergeGate {
+		t.Errorf("MergeGate = false, want true (flag was passed)")
+	}
+	if !result.MergePathAllowed {
+		t.Errorf("MergePathAllowed = false, want true (warn severity does not block)")
 	}
 }
 

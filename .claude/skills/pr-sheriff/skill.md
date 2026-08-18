@@ -125,10 +125,17 @@ or carries commits unrelated to the intended fix — the exact failure mode
 that let PR #4238 (~553 behind / ~86 ahead) and PR #4257 (~553 behind /
 ~98 ahead) get created and merge-recommended as contaminated replacements.
 
-The check is also enforced structurally: `gt tap guard branch-hygiene` is
-wired to `Bash(gh pr create*)` in Gas Town's default hook set, so an
-agent running `gh pr create` directly from a contaminated branch is
-blocked before the PR is even opened, not just warned about it after.
+The check also raises the bar structurally: `gt tap guard branch-hygiene`
+is wired to `Bash(gh pr create*)` in Gas Town's default hook set, so an
+agent running a literal `gh pr create` Bash command from a contaminated
+branch is blocked before the PR is even opened. That match is a
+command-string prefix match, not a universal interception point — it does
+not see a PR opened via the GitHub API, a different tool, or shell
+indirection, so `gt pr-sheriff-check --merge-gate` above is still the
+step of record; treat the hook as defense in depth, not the whole guard.
+Existing rigs pick the hook up via the normal `gt hooks sync` /
+`gt doctor --fix hooks-sync` propagation path (also run by the standing
+deacon patrol), not automatically the moment this code ships.
 
 **If a rig's fork is known to lag its upstream** (see the fork-rig-setup
 guide), pass `--base` explicitly (e.g. `--base upstream/main` or

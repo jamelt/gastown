@@ -64,22 +64,12 @@ func runPRSheriffCheck(cmd *cobra.Command, args []string) error {
 	}
 	g := git.NewGit(cwd)
 
-	base := prSheriffCheckBase
-	if base == "" {
-		base = g.CleanBaseRef("origin", g.RemoteDefaultBranch(), "")
+	base, contam, fetchErr, checkErr := g.ResolveContaminationCheck(prSheriffCheckBase)
+	if fetchErr != nil {
+		style.PrintWarning("could not fetch before branch hygiene check: %v (proceeding with local refs)", fetchErr)
 	}
-
-	remote := git.RemoteForRef(base)
-	if remote == "" {
-		remote = "origin"
-	}
-	if fetchErr := g.Fetch(remote); fetchErr != nil {
-		style.PrintWarning("could not fetch %s before branch hygiene check: %v (proceeding with local refs)", remote, fetchErr)
-	}
-
-	contam, err := g.CheckBranchContamination(base)
-	if err != nil {
-		return fmt.Errorf("checking branch contamination against %s: %w", base, err)
+	if checkErr != nil {
+		return fmt.Errorf("checking branch contamination against %s: %w", base, checkErr)
 	}
 
 	severity, reasons := contam.Evaluate()

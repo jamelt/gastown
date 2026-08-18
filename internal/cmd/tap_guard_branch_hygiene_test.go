@@ -58,6 +58,25 @@ func TestTapGuardBranchHygiene_ContaminatedBranch_BlocksWithSilentExit2(t *testi
 	}
 }
 
+func TestTapGuardBranchHygiene_StaleBehindBranch_BlocksWithSilentExit2(t *testing.T) {
+	dir := initBranchHygieneTestRepo(t)
+	addStaleBehindCommits(t, dir, 210) // > ContaminationBlockBehind (200)
+	chdirForTest(t, dir)
+
+	cmd := newTapGuardBranchHygieneTestCommand()
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected stale-behind branch to be blocked, got nil error")
+	}
+	silentErr, ok := err.(*SilentExitError)
+	if !ok {
+		t.Fatalf("expected *SilentExitError, got %T: %v", err, err)
+	}
+	if silentErr.Code != 2 {
+		t.Errorf("exit code = %d, want 2", silentErr.Code)
+	}
+}
+
 func TestTapGuardBranchHygiene_NotAGitRepo_FailsOpen(t *testing.T) {
 	dir := t.TempDir() // no git init
 	chdirForTest(t, dir)

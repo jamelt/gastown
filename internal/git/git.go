@@ -2588,7 +2588,7 @@ const (
 // its warn threshold.
 func (bc BranchContamination) Evaluate() (ContaminationSeverity, []string) {
 	severity := SeverityClean
-	var reasons []string
+	reasons := []string{}
 
 	raise := func(s ContaminationSeverity) {
 		if s > severity {
@@ -2637,6 +2637,32 @@ func (g *Git) CheckBranchContamination(baseRef string) (BranchContamination, err
 	result.Ahead = ahead
 
 	return result, nil
+}
+
+// ResolveContaminationCheck resolves the base ref to compare against (the
+// explicit ref if given, otherwise the fork-aware default), best-effort
+// fetches its remote, and returns the resulting BranchContamination reading.
+// Shared by gt pr-sheriff-check and the branch-hygiene tap guard so both
+// follow the identical resolve/fetch/check sequence.
+//
+// The fetch error (if any) is returned separately rather than swallowed,
+// since callers differ on whether to surface it: gt pr-sheriff-check warns
+// on fetch failure and proceeds with local refs, the tap guard ignores it
+// silently as part of its documented fail-open contract.
+func (g *Git) ResolveContaminationCheck(explicitBase string) (base string, contam BranchContamination, fetchErr error, err error) {
+	base = explicitBase
+	if base == "" {
+		base = g.CleanBaseRef("origin", g.RemoteDefaultBranch(), "")
+	}
+
+	remote := RemoteForRef(base)
+	if remote == "" {
+		remote = "origin"
+	}
+	fetchErr = g.Fetch(remote)
+
+	contam, err = g.CheckBranchContamination(base)
+	return base, contam, fetchErr, err
 }
 
 // StashCount returns the number of stashes belonging to the current branch.
