@@ -1948,13 +1948,21 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 // repairing its worktree. The next SessionManager.Start call will create a fresh
 // session with the current hook and startup prompt.
 func (m *Manager) killExistingPolecatSession(name, action string) error {
+	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+	townRoot := filepath.Dir(m.rig.Path)
 	if m.tmux == nil {
+		RemoveSessionHeartbeat(townRoot, sessionName)
 		return nil
 	}
 
-	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
 	running, err := m.tmux.HasSession(sessionName)
-	if err != nil || !running {
+	if err != nil {
+		return nil
+	}
+	if !running {
+		// A dead session can leave an old exiting heartbeat behind. Remove it
+		// before the replacement session becomes visible to the idle reaper.
+		RemoveSessionHeartbeat(townRoot, sessionName)
 		return nil
 	}
 	if err := m.tmux.KillSessionWithProcesses(sessionName); err != nil {
@@ -1962,7 +1970,6 @@ func (m *Manager) killExistingPolecatSession(name, action string) error {
 	}
 
 	// Remove stale heartbeat so SessionManager.Start doesn't see leftover data.
-	townRoot := filepath.Dir(m.rig.Path)
 	RemoveSessionHeartbeat(townRoot, sessionName)
 	return nil
 }

@@ -2901,8 +2901,21 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 	tm := tmux.NewTmux()
 	r := &rig.Rig{Name: rigName, Path: rigPath}
 	mgr := NewManager(r, git.NewGit(rigPath), tm)
+	sessMgr := NewSessionManager(tm, r)
 
-	// No tmux session, no heartbeat — the common idle case
+	// A previous session may already be gone while its stale exiting heartbeat
+	// remains. Reuse must clear it before a replacement session can be reaped.
+	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-10 * time.Minute).UTC()
+	data := []byte(`{"timestamp":"` + oldTime.Format(time.RFC3339Nano) + `","state":"exiting"}`)
+	if err := os.WriteFile(filepath.Join(dir, sessMgr.SessionName(polecatName)+".json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No tmux session — this reproduces the inherited-idle-age reuse path.
 	_, reuseErr := mgr.ReuseIdlePolecat(polecatName, AddOptions{})
 
 	// Should not return ErrSessionRunning
@@ -2913,5 +2926,8 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 	// Error should be from later steps (worktree ops), not session handling
 	if reuseErr == nil {
 		t.Fatal("expected error from worktree operations")
+	}
+	if hb := ReadSessionHeartbeat(townRoot, sessMgr.SessionName(polecatName)); hb != nil {
+		t.Fatalf("stale heartbeat survived reuse: %+v", hb)
 	}
 }
