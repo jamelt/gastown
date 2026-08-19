@@ -3330,7 +3330,7 @@ func runtimeArtifactRoot(path string) (string, bool) {
 
 	base := filepath.Base(bare)
 	lower := strings.ToLower(base)
-	if base == "CLAUDE.local.md" || base == ".DS_Store" || strings.HasSuffix(lower, ".db") || strings.HasSuffix(lower, ".pyc") || strings.HasSuffix(lower, ".pyo") {
+	if base == "CLAUDE.local.md" || base == "AGENTS.md" || base == ".DS_Store" || strings.HasSuffix(lower, ".db") || strings.HasSuffix(lower, ".pyc") || strings.HasSuffix(lower, ".pyo") {
 		return bare, true
 	}
 
