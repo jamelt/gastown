@@ -103,7 +103,7 @@ func reclaimBrokenIdlePolecatForSling(polecatMgr *polecat.Manager) (bool, error)
 	}
 
 	for _, candidate := range polecats {
-		if candidate == nil || !polecat.IsReuseCandidateState(candidate.State) || candidate.Issue != "" {
+		if candidate == nil || candidate.State != polecat.StateIdle || candidate.Issue != "" {
 			continue
 		}
 		verifyErr := verifyWorktreeExists(candidate.ClonePath)

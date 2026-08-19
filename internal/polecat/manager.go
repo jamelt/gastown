@@ -1437,7 +1437,7 @@ func (m *Manager) ReclaimBrokenIdlePolecat(name string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if !isReuseCandidateState(current.State) || current.Issue != "" {
+	if current.State != StateIdle || current.Issue != "" {
 		return fmt.Errorf("not a clean idle polecat: state=%s issue=%s", current.State, current.Issue)
 	}
 
@@ -2405,16 +2405,6 @@ func (m *Manager) List() ([]*Polecat, error) {
 // StateIdle and StateDone fall through to the real reuse predicates.
 func isReuseCandidateState(s State) bool {
 	return s == StateIdle || s == StateDone
-}
-
-// IsReuseCandidateState exposes isReuseCandidateState so callers outside this
-// package (e.g. broken-idle-worktree reclaim before allocation) classify
-// reuse-eligible states the same way FindIdlePolecats does. gt-rmwp: a
-// StateIdle-only copy of this check let StateDone identities — the common
-// case once a polecat finishes work — with a missing worktree stay
-// registered forever, never reclaimed and never disqualified.
-func IsReuseCandidateState(s State) bool {
-	return isReuseCandidateState(s)
 }
 
 func (m *Manager) FindIdlePolecat() (*Polecat, error) {
