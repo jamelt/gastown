@@ -3379,13 +3379,20 @@ func (t *Tmux) WaitForRuntimeReady(session string, rc *config.RuntimeConfig, tim
 	}
 
 	deadline := time.Now().Add(timeout)
+	var lastLines []string
+	var lastCaptureErr error
+	captureAttempts, captureFailures := 0, 0
 	for time.Now().Before(deadline) {
 		// Capture last few lines of the pane
 		lines, err := t.CapturePaneLines(session, 10)
+		captureAttempts++
 		if err != nil {
+			lastCaptureErr = err
+			captureFailures++
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
+		lastLines = lines
 		// Look for runtime prompt indicator at start of line
 		for _, line := range lines {
 			if matchesPromptPrefix(line, rc.Tmux.ReadyPromptPrefix) {
@@ -3394,7 +3401,30 @@ func (t *Tmux) WaitForRuntimeReady(session string, rc *config.RuntimeConfig, tim
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("timeout waiting for runtime prompt")
+	return fmt.Errorf("timeout waiting for runtime prompt: %s", timeoutDiagnosis(session, lastLines, lastCaptureErr, captureAttempts, captureFailures))
+}
+
+// timeoutDiagnosis summarizes what WaitForRuntimeReady last observed before
+// giving up, so a "timeout waiting for runtime prompt" failure is actionable
+// instead of opaque. Distinguishes two different root causes that both
+// surfaced as the same bare message (gt-zpfn): the tmux pane never became
+// capturable at all (session/process never came up — consistent with
+// resource pressure preventing spawn), versus the pane was capturable but
+// never printed the ready prompt (agent process is up but slow or stuck,
+// e.g. a large prime context or a blocking dialog).
+func timeoutDiagnosis(session string, lastLines []string, lastCaptureErr error, captureAttempts, captureFailures int) string {
+	if captureAttempts > 0 && captureFailures == captureAttempts {
+		return fmt.Sprintf("pane %q was never capturable in %d attempt(s), last error: %v (session/process likely never started — check for resource pressure)",
+			session, captureAttempts, lastCaptureErr)
+	}
+	if len(lastLines) == 0 {
+		return fmt.Sprintf("pane %q produced no output", session)
+	}
+	tail := lastLines
+	if len(tail) > 3 {
+		tail = tail[len(tail)-3:]
+	}
+	return fmt.Sprintf("pane %q last showed: %q", session, strings.Join(tail, " | "))
 }
 
 // DefaultReadyPromptPrefix is the Claude Code prompt prefix used for idle detection.

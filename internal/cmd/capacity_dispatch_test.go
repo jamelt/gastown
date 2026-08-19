@@ -54,6 +54,110 @@ func TestShouldFireCrossRigEscalation_KeyedByRigAndPrefix(t *testing.T) {
 	}
 }
 
+// TestCircuitBrokenMessageSurfacesFailureReason guards against the diagnostic
+// gap identified in gt-zpfn: the circuit-breaker log used to report only the
+// failure count ("failed 3 times, circuit-broken") with no reason, so an
+// operator watching daemon logs had no way to tell a capacity problem from a
+// dispatch-refusal problem apart from digging into the (otherwise-unread)
+// sling context bead. The message must carry the actual dispatch error.
+func TestCircuitBrokenMessageSurfacesFailureReason(t *testing.T) {
+	msg := circuitBrokenMessage("gt-sc-abc123", "gt-workbead", 3,
+		"refusing dispatch: database gastown Dolt lineage remote-unverified")
+
+	if !strings.Contains(msg, "refusing dispatch: database gastown Dolt lineage remote-unverified") {
+		t.Fatalf("circuit-broken message must surface the dispatch failure reason, got: %q", msg)
+	}
+	if !strings.Contains(msg, "gt-sc-abc123") || !strings.Contains(msg, "gt-workbead") {
+		t.Fatalf("circuit-broken message must identify the context and work bead, got: %q", msg)
+	}
+	if !strings.Contains(msg, "failed 3 times") {
+		t.Fatalf("circuit-broken message must keep the failure count, got: %q", msg)
+	}
+}
+
+// TestCheckCapacityStarvation_FiresWhenReadyWorkCannotDispatch is the
+// regression named in gt-zpfn's acceptance criteria: when the fix for a
+// dispatch defect is itself sitting in the ready queue but capacity is fully
+// consumed with zero reusable_idle polecats to reuse, the scheduler must
+// raise an alarm rather than silently retrying forever — exactly the
+// self-sustaining loop the outage exhibited (recovery count climbed
+// monotonically while reusable_idle never left 0).
+func TestCheckCapacityStarvation_FiresWhenReadyWorkCannotDispatch(t *testing.T) {
+	resetCapacityStarvationEscalationStateForTest()
+	t.Cleanup(resetCapacityStarvationEscalationStateForTest)
+
+	prevFire := fireCapacityStarvationEscalation
+	t.Cleanup(func() { fireCapacityStarvationEscalation = prevFire })
+
+	var fired bool
+	var gotSkipped int
+	fireCapacityStarvationEscalation = func(skipped int, snapshot polecatCapacitySnapshot) {
+		fired = true
+		gotSkipped = skipped
+	}
+
+	starvedSnapshot := polecatCapacitySnapshot{Working: 42, ReusableIdle: 0}
+	checkCapacityStarvation("test", capacity.DispatchReport{Skipped: 5, Reason: "capacity"}, starvedSnapshot)
+
+	if !fired {
+		t.Fatal("expected capacity-starvation alarm to fire when ready work is waiting and reusable_idle is 0")
+	}
+	if gotSkipped != 5 {
+		t.Fatalf("gotSkipped = %d, want 5", gotSkipped)
+	}
+}
+
+// TestCheckCapacityStarvation_DoesNotFireWhenCapacityIsAvailable ensures the
+// alarm is specific to the starvation condition and doesn't fire on ordinary
+// capacity backpressure where reuse is still possible.
+func TestCheckCapacityStarvation_DoesNotFireWhenCapacityIsAvailable(t *testing.T) {
+	resetCapacityStarvationEscalationStateForTest()
+	t.Cleanup(resetCapacityStarvationEscalationStateForTest)
+
+	prevFire := fireCapacityStarvationEscalation
+	t.Cleanup(func() { fireCapacityStarvationEscalation = prevFire })
+
+	var fired bool
+	fireCapacityStarvationEscalation = func(int, polecatCapacitySnapshot) { fired = true }
+
+	// Reusable idle capacity exists: not starvation, ordinary backpressure.
+	checkCapacityStarvation("test", capacity.DispatchReport{Skipped: 5, Reason: "capacity"},
+		polecatCapacitySnapshot{ReusableIdle: 2})
+	if fired {
+		t.Fatal("must not fire when reusable_idle capacity is available")
+	}
+
+	// Nothing skipped: nothing waiting on capacity.
+	checkCapacityStarvation("test", capacity.DispatchReport{Skipped: 0, Reason: "capacity"},
+		polecatCapacitySnapshot{ReusableIdle: 0})
+	if fired {
+		t.Fatal("must not fire when no ready work is skipped")
+	}
+
+	// Reason isn't capacity (e.g. "batch"): not a starvation signal.
+	checkCapacityStarvation("test", capacity.DispatchReport{Skipped: 5, Reason: "batch"},
+		polecatCapacitySnapshot{ReusableIdle: 0})
+	if fired {
+		t.Fatal("must not fire when skip reason is not capacity")
+	}
+}
+
+func TestShouldFireCapacityStarvationEscalation_Debounces(t *testing.T) {
+	resetCapacityStarvationEscalationStateForTest()
+	t.Cleanup(resetCapacityStarvationEscalationStateForTest)
+
+	now := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
+	if !shouldFireCapacityStarvationEscalation(now) {
+		t.Fatal("first call must fire")
+	}
+	if shouldFireCapacityStarvationEscalation(now.Add(30 * time.Minute)) {
+		t.Fatal("second call inside debounce window must not fire")
+	}
+	if !shouldFireCapacityStarvationEscalation(now.Add(capacityStarvationEscalationDebounce + time.Minute)) {
+		t.Fatal("call past debounce window must fire")
+	}
+}
+
 func TestDispatchSingleBeadRawReviewOnlyHookFailureClearsMetadata(t *testing.T) {
 	townRoot, _, descPath := setupMutableBDRawSlingTest(t, "Keep this body.")
 
