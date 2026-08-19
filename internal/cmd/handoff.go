@@ -975,12 +975,15 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	}
 	config.SanitizeAgentEnv(envMap, agentEnv)
 
-	// Build the full command with OS-appropriate env prefix
+	// Build the full command with OS-appropriate env prefix.
+	// workDir is shell-quoted so it can never merge with adjacent command
+	// text (e.g. the continuation prompt) into a single broken `cd` argument
+	// if the value it holds ever contains whitespace (gt-16rc).
 	var cdPrefix string
 	if runtime.GOOS == "windows" {
-		cdPrefix = fmt.Sprintf("cd %s; ", workDir)
+		cdPrefix = fmt.Sprintf("cd %s; ", config.PSQuote(workDir))
 	} else {
-		cdPrefix = fmt.Sprintf("cd %s && ", workDir)
+		cdPrefix = fmt.Sprintf("cd %s && ", config.ShellQuote(workDir))
 	}
 
 	var execPrefix string
