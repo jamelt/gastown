@@ -1,0 +1,6 @@
+=== gt pr-sheriff-check (default) ===
+{"base":"origin/main","ahead":0,"behind":2,"severity":"clean","reasons":[],"merge_gate":false,"merge_path_allowed":true}
+
+=== gt pr-sheriff-check --merge-gate ===
+{"base":"origin/main","ahead":0,"behind":2,"severity":"clean","reasons":[],"merge_gate":true,"merge_path_allowed":true}
+exit: 0

@@ -1,0 +1,93 @@
+{
+  "schema_version": "pr-sheriff-evidence/v1",
+  "policy_version": "pr-sheriff-policy/v1.1",
+  "run_id": "gt-pr-4319-sheriff-review-2026-08-19",
+  "subject": {
+    "forge": "github",
+    "repo_id": "gastownhall/gastown",
+    "default_branch": "main",
+    "change_type": "pull_request_audit",
+    "change_id": "4319",
+    "url": "https://github.com/gastownhall/gastown/pull/4319",
+    "title": "fix: cap dolt sql-server Go runtime memory",
+    "author": "Bella-Giraffety",
+    "state": "MERGED",
+    "merged_at": "2026-07-07T19:39:35Z",
+    "merged_by": "Bella-Giraffety",
+    "merge_commit": "cb098cb41fad86817ecf6bd0c6ce287ca5f59553",
+    "base_ref": "main",
+    "head_ref": "polecat/mayor/gt-pr-sheriff-4132-cleanup-clean",
+    "final_head_sha": "16e1e2cbbd3f083b1c16abd50dc5b88c856efc32",
+    "diff_summary": {
+      "additions": 215,
+      "deletions": 11,
+      "changed_files": 3,
+      "paths": [
+        "internal/daemon/dolt.go",
+        "internal/doltserver/doltserver.go",
+        "internal/doltserver/sql_server_command_test.go"
+      ]
+    },
+    "predecessor_pr": {
+      "number": 4132,
+      "author": "certivpaul",
+      "state": "CLOSED",
+      "disposition": "closed as superseded by merged PR #4319; attribution preserved via Co-authored-by trailers"
+    },
+    "predecessor_review_bead": "gt-5mv4"
+  },
+  "action_plan": {
+    "mode": "audit_already_merged",
+    "summary": "PR #4319 was already merged to main before this review bead was hooked. No code fixup, replacement, or cherry-pick was needed or performed. This pass independently re-verified the merged fix's correctness, test/CI status, attribution, related-issue disposition, and refinery/MQ compliance, then closed the review with durable evidence.",
+    "created_at": "2026-08-19T08:32:34Z"
+  },
+  "labels": {
+    "observed": [
+      {"name": "kind/bug", "family": "kind", "semantic_value": "bug"},
+      {"name": "priority/p2", "family": "priority", "semantic_value": "p2"},
+      {"name": "status/merged", "family": "status", "semantic_value": "merged"}
+    ],
+    "kind": "bug",
+    "priority": "p2",
+    "status": "merged",
+    "taxonomy_note": "status/merged is not in issue #1400's documented status/* quick-reference (needs-triage, needs-info, needs-repro, accepted, help-wanted). This is a pre-existing label-taxonomy documentation gap, not introduced by this PR; no functional or merge-correctness impact. Left as-is (non-blocking, documentation-only)."
+  },
+  "artifacts": [
+    {"id": "main-fix-presence", "kind": "review_report", "uri": "urn:research:R01", "summary": "Confirmed on origin/main: NewSQLServerCommand centralizes command construction; both internal/daemon/dolt.go and internal/doltserver/doltserver.go (manual Start()) call it; defaultDoltSQLServerGoMemLimit=16GiB and defaultDoltSQLServerGOGC=50 applied via appendEnvDefault; sql_server_command_test.go present."},
+    {"id": "build-vet", "kind": "test_log", "uri": "urn:research:R02", "summary": "PASS: CGO_ENABLED=0 go build ./internal/doltserver/... ./internal/daemon/... ; PASS: go vet same packages. Tested against origin/main."},
+    {"id": "focused-tests", "kind": "test_log", "uri": "urn:research:R03", "summary": "PASS (exit 0): go test ./internal/doltserver -run '<5 focused tests>' -v -count=1 (0.040s). PASS: go test ./internal/daemon -count=1 (218.055s). PASS: go test ./internal/doltserver -count=1 broad package (19.857s) -- no failures, including the previously-flaky TestWaitForCatalog_NoServer/TestFindBrokenWorkspaces_MultipleRigs/TestCleanStaleSocket_RemovesStaleFile."},
+    {"id": "issue-4145-relation", "kind": "review_report", "uri": "urn:research:R04", "summary": "Assessed unrelated: issue #4145 (CPU pegging, filed 2026-05-29) predates this PR (merged 2026-07-07) by 5+ weeks; GOGC=50/GOMEMLIMIT=16GiB cannot explain sustained CPU pegging on a ~40MB dataset. Not linked as fixed-by or related."},
+    {"id": "related-search", "kind": "review_report", "uri": "urn:research:R05", "summary": "Found PR #4295 (competing independent GOMEMLIMIT fix), already CLOSED/superseded, no action needed. No open issue explicitly references GOMEMLIMIT/GOGC. No other related artifacts found."},
+    {"id": "codecov-gap", "kind": "review_report", "uri": "urn:research:R06", "summary": "1 uncovered line in internal/daemon/dolt.go is the real dolt-subprocess-launch call, gated behind a startFn test-override field; expected/non-testable gap, not a regression risk."},
+    {"id": "attribution", "kind": "review_report", "uri": "urn:research:R07", "summary": "Confirmed on main: both merged commits (a0e33d9ab, 16e1e2cbb) carry 'Co-authored-by: certivpaul <211074986+certivpaul@users.noreply.github.com>' plus Based-on/Original-commit trailers to PR #4132."},
+    {"id": "pr4132-disposition", "kind": "review_report", "uri": "urn:research:R08", "summary": "PR #4132 already CLOSED with an explicit comment: 'Closed as superseded by merged PR #4319 ... preserving attribution ... Merge commit: cb098cb41.' No further action needed."},
+    {"id": "label-taxonomy", "kind": "review_report", "uri": "urn:research:R09", "summary": "kind/bug and priority/p2 comply with issue #1400. status/merged is outside its documented status/* list (doc gap, non-blocking, no write action taken -- see labels.taxonomy_note)."},
+    {"id": "windows-env-matching", "kind": "review_report", "uri": "urn:research:R10", "summary": "appendEnvDefault/envKeyMatches scan the full env slice correctly (not just index 0) and skip appending on any case-insensitive Windows match. Latent pre-existing (not introduced by this PR) edge case: duplicate-case env entries (e.g. both GOMEMLIMIT and gomemlimit) are not deduplicated, only the append is skipped; untested by sql_server_command_test.go. Assessed as non-blocking design gap, not a regression."},
+    {"id": "refinery-mq-compliance", "kind": "review_report", "uri": "urn:research:R11", "summary": "Confirmed via gh pr view: mergedBy=Bella-Giraffety (human, is_bot:false), standard 'Merge pull request #4319 from ...' GitHub merge-commit format. Not a Refinery/MQ merge. Compliant with 'no refinery/MQ route' policy."},
+    {"id": "predecessor-bead-status", "kind": "review_report", "uri": "urn:research:R12", "summary": "gt-5mv4 (prior fixup bead) is CLOSED. Its own evidence gauntlet (15+5+5) covered the code changes at final head 16e1e2cbb, CI green, verdict defer_human_review pending label promotion, which subsequently occurred (see R13)."},
+    {"id": "merge-gate-timing", "kind": "review_report", "uri": "urn:research:R13", "summary": "gt-5mv4's fixup-report comment (BLOCK due to stale status/review-failed label) posted 2026-07-06T15:43:41Z; PR merged 2026-07-07T19:39:35Z by the same actor -- a ~28h gap consistent with normal label-promotion-then-merge remediation, not a bypass."},
+    {"id": "cross-ref-sweep", "kind": "review_report", "uri": "urn:research:R14", "summary": "gh search issues/prs for '4319' and '4132' found no other issues/PRs referencing them beyond the two PRs themselves."},
+    {"id": "post-merge-ci", "kind": "test_log", "uri": "urn:research:R15", "summary": "CI green at merge commit cb098cb41 (CI and Windows CI check-runs both succeeded). No revert exists in 30+ subsequent commits. One complementary follow-up (376b8267e, re-enable auto_gc) frames this PR's memory cap as a still-valid backstop, not a bug."},
+    {"id": "checker-output", "kind": "checker_log", "uri": "urn:local:gt-pr-sheriff-check:2026-08-19", "summary": "gt pr-sheriff-check --merge-gate --json on the review worktree (polecat/mutant/gt-pr-4319-sheriff-review+mszu2s8v vs origin/main): {\"base\":\"origin/main\",\"ahead\":0,\"behind\":2,\"severity\":\"clean\",\"reasons\":[],\"merge_gate\":true,\"merge_path_allowed\":true}. exit 0. No branch contamination; no replacement PR was created or needed."}
+  ],
+  "reviews": {
+    "pre_implementation_merge_decision": [
+      {"id": "P01", "lens": "correctness", "verdict": "APPROVE", "summary": "Independently re-verified centralized command construction and correct POSIX/Windows env-default semantics directly against main source; no additional verification required before closing."},
+      {"id": "P02", "lens": "policy_compliance", "verdict": "APPROVE", "summary": "5 post-implementation reviews are conditional on the Sheriff itself changing/replacing/cherry-picking code in this pass, which did not happen (gt-5mv4 already ran its own gauntlet on the code). Durable documentation satisfies the 'record disposition' requirement without a mandatory GitHub label/comment write."},
+      {"id": "P03", "lens": "cleanup_first", "verdict": "APPROVE", "summary": "Merged diff is a genuine consolidation (two duplicate command-construction sites collapsed into one shared constructor), not a bandaid. No discovered-work bead warranted; the complementary auto_gc follow-up already self-documented the memory-cap-as-backstop framing."},
+      {"id": "P04", "lens": "evidence_completeness", "verdict": "REJECT_THEN_ADDRESSED", "summary": "Flagged that no durable pr-sheriff-evidence/ artifact or bd notes existed yet for this bead at review time, and that a fresh checker run (not just citing gt-5mv4's) was required. Addressed by writing this evidence.json/report.md/checker.txt and by running gt pr-sheriff-check --merge-gate above."},
+      {"id": "P05", "lens": "scope_and_contributor_policy", "verdict": "APPROVE", "summary": "Audit-only disposition stays within the assigned scope (PR #4319 plus its directly-referenced predecessor #4132), requires no write/push/merge action, and attribution carry-forward via Co-authored-by trailers is policy-compliant per the pr-sheriff skill."}
+    ],
+    "post_implementation": {
+      "applicable": false,
+      "reason": "This review pass did not change code, create a replacement, or cherry-pick anything -- PR #4319 was already merged before this bead was hooked. The predecessor bead gt-5mv4 already ran its own 5 post-implementation reviews against final head 16e1e2cbb before merge."
+    }
+  },
+  "no_refinery_mq_route_used": true,
+  "final_verdict": {
+    "verdict": "confirmed_merged_no_action_needed",
+    "merge_path_allowed": "n/a_already_merged",
+    "summary": "PR #4319 is correctly merged into main, verified independently via fresh build/vet/test runs, source inspection, CI check-run status, and attribution checks. No code fixup was needed or performed by this review pass. Predecessor PR #4132 is already correctly closed as superseded. No open GitHub issue should be closed, linked-as-fixed, or held open pending this PR -- issue #4145 was assessed and confirmed unrelated in root cause, and no other issue/PR references #4319 or #4132. A minor label-taxonomy documentation gap (status/merged not listed in issue #1400) and a minor pre-existing untested Windows duplicate-case-env edge case were noted as non-blocking observations, not action items.",
+    "reason": "15 research legs, 5 pre-implementation/merge-decision review legs (4 APPROVE + 1 REJECT-then-addressed), fresh checker run all support closing this review with no further code, label, or GitHub write action."
+  }
+}
