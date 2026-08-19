@@ -1,0 +1,149 @@
+{
+  "schema_version": "pr-sheriff-evidence/v1",
+  "policy_version": "pr-sheriff-policy/v1.1",
+  "generated_at": "2026-08-19T12:30:00Z",
+  "run_id": "gt-pr-4066-sheriff-review",
+  "subject": {
+    "forge": "github",
+    "repo_id": "gastownhall/gastown",
+    "default_branch": "main",
+    "change_type": "pull_request",
+    "change_id": "4066",
+    "url": "https://github.com/gastownhall/gastown/pull/4066",
+    "title": "fix(formula): resolve extends/compose in prime + inject issue= sling var",
+    "author": "flipch",
+    "author_tier": "known",
+    "draft": false,
+    "base_ref": "main",
+    "base_sha": "445fd8fd4c16d2dcdf76a0bf208c008d35ec3c73",
+    "head_ref": "claude/fix-formula-prime-overlay-and-issue-var",
+    "head_sha": "df492747486c3506eb31a775fcbc43d2829e2004",
+    "state": "OPEN",
+    "mergeable": "UNKNOWN",
+    "diff_summary": {
+      "additions": 87,
+      "deletions": 26,
+      "changed_files": 4,
+      "note": "Stale (~3 months old base), CI Test check FAILURE, never reviewed, status/review-failed. Not mergeable as-is."
+    }
+  },
+  "action_plan": {
+    "id": "action-plan-gt-pr-4066-sheriff-review",
+    "mode": "replacement_pr",
+    "summary": "PR #4066 (author flipch) is a real, correctly-diagnosed bug fix -- gt prime --hook never resolved extends/compose in formulas (zero steps rendered for wc26-* style formulas) and {{issue}} substitution was missing on the standalone-formula-sling path -- but its own diff is stale and CI-failing and cannot merge as-is. A prior Sheriff pass (bead gt-pvy7, 2026-07-08/09) opened replacement PR #4445, which independently verified and re-implemented the same fix, but is now itself stale/CONFLICTING against current main (6 weeks untouched) and its sole commit ('WIP: checkpoint (auto)') carries no real attribution trailer despite the PR body's claim. This pass independently re-derived both bugs from first principles against a fresh upstream/main (649b832b7): bug 1 (formula.Resolve never called in resolveFormulaForRendering, the current single choke point feeding all three step-rendering call sites) is confirmed still present; bug 2 is confirmed ALREADY FIXED on current main for the bond-to-base-bead sling paths (sling.go, sling_dispatch.go) via an unrelated refactor (formulaVarsForBead unconditionally prepends issue=<beadID>), but still present for the standalone-formula-sling path (sling_formula.go). Implemented a minimal fix restricted to exactly these two remaining gaps: one line calling the pre-existing formula.Resolve() at the shared rendering choke point (no new exported API, smaller/more converged than #4445's approach of adding a new formula.ResolveFormula() wrapper), and one line prepending issue=<wispRootID> in sling_formula.go. Verified via 5 independent pre-implementation review legs (2 initial objections resolved with concrete evidence: embedded formulas are tried first inside formula.Resolve's own loadFormulaByName, so the 2-path on-disk formulaSearchPaths helper is sufficient; formula.Parse() already calls Validate() so Resolve()'s no-op re-validate on non-extends formulas cannot newly reject anything) and 5 independent post-implementation review legs (all CONFIRM) against the final PR #4725 head. Opened fresh replacement PR #4725 from current upstream/main with genuine Co-authored-by attribution to flipch. Commented on stale #4445 recommending maintainer closure as superseded-by-defect (lacked permission to close it directly). Left original #4066 open/untouched per the do-not-unilaterally-close-contributor-PRs policy, recommending a maintainer close it once #4725 merges. No refinery/MQ route used for the #4066 disposition.",
+    "created_at": "2026-08-19T12:30:00Z"
+  },
+  "repo_policy": {
+    "label_aliases": [],
+    "feature_kind_values": ["feature", "enhancement"],
+    "merge_ready_status_values": ["review-approved", "merge-ready"],
+    "approver_roles": ["maintainer", "owner", "policy_approver", "designated_reviewer"],
+    "evidence_locations": ["pr_thread", "review_thread", "artifact_store", "ci_log", "local_report", "bead"],
+    "baseline_checks": ["Test", "Lint", "Integration Tests", "Windows Smoke Test"],
+    "no_verification_reasons": ["docs_only"],
+    "note": "This bot account (jamelt fork identity) has no label-write or PR-close permission on gastownhall/gastown -- confirmed via 403 on the labels API and a GraphQL permissions error on pr close. Labels on #4725 will be applied by repo automation / a maintainer, not this review."
+  },
+  "labels": {
+    "observed": [
+      {"name": "kind/bug", "family": "kind", "semantic_value": "bug", "subject": "PR #4066"},
+      {"name": "priority/p2", "family": "priority", "semantic_value": "p2", "subject": "PR #4066"},
+      {"name": "status/review-failed", "family": "status", "semantic_value": "review-failed", "subject": "PR #4066"},
+      {"name": "status/needs-triage", "family": "status", "semantic_value": "needs-triage", "subject": "PR #4725 (auto-applied on creation)"}
+    ],
+    "status": "review-failed",
+    "priority": "p2",
+    "kind": "bug"
+  },
+  "implementation": {
+    "code_changed_by_sheriff": true,
+    "mode": "replacement_pr",
+    "modified_paths": [
+      "internal/cmd/prime_molecule.go",
+      "internal/cmd/prime_test.go",
+      "internal/cmd/sling_formula.go",
+      "internal/cmd/sling_test.go"
+    ],
+    "commits": [
+      {
+        "sha": "3e04c43f43b57a68dab719afab7c8e1112eff353",
+        "message_headline": "fix(formula): resolve extends/compose in prime + inject issue= for standalone formula sling",
+        "trailers": [
+          "Original-PR: https://github.com/gastownhall/gastown/pull/4066",
+          "Original-Commit: df492747486c3506eb31a775fcbc43d2829e2004",
+          "Co-authored-by: flipch <10780503+flipch@users.noreply.github.com>",
+          "Co-authored-by: Claude Sonnet 5 <noreply@anthropic.com>"
+        ]
+      }
+    ],
+    "replacement_pr": {
+      "url": "https://github.com/gastownhall/gastown/pull/4725",
+      "number": 4725,
+      "base": "upstream/main @ 649b832b7672bc7a2dbef26f5983aba6198b819b",
+      "head_ref": "polecat/brotherhood/gt-pr-4066-fix+275114",
+      "head_sha": "3e04c43f43b57a68dab719afab7c8e1112eff353",
+      "state": "OPEN",
+      "mergeable": "MERGEABLE",
+      "additions": 51,
+      "deletions": 2,
+      "changed_files": 4,
+      "ci_state": "gated on maintainer approval (fork-PR action_required); Test/Lint/Integration/Windows workflows have not yet executed on GitHub. Independently reproduced locally and via a fresh clone by two separate review agents: go build/vet/test all pass on head 3e04c43f4."
+    }
+  },
+  "branch_hygiene": {
+    "tool": "gt pr-sheriff-check --merge-gate --base upstream/main --json",
+    "result": {"base": "upstream/main", "ahead": 1, "behind": 0, "severity": "clean", "reasons": [], "merge_gate": true, "merge_path_allowed": true}
+  },
+  "evidence": {
+    "research_legs": [
+      {"id": "R01", "lens": "PR #4066 current state, labels, comments", "summary": "gh pr view 4066: state OPEN, mergedAt null, labels kind/bug/priority/p2/status/review-failed. Only comment is an automated codecov failure report (2 unrelated flaky tests); no maintainer/Sheriff comment ever posted (Sheriff does not post to GitHub per policy)."},
+      {"id": "R02", "lens": "PR #4066 CI checks", "summary": "statusCheckRollup: Test=FAILURE (2026-05-20), Lint/Integration Tests/Windows Smoke Test=SUCCESS. Base 445fd8fd is ~3 months stale as of this review; checks last ran 2026-06-17."},
+      {"id": "R03", "lens": "Full prior-dispatch history for this exact PR", "summary": "bd search '4066' surfaces 6 prior beads: gt-sc-b6c86e0bfd (sling-context, closed), gt-pvy7 (closed, did real work -- see R05-R08), gt-pr-sheriff-4066-cleanup and hq-4n4 and gt-pr-sheriff-4066 (all closed, stale:auto-closed by reaper, no substantive work done)."},
+      {"id": "R04", "lens": "PR #4066's own diff (read directly, not reconstructed)", "summary": "gh pr diff 4066 read in full: touches prime_molecule.go (adds formula.Resolve() call + formulaSearchPaths helper in BOTH showFormulaSteps and showFormulaStepsFull separately -- these were two call sites at the time), sling.go/sling_dispatch.go/sling_formula.go (prepends issue=<id> to stored vars in all three). No GitHub issue numbers referenced in the PR body."},
+      {"id": "R05", "lens": "Prior Sheriff pass gt-pvy7's own record", "summary": "bd show gt-pvy7: closed 2026-07-09 by nuka, opened replacement PR #4445 after its own 15+5+5 protocol, recorded merge_path_allowed=false/verdict=defer_human_review at the time with remaining blockers 'merge_status and blocker_scan'."},
+      {"id": "R06", "lens": "Replacement PR #4445 current mergeability", "summary": "gh pr view 4445: state OPEN, mergedAt null, mergeStateStatus DIRTY, mergeable CONFLICTING -- stale/conflicting against current upstream/main, 6 weeks untouched."},
+      {"id": "R07", "lens": "Replacement PR #4445 commit quality/attribution", "summary": "gh api .../pulls/4445/commits: single commit 8a28e12a2..., author 'coder <thalia.geraghty@fiserv.com>', message 'WIP: checkpoint (auto)', empty body -- no Co-authored-by trailer for flipch, despite the PR body's own text claiming 'Attribution: original work by @flipch...'. Claim not backed by actual git history."},
+      {"id": "R08", "lens": "Replacement PR #4445 diff content", "summary": "gh pr diff 4445 read in full: touches prime_molecule.go, prime_test.go, sling_formula.go, sling_helpers.go, sling_test.go, formula/embed.go, formula/embed_test.go, formula/parser.go; introduces a new exported formula.ResolveFormula() wrapper; deliberately drops sling.go/sling_dispatch.go changes present in #4066's original diff."},
+      {"id": "R09", "lens": "formula.Resolve() existence and callers on current upstream/main", "summary": "Fresh git fetch upstream main (649b832b7). internal/formula/parser.go exports func Resolve(formula *Formula, searchPaths []string) (*Formula, error) (line 508) -- full extends+compose merge, cycle detection, own package tests. git grep for 'formula.Resolve(' across internal/cmd/ on upstream/main: zero callers. Bug 1 confirmed still present."},
+      {"id": "R10", "lens": "Current rendering choke point", "summary": "internal/cmd/prime_molecule.go's resolveFormulaForRendering is now the SINGLE shared helper feeding showFormulaSteps, showFormulaStepsFull, AND renderFormulaRootAndStepsFull (consolidated since #4066/#4445 were written, when there were 2 separate call sites). Confirmed exact missing call site: ResolveFormulaContent -> Parse -> [missing Resolve] -> applyFormulaOverlays -> return."},
+      {"id": "R11", "lens": "sling.go / sling_dispatch.go current state (bug 2a/2b)", "summary": "Both already overwrite local vars-for-attachment with result.FormulaVars returned from InstantiateFormulaOnBead -> formulaVarsForBead, which unconditionally prepends issue=<beadID> before appending caller vars. This part of #4066's original diff is superseded/moot on current main via an independent refactor; confirmed by reading both files directly."},
+      {"id": "R12", "lens": "sling_formula.go current state (bug 2c)", "summary": "Standalone-formula-sling path: fieldUpdates.Vars/FormulaVars built from raw slingVars with no issue=<wispRootID> prepended, even though wispRootID is already known at that point in the function. Real, narrow, still-present gap -- confirmed by reading the function in full."},
+      {"id": "R13", "lens": "Read-side trace confirming fix location", "summary": "internal/cmd/prime.go calls showFormulaStepsFull(attachment.AttachedFormula, ..., attachmentFormulaVars(attachment)); attachmentFormulaVars() merges attachment.FormulaVars + attachment.AttachedVars (both bead-stored fields) into the extraVars fed to rendering. Confirms the bead-field storage location (not bd's own wisp bond vars) is exactly what gt prime reads -- validates R12's fix target."},
+      {"id": "R14", "lens": "formula.Resolve() no-op safety for non-extends formulas", "summary": "internal/formula/parser.go's resolveChain: when len(formula.Extends)==0 && formula.Compose==nil, short-circuits to Validate()-and-return-unchanged (first branch, before any extends/compose logic runs). formula.Parse() (line 23) already calls f.Validate() before returning. Confirmed: for the majority of formulas with no extends/compose (e.g. mol-polecat-work, the formula this very review bead runs under), calling Resolve() after Parse() is a provably idempotent no-op re-check -- cannot newly reject anything Parse() already accepted."},
+      {"id": "R15", "lens": "loadFormulaByName embedded-first fallback", "summary": "internal/formula/parser.go's loadFormulaByName (used by Resolve() to load extends parents and compose.expand targets): tries the embedded formula FS FIRST, then falls back to searchPaths. Confirms the 2-tier (rig, town) formulaSearchPaths helper is a sufficient fallback list -- embedded formulas (including any wc26-* parent/expansion formula that ships embedded rather than on-disk) are already covered inside Resolve() itself, independent of what searchPaths contains."},
+      {"id": "R16", "lens": "Related GitHub issue sweep", "summary": "gh issue list search across 'formula extends compose', 'prime --hook steps', 'wc26' plus a body-text re-scan of #4066/#4445: found issue #3322 ('gt prime showFormulaStepsFull only reads embedded formulas'), a DIFFERENT bug (missing disk-fallback tier in an older code path) -- confirmed via internal/formula/embed.go's current ResolveFormulaContent to be ALREADY FIXED on current main (rig->town->embedded 3-tier resolution present), unrelated to #4066's remaining bug. No issue references #4066 by number in any PR body. No other candidate issues found."}
+    ],
+    "pre_implementation_reviews": [
+      {"id": "P01", "lens": "correctness", "verdict": "OBJECT -> resolved", "summary": "Initial objection: formulaSearchPaths omits an embedded tier, risking failure to resolve an embedded-only extends parent. Resolved by R15: loadFormulaByName (used internally by Resolve()) already tries the embedded FS first, independent of searchPaths -- the 2-tier on-disk helper is a correct, sufficient fallback, matching the original PR author's own code comment making the same point."},
+      {"id": "P02", "lens": "cleanup-first / no-bandaid", "verdict": "CONFIRM", "summary": "Reuses the pre-existing formula.Resolve() directly (no new exported API, unlike #4445's ResolveFormula() wrapper); single choke-point fix covers all 3 rendering call sites; explicitly and correctly excludes sling.go/sling_dispatch.go as already-fixed to avoid churn; no new files/types."},
+      {"id": "P03", "lens": "safety / regression risk", "verdict": "OBJECT (narrow) -> resolved", "summary": "Initial objection: does formula.Resolve()'s no-op branch's Validate() call risk rejecting a formula that currently passes Parse() but would fail Validate()? Resolved by R14: Parse() already calls Validate() unconditionally before returning -- the no-op branch's re-validate on an already-validated, unchanged struct is a provably safe idempotent check, not a new failure mode, for the majority of formulas with no extends/compose."},
+      {"id": "P04", "lens": "scope / policy / attribution", "verdict": "OBJECT (narrow) -> incorporated", "summary": "Objection: plan said nothing about disposing of #4445 itself (a Sheriff-authored artifact, not a contributor PR, so within Sheriff's authority to close/correct), leaving a misattributed/broken PR live. Incorporated: added an explicit step to comment on #4445 recommending closure as superseded-by-defect (attempted direct close, blocked by lack of write permission -- recorded honestly, not worked around)."},
+      {"id": "P05", "lens": "evidence completeness", "verdict": "OBJECT -> resolved", "summary": "Objection: #4066's own diff had never been directly read before finalizing the plan -- all conclusions were reconstructed from current main and #4445's diff. Resolved by R04: fetched and read gh pr diff 4066 in full before implementation; confirmed the plan matches/supersedes #4066's original approach and no issue references were missed in its body."}
+    ],
+    "post_implementation_reviews": [
+      {"id": "PI01", "lens": "correctness (diff matches claim, tests are real)", "verdict": "CONFIRM", "summary": "Independently built PR #4725 head 3e04c43f4 in a separate local worktree; confirmed the exact diff hunks match the claimed fix; confirmed wispRootID is populated before the sling_formula.go edit point (no ordering bug); independently reverted the fix on the base commit with only the new test code copied over and confirmed both regression tests fail with the exact described symptoms, then confirmed they pass on head."},
+      {"id": "PI02", "lens": "regression / build verification", "verdict": "CONFIRM", "summary": "Fresh clone of PR #4725's head, ran go build/vet/test independently -- all pass. Confirmed formula/parser.go itself is untouched by this PR. Confirmed resolveChain's no-extends/no-compose branch is an unchanged-pointer validate-and-return, and Parse() already calls Validate() -- no regression path for non-extends formulas. Noted CI shows action_required (fork-PR gate needing maintainer approval), not a failure."},
+      {"id": "PI03", "lens": "cleanup-first / scope discipline", "verdict": "CONFIRM", "summary": "Confirmed diff is exactly 4 files / +51/-2; no drive-by refactors; confirmed via direct diff comparison that #4725 is strictly less additive than #4445 (no new exported formula-package API); confirmed sling.go/sling_dispatch.go are absent from the changed-files list, corroborating the already-fixed claim; confirmed real Co-authored-by trailers in the actual commit."},
+      {"id": "PI04", "lens": "policy / attribution / disposition", "verdict": "CONFIRM", "summary": "Confirmed #4066 remains OPEN and untouched by this Sheriff pass (no unilateral contributor-PR closure). Confirmed #4445 remains OPEN (the close-permission error is real, not a fabricated excuse) and the supersession comment posted on it is honest -- does not falsely claim closure. Confirmed #4725's real commit trailers match its PR-body attribution claim (unlike #4445's mismatch). Confirmed no refinery/MQ route used -- plain cross-repo gh pr create against gastownhall/gastown."},
+      {"id": "PI05", "lens": "evidence completeness", "verdict": "CONFIRM", "summary": "Confirmed PR #4725 is real/open/reachable. Independently re-verified issue #3322 describes a genuinely different root cause (fallback-tier gap vs extends/compose-resolution gap) via its own body text -- the already-fixed/no-action disposition holds. Ran an independent issue-search sweep; found only a same-numbered-but-unrelated issue #3198 on a different repo (kubevirt/containerized-data-importer), a coincidental collision requiring no action. Confirmed #4066's and #4445's bodies were both re-read for issue references -- none found beyond the #4066<->#4445<->#4725 PR chain, which is durable and self-documenting via #4445's own 'PR Sheriff note' cross-link."}
+    ],
+    "attribution": {
+      "preserved": true,
+      "mechanism": "Co-authored-by: flipch <10780503+flipch@users.noreply.github.com> trailer in the actual replacement commit 3e04c43f4, plus Original-PR/Original-Commit provenance lines. Verified as real git history (not just PR-body prose) by an independent review agent via `gh pr view 4725 --json commits`."
+    },
+    "blocker_scan": {
+      "unresolved_blockers_found": true,
+      "detail": "PR #4725's GitHub CI workflows (Test/Lint/Integration Tests/Windows Smoke Test) require maintainer approval to run on this fork-originated PR (action_required state) -- normal gating for external/fork PRs on this repo, not a code defect. Independently substituted with two separate local/fresh-clone build+vet+test runs against the exact head commit, both fully green. A human maintainer still needs to: (a) approve/trigger the GitHub Actions run on #4725, (b) review and merge #4725, (c) close #4066 as superseded once merged, (d) close #4445 as superseded-by-defect (Sheriff lacks permission to do either closure itself)."
+    }
+  },
+  "final": {
+    "verdict": "replacement_pr_opened_pending_maintainer_action",
+    "merge_path_allowed": false,
+    "merge_path_note": "Not mergeable by Sheriff -- requires a human maintainer to approve CI on #4725, review, and merge. No refinery/MQ route used or applicable.",
+    "required_actions": [
+      "Maintainer: approve/trigger GitHub Actions run on PR #4725 (gated as a fork-PR action_required workflow)",
+      "Maintainer: review and merge PR #4725",
+      "Maintainer: close #4066 as superseded by #4725 once merged",
+      "Maintainer: close #4445 as superseded-by-defect (comment already posted; Sheriff lacks close permission)"
+    ]
+  }
+}
