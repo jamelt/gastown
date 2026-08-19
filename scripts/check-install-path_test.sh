@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests for Makefile check-install-path shadow warnings.
+# Tests for Makefile check-install-path shadow warnings and
+# warn-if-install-symlink notices.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -62,6 +63,25 @@ assert_warns() {
   fi
 }
 
+run_symlink_check() {
+  "$MAKE_BIN" --no-print-directory -C "$REPO_ROOT" \
+    warn-if-install-symlink INSTALL_DIR="$INSTALL_DIR" 2>&1
+}
+
+assert_warns_symlink() {
+  local test_name="$1"
+  local output="$2"
+  local target="$3"
+  if [[ "$output" == *"Note: $INSTALL_DIR/gt was a symlink to $target"* ]]; then
+    echo "  PASS: $test_name"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $test_name"
+    echo "$output"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 echo "=== check-install-path tests ==="
 
 setup_bins
@@ -77,6 +97,26 @@ cleanup
 setup_bins
 output="$(run_check "$BREW_DIR:$INSTALL_DIR:$OTHER_DIR:$SYSTEM_PATH")"
 assert_warns "warns when earlier Homebrew-style gt shadows install" "$output" "$BREW_DIR/gt"
+cleanup
+
+echo "=== warn-if-install-symlink tests ==="
+
+setup_bins
+output="$(run_symlink_check)"
+assert_empty "no note when install target is already a regular file" "$output"
+cleanup
+
+setup_bins
+rm -f "$INSTALL_DIR/gt"
+ln -s "$BREW_DIR/gt" "$INSTALL_DIR/gt"
+output="$(run_symlink_check)"
+assert_warns_symlink "notes when install target is a symlink" "$output" "$BREW_DIR/gt"
+cleanup
+
+setup_bins
+rm -f "$INSTALL_DIR/gt"
+output="$(run_symlink_check)"
+assert_empty "no note when install target does not exist yet" "$output"
 cleanup
 
 echo "Results: $PASS passed, $FAIL failed"
