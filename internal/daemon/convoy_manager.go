@@ -30,6 +30,13 @@ const (
 	// auto-close. This prevents a race where the daemon's stranded scan
 	// fires before the sling's bd dep add is visible in Dolt. See GH#2303.
 	convoyGracePeriod = 5 * time.Minute
+
+	// maxConsecutiveSlingFailures bounds how many times feedFirstReady will
+	// retry the same (convoy, issue) sling failure before circuit-breaking.
+	// Without this, a bead hooked to a polecat whose session never clears
+	// (e.g. dead-agent detection misses it) gets re-attempted forever, once
+	// per scan interval, burning capacity and flooding daemon.log. See gt-vcp1.
+	maxConsecutiveSlingFailures = 5
 )
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
@@ -112,6 +119,21 @@ type ConvoyManager struct {
 	// been handled. This allows the 1s overlap window above without replaying
 	// the same lifecycle events on every poll.
 	processedLifecycleEvents sync.Map // map[string]bool
+
+	// slingFailures tracks consecutive identical sling failures per
+	// "<convoyID>|<issueID>" key, so feedFirstReady can circuit-break a
+	// deadlocked bead instead of retrying it forever. Only ever accessed
+	// from within scan(), which scanMu serializes to a single goroutine —
+	// no separate locking needed.
+	slingFailures map[string]*slingFailureRecord
+}
+
+// slingFailureRecord tracks the circuit-breaker state for one (convoy, issue)
+// sling attempt.
+type slingFailureRecord struct {
+	lastErr string // most recent failure message, to detect "identical" failures
+	count   int    // consecutive identical-failure count
+	blocked bool   // true once escalated; feedFirstReady stops retrying
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -131,15 +153,16 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ConvoyManager{
-		townRoot:     townRoot,
-		scanInterval: scanInterval,
-		ctx:          ctx,
-		cancel:       cancel,
-		logger:       logger,
-		stores:       stores,
-		openStores:   openStores,
-		isRigParked:  isRigParked,
-		gtPath:       gtPath,
+		townRoot:      townRoot,
+		scanInterval:  scanInterval,
+		ctx:           ctx,
+		cancel:        cancel,
+		logger:        logger,
+		stores:        stores,
+		openStores:    openStores,
+		isRigParked:   isRigParked,
+		gtPath:        gtPath,
+		slingFailures: make(map[string]*slingFailureRecord),
 	}
 }
 
@@ -558,6 +581,13 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
+		failKey := c.ID + "|" + issueID
+		if rec := m.slingFailures[failKey]; rec != nil && rec.blocked {
+			// Circuit-broken: already escalated after repeated identical
+			// failures. Skip silently rather than retrying forever.
+			continue
+		}
+
 		m.logger("Convoy %s: feeding %s to %s", c.ID, issueID, rig)
 
 		slingArgs := []string{"sling", issueID, rig, "--no-boot"}
@@ -572,13 +602,71 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		cmd.Stderr = &stderr
 
 		if err := cmd.Run(); err != nil {
-			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, util.FirstLine(stderr.String()))
+			errMsg := util.FirstLine(stderr.String())
+			m.recordSlingFailure(c.ID, issueID, failKey, errMsg)
 			continue
 		}
+		delete(m.slingFailures, failKey)
 		return // Successfully dispatched one issue
 	}
 
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+}
+
+// recordSlingFailure updates the circuit-breaker state for one (convoy,
+// issue) sling attempt. Consecutive identical failures increment a counter;
+// a differing error resets it, since the situation has changed and deserves
+// a fresh attempt budget. Once the counter reaches maxConsecutiveSlingFailures,
+// the (convoy, issue) pair is marked blocked (feedFirstReady stops retrying
+// it) and a single escalation is sent so a human or the mayor can break the
+// deadlock (e.g. clear a stale hook). See gt-vcp1.
+func (m *ConvoyManager) recordSlingFailure(convoyID, issueID, failKey, errMsg string) {
+	rec := m.slingFailures[failKey]
+	if rec == nil {
+		rec = &slingFailureRecord{}
+		m.slingFailures[failKey] = rec
+	}
+	if rec.lastErr == errMsg {
+		rec.count++
+	} else {
+		rec.lastErr = errMsg
+		rec.count = 1
+	}
+
+	if rec.count < maxConsecutiveSlingFailures {
+		m.logger("Convoy %s: sling %s failed: %s", convoyID, issueID, errMsg)
+		return
+	}
+
+	if rec.blocked {
+		return
+	}
+	rec.blocked = true
+	m.logger("Convoy %s: sling %s circuit-broken after %d consecutive identical failures (%s) — escalating, will not retry until state changes",
+		convoyID, issueID, rec.count, errMsg)
+	m.escalateSlingDeadlock(convoyID, issueID, errMsg)
+}
+
+// escalateSlingDeadlock reports a circuit-broken convoy/issue sling failure
+// via `gt escalate`, using a stable fingerprint so repeated scans (before the
+// deadlock is cleared) don't create duplicate escalations.
+func (m *ConvoyManager) escalateSlingDeadlock(convoyID, issueID, errMsg string) {
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	defer cancel()
+
+	description := fmt.Sprintf("Convoy %s: sling %s is circuit-broken after %d identical failures", convoyID, issueID, maxConsecutiveSlingFailures)
+	cmd := exec.CommandContext(ctx, m.gtPath, "escalate", description,
+		"--severity", "high",
+		"--reason", errMsg,
+		"--source", "convoy-manager",
+		"--related", issueID,
+		"--fingerprint", "convoy-sling-deadlock:"+convoyID+":"+issueID)
+	cmd.Dir = m.townRoot
+	cmd.Env = bdMutationRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		m.logger("Convoy %s: escalation for %s failed: %v (%s)", convoyID, issueID, err, strings.TrimSpace(string(output)))
+	}
 }
 
 // checkConvoyCompletion runs gt convoy check to auto-close a convoy whose
