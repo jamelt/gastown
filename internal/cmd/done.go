@@ -1919,20 +1919,49 @@ doneStateUpdate:
 // findHookedBeadForAgent queries for beads with status=hooked assigned to this agent.
 // This is the authoritative source for what work a polecat is doing, since the
 // work bead itself tracks status and assignee (hq-l6mm5).
-// Returns empty string if no hooked bead is found.
+//
+// Implements bounded retry with exponential backoff (gt-l20g) to handle transient
+// Dolt staleness/latency. Transient failures are recovered silently; persistent
+// failures or no results return empty string.
 func findHookedBeadForAgent(bd *beads.Beads, agentID string) string {
 	if agentID == "" {
 		return ""
 	}
-	hookedBeads, err := bd.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: agentID,
-		Priority: -1,
-	})
-	if err != nil || len(hookedBeads) == 0 {
-		return ""
+
+	const maxRetries = 3
+	const initialBackoff = 100 * time.Millisecond
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * initialBackoff
+			time.Sleep(backoff)
+		}
+
+		hookedBeads, err := bd.List(beads.ListOptions{
+			Status:   beads.StatusHooked,
+			Assignee: agentID,
+			Priority: -1,
+		})
+		if err == nil && len(hookedBeads) > 0 {
+			return hookedBeads[0].ID
+		}
+
+		lastErr = err
+		if err == nil {
+			// No error but also no results - not a transient failure, return empty
+			return ""
+		}
 	}
-	return hookedBeads[0].ID
+
+	// All retries exhausted. Log the persistent failure but don't block gt done.
+	// The failure is transient staleness (already fail-closed by preflight gate),
+	// and returning empty allows other issue-ID resolution paths to work
+	// (branch name parsing, explicit --issue flag).
+	if lastErr != nil {
+		style.PrintWarning("hook lookup failed after %d attempts (transient Dolt issue): %v", maxRetries, lastErr)
+	}
+	return ""
 }
 
 // parseCleanupStatus converts a string flag value to a CleanupStatus.
