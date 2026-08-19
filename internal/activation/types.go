@@ -4,9 +4,11 @@ package activation
 import (
 	"context"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
-const DefaultAuthority = "github.com/jamelt/gastown"
+const DefaultAuthority = util.DefaultGtAuthority
 
 // Options controls an activation. Paths are explicit so tests can use a fully
 // isolated runtime without touching the operator's town, tmux, or Dolt state.

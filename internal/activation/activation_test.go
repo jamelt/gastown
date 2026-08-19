@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 type fakeComponents struct {
@@ -213,7 +215,7 @@ func makeIntegratedRepo(t *testing.T, root string) (repo, authority, oldSHA, new
 	runGit(t, repo, "commit", "-m", "new main")
 	newSHA = runGit(t, repo, "rev-parse", "HEAD")
 	runGit(t, repo, "push", "origin", "main")
-	authority = canonicalRemote(bare)
+	authority = util.CanonicalRemote(bare)
 	return repo, authority, oldSHA, newSHA
 }
 

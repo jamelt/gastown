@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 var fullSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -56,7 +57,7 @@ func Activate(ctx context.Context, opts Options) (*Receipt, error) {
 	if err != nil {
 		return finishFailure(fmt.Errorf("reading %s remote: %w", opts.Remote, err))
 	}
-	if got := canonicalRemote(remoteURL); got != opts.Authority {
+	if got := util.CanonicalRemote(remoteURL); got != opts.Authority {
 		return finishFailure(fmt.Errorf("source authority %q is not required %q", got, opts.Authority))
 	}
 	refspec := "+refs/heads/main:" + opts.MainRef
@@ -267,22 +268,6 @@ func gitOutput(ctx context.Context, dir string, timeout time.Duration, args ...s
 		return output, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, output)
 	}
 	return strings.TrimSpace(output), nil
-}
-
-func canonicalRemote(remote string) string {
-	remote = strings.TrimSpace(strings.TrimSuffix(remote, ".git"))
-	if strings.HasPrefix(remote, "git@") {
-		remote = strings.TrimPrefix(remote, "git@")
-		remote = strings.Replace(remote, ":", "/", 1)
-		return remote
-	}
-	for _, prefix := range []string{"https://", "http://", "ssh://git@", "ssh://"} {
-		remote = strings.TrimPrefix(remote, prefix)
-	}
-	if at := strings.Index(remote, "@"); at >= 0 {
-		remote = remote[at+1:]
-	}
-	return remote
 }
 
 func installedRevision(ctx context.Context, path string) string {
