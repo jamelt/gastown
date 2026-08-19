@@ -59,7 +59,7 @@ type agentFailoverTmux interface {
 	SetRemainOnExit(pane string, on bool) error
 	KillPaneProcesses(pane string) error
 	ClearHistory(pane string) error
-	RespawnPane(pane, command string) error
+	RespawnPaneWithWorkDir(pane, workDir, command string) error
 	AcceptStartupDialogs(session string) error
 }
 
@@ -176,7 +176,7 @@ func runQuotaFailover(cmd *cobra.Command, args []string) error {
 		cooldown, _ := time.ParseDuration(plan.ProviderCooldown)
 		for _, sessionName := range sessions {
 			assignment := plan.Assignments[sessionName]
-			result := executeAgentFailover(t, mgr, assignment, cooldown, func(sessionName, nextAgent string) (string, error) {
+			result := executeAgentFailover(t, mgr, assignment, cooldown, func(sessionName, nextAgent string) (string, string, error) {
 				return buildRestartCommandWithOpts(sessionName, buildRestartCommandOpts{
 					AgentOverride: nextAgent,
 					StartupPrompt: "Provider failover: the previous runtime reached its configured quota. Run `gt prime --hook`, inspect the same hooked bead and worktree, and continue from durable state. Do not assume transcript context.",
@@ -210,10 +210,10 @@ func executeAgentFailover(
 	mgr *quota.Manager,
 	assignment quota.AgentFailoverAssignment,
 	cooldown time.Duration,
-	restartBuilder func(session, nextAgent string) (string, error),
+	restartBuilder func(session, nextAgent string) (string, string, error),
 ) AgentFailoverResult {
 	result := AgentFailoverResult{AgentFailoverAssignment: assignment}
-	restartCmd, err := restartBuilder(assignment.Session, assignment.NextAgent)
+	restartCmd, workDir, err := restartBuilder(assignment.Session, assignment.NextAgent)
 	if err != nil {
 		result.Error = "building restart command: " + err.Error()
 		return result
@@ -248,7 +248,7 @@ func executeAgentFailover(
 	if err := t.ClearHistory(pane); err != nil {
 		style.PrintWarning("could not clear history for %s: %v", assignment.Session, err)
 	}
-	if err := t.RespawnPane(pane, restartCmd); err != nil {
+	if err := t.RespawnPaneWithWorkDir(pane, workDir, restartCmd); err != nil {
 		_ = t.SetEnvironment(assignment.Session, "GT_AGENT", oldAgent)
 		_ = t.SetEnvironment(assignment.Session, "GT_PROCESS_NAMES", oldProcessNames)
 		result.Error = "respawning pane: " + err.Error()
