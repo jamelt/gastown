@@ -83,7 +83,10 @@ func DefaultBdCli() *BdCli {
 }
 
 func defaultBDExecWithOutput(workDir string, args ...string) (string, error) {
-	cmd := beads.Command(workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args), args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := beads.CommandContext(ctx, workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args), args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -100,7 +103,10 @@ func defaultBDExecWithOutput(workDir string, args ...string) (string, error) {
 }
 
 func defaultBDRun(workDir string, args ...string) error {
-	cmd := beads.Command(workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args), args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := beads.CommandContext(ctx, workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args), args...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
