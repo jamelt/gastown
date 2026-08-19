@@ -2055,3 +2055,56 @@ func TestScheduleBead_ClosedForceDoesNotBypass(t *testing.T) {
 		t.Errorf("--force should not bypass closed guard; got: %s", out)
 	}
 }
+
+// TestScheduleBead_RefusesHardProhibition verifies that scheduleBead
+// (deferred dispatch path) refuses to schedule an hq-1s4w hard-prohibition
+// labeled bead without --confirm-human-approved, and allows it through with
+// the flag. Regression test for gt-b2qi: scheduleBead was the only sling
+// entry point (alongside runSling's direct path and executeSling) missing
+// the hard-prohibition guard the feeder already had via feedSkipReason.
+func TestScheduleBead_RefusesHardProhibition(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	createArgs := []string{"create", "--title=Credentials bead refused by scheduleBead", "--type=task",
+		"--description=Integration test bead", "--labels=human,area:security", "--json"}
+	createCmd := exec.Command("bd", createArgs...)
+	createCmd.Dir = rigPath
+	out, err := createCmd.Output()
+	if err != nil {
+		combined, _ := exec.Command("bd", createArgs...).CombinedOutput()
+		t.Fatalf("bd create failed: %v\n%s", err, combined)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &issue); err != nil {
+		t.Fatalf("parse bd create output: %v\nraw: %s", err, out)
+	}
+	beadID := issue.ID
+	if beadID == "" {
+		t.Fatalf("bd create returned empty ID\nraw: %s", out)
+	}
+
+	// Without --confirm-human-approved: rejected, no sling context created.
+	slingOut, err := runGTCmdMayFail(t, gtBinary, hqPath, env,
+		"sling", beadID, "testrig", "--hook-raw-bead")
+	if err == nil {
+		t.Fatalf("expected gt sling to fail for hard-prohibition-labeled bead, got success\noutput: %s", slingOut)
+	}
+	if !strings.Contains(slingOut, "fresh human approval") {
+		t.Errorf("expected error to mention fresh human approval, got: %s", slingOut)
+	}
+	if hasSlingContext(t, hqPath, beadID) {
+		t.Errorf("scheduleBead should not have created a sling context for hard-prohibition-labeled bead %s", beadID)
+	}
+
+	// With --confirm-human-approved: allowed through, sling context created.
+	slingOut, err = runGTCmdMayFail(t, gtBinary, hqPath, env,
+		"sling", beadID, "testrig", "--hook-raw-bead", "--confirm-human-approved")
+	if err != nil {
+		t.Fatalf("expected gt sling --confirm-human-approved to succeed, got error: %v\noutput: %s", err, slingOut)
+	}
+	if !hasSlingContext(t, hqPath, beadID) {
+		t.Errorf("scheduleBead should have created a sling context once --confirm-human-approved was set")
+	}
+}

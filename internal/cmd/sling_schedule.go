@@ -64,6 +64,12 @@ type ScheduleOptions struct {
 	Agent        string   // Agent override (e.g., "gemini", "codex")
 	HookRawBead  bool     // Hook raw bead without default formula
 	Ralph        bool     // Ralph Wiggum loop mode
+
+	// ConfirmHumanApproved confirms a human has freshly reviewed and approved
+	// THIS dispatch of an hq-1s4w hard-prohibition-labeled bead (gt-b2qi).
+	// Not bypassed by Force — --force is the routine stale-hook escape hatch
+	// and must never silently double as hard-prohibition approval.
+	ConfirmHumanApproved bool
 }
 
 type deferredPolecatTarget struct {
@@ -243,6 +249,14 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	// --force — if you need to re-dispatch, reopen the bead first.
 	if info.Status == "closed" || info.Status == "tombstone" {
 		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
+	}
+
+	// hq-1s4w hard-prohibition guard (gt-b2qi). Mirrors the closed/tombstone
+	// guard above: independently re-validated here, in runSling's direct
+	// path (sling.go), and in executeSling (sling_dispatch.go) rather than
+	// trusted from an upstream caller — see those files for the same guard.
+	if err := checkHardProhibition(info.Title, info.Description, info.Labels, opts.ConfirmHumanApproved); err != nil {
+		return err
 	}
 
 	if (info.Status == "pinned" || info.Status == "hooked" || info.Status == "in_progress") && !opts.Force {
