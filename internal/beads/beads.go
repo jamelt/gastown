@@ -1593,6 +1593,18 @@ func (b *Beads) Comments(id string) ([]Comment, error) {
 	return comments, nil
 }
 
+// AddComment appends a comment to an issue, routing by issue ID when needed.
+func (b *Beads) AddComment(id, comment string) error {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return target.AddComment(id, comment)
+		}
+	}
+
+	_, err := b.run("comments", "add", id, comment)
+	return err
+}
+
 // Blocked returns issues that are blocked by dependencies.
 func (b *Beads) Blocked() ([]*Issue, error) {
 	if b.store != nil {
