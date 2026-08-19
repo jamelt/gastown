@@ -27,13 +27,17 @@ func TestPlanDispatch(t *testing.T) {
 		{"no capacity (negative)", -1, 3, 10, 0, 10, "capacity"},
 		{"no capacity (zero)", 0, 3, 10, 0, 10, "capacity"},
 		{"capacity constrains", 2, 3, 10, 2, 8, "capacity"},
-		{"batch constrains", 10, 3, 10, 3, 7, "batch"},
+		{"batch constrains (batch>1)", 10, 3, 10, 3, 7, "batch"},
 		{"ready constrains", 10, 5, 2, 2, 0, "ready"},
 		{"large capacity, batch constrains", 100, 3, 10, 3, 7, "batch"},
 		{"large capacity, ready constrains", 100, 5, 2, 2, 0, "ready"},
-		{"all equal", 3, 3, 3, 3, 0, "batch"},
+		{"all equal", 3, 3, 3, 3, 0, "capacity"},
 		{"single bead", 10, 3, 1, 1, 0, "ready"},
 		{"capacity 1", 1, 3, 10, 1, 9, "capacity"},
+		// New test cases for fill-capacity behavior (batchSize=1 means unlimited)
+		{"default batch fills capacity", 10, 1, 20, 10, 10, "capacity"},
+		{"default batch constrained by ready", 10, 1, 5, 5, 0, "ready"},
+		{"issue scenario: 53 ready, 37 capacity, batch 1", 37, 1, 53, 37, 16, "capacity"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
