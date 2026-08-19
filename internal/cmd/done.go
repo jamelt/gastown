@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -665,6 +667,112 @@ func init() {
 	rootCmd.AddCommand(doneCmd)
 }
 
+// doneRigDefaultBranch returns the configured default branch for rigName,
+// falling back to "main" when the rig has no config or no override.
+func doneRigDefaultBranch(townRoot, rigName string) string {
+	defaultBranch := "main"
+	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		defaultBranch = rigCfg.DefaultBranch
+	}
+	return defaultBranch
+}
+
+// doneResolveAutoSaveIssueID resolves the source issue the auto-save
+// preflight should attribute this branch's work to, without mutating any
+// state: the --issue flag, then the bead-id embedded in the branch name,
+// then (only if neither is available) a hook lookup for this actor. Returns
+// "" if no issue can be resolved, which the preflight below fails closed on.
+func doneResolveAutoSaveIssueID(cwd, branch, sender string) string {
+	if doneIssue != "" {
+		return doneIssue
+	}
+	if branchIssue := parseBranchName(branch).Issue; branchIssue != "" {
+		return branchIssue
+	}
+	if sender == "" {
+		return ""
+	}
+	hookIssue, ambiguous := selectAssignedIssue("", findAssignedBeadsForAgent(cwd, sender))
+	if ambiguous {
+		// Multiple candidate assignments: not "no assignment", but not safe
+		// to guess either. The later --issue disambiguation error still
+		// fires downstream; here it just means auto-save fails closed too.
+		return ""
+	}
+	return hookIssue
+}
+
+// doneAssertSafeForAutoSave fails closed before the stash auto-pop / auto-commit
+// safety nets run (gt-xz2). It requires a resolvable source issue and an
+// attached, non-protected branch. Without this gate, a polecat that
+// cold-starts with an empty hook and a stray checkout of the protected
+// branch could have unrelated shared changes staged and committed locally
+// before the exitType-gated protected-branch check further down (which only
+// runs for --status COMPLETED) ever gets a chance to run.
+func doneAssertSafeForAutoSave(branch, defaultBranch, issueID string) error {
+	if branch == "" || branch == "HEAD" {
+		return fmt.Errorf("gt done refuses to auto-save: HEAD is detached or the current branch could not be determined; check out your assigned feature branch first")
+	}
+	if branch == defaultBranch || branch == "master" {
+		return fmt.Errorf("gt done refuses to auto-save on protected branch %q; check out your assigned feature branch first", branch)
+	}
+	if issueID == "" {
+		return fmt.Errorf("gt done refuses to auto-save: no assigned source issue could be resolved for branch %q (empty hook); use --issue to specify one or re-hook the work first", branch)
+	}
+	return nil
+}
+
+// doneRecordAutoSaveRefusal writes a durable, non-git recovery record
+// inventorying the working-tree state gt done refused to auto-save, so
+// ambiguous/shared changes are quarantined for manual recovery without ever
+// being committed or deleted. Best-effort: a failure here never masks or
+// replaces the caller's returned preflight error.
+func doneRecordAutoSaveRefusal(townRoot, cwd, branch, sender string, cause error) {
+	if townRoot == "" || cause == nil {
+		return
+	}
+	dir := filepath.Join(townRoot, constants.DirRuntime, "gt-done-recovery")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		style.PrintWarning("gt done: could not create recovery record dir: %v", err)
+		return
+	}
+
+	record := map[string]any{
+		"time":   time.Now().UTC().Format(time.RFC3339Nano),
+		"actor":  sender,
+		"cwd":    cwd,
+		"branch": branch,
+		"reason": cause.Error(),
+	}
+	if status, statusErr := git.NewGit(cwd).Status(); statusErr == nil {
+		record["untracked"] = status.Untracked
+		record["modified"] = status.Modified
+		record["deleted"] = status.Deleted
+		record["unmerged"] = status.Unmerged
+		record["total_paths"] = len(status.Untracked) + len(status.Modified) + len(status.Deleted) + len(status.Unmerged)
+	} else {
+		record["status_error"] = statusErr.Error()
+	}
+
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		style.PrintWarning("gt done: could not encode recovery record: %v", err)
+		return
+	}
+	actorSlug := strings.NewReplacer("/", "_").Replace(sender)
+	if actorSlug == "" {
+		actorSlug = "unknown-actor"
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%s-%s.json", time.Now().UTC().Format("20060102T150405.000000000Z"), actorSlug))
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		style.PrintWarning("gt done: could not write recovery record: %v", err)
+		return
+	}
+	style.PrintWarning("gt done: refused to auto-save (%v)", cause)
+	fmt.Printf("  Changes were left exactly as found — nothing was committed or deleted.\n")
+	fmt.Printf("  Inventory recorded at %s\n\n", path)
+}
+
 func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	defer func() { telemetry.RecordDone(context.Background(), strings.ToUpper(doneStatus), retErr) }()
 	// Guard: Only polecats should call gt done
@@ -701,6 +809,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("getting current branch: %w", err)
 	}
+	var defaultBranch string
 
 	// Auto-detect cleanup status if not explicitly provided
 	// This prevents premature polecat cleanup by ensuring witness knows git state
@@ -720,6 +829,27 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				style.PrintWarning("could not check if branch is pushed: %v", pushErr)
 			}
 			doneCleanupStatus = cleanupStatusFromWorkState(workStatus, pushed, unpushedCount, pushErr)
+		}
+	}
+
+	// PREFLIGHT (gt-xz2): fail closed before any git-mutating safety net runs.
+	// Everything from here down (stash auto-pop, then uncommitted-work
+	// auto-commit) mutates the index or HEAD. Before either runs, establish a
+	// non-protected/attached branch and a resolvable source issue for this
+	// actor. Without this gate, a polecat that cold-starts with an empty hook
+	// and a stray checkout of the protected branch could have unrelated
+	// shared changes staged and committed locally before the protected-branch
+	// check further down (which only runs for --status COMPLETED, after the
+	// safety net already fired) ever gets a chance to run — see incident
+	// hq-wisp-a4a1, where 12,378 pre-existing/shared files were auto-added
+	// and committed to main by a cold-started polecat.
+	var autoSaveIssueID string
+	if doneCleanupStatus == "uncommitted" || doneCleanupStatus == "stash" {
+		defaultBranch = doneRigDefaultBranch(townRoot, rigName)
+		autoSaveIssueID = doneResolveAutoSaveIssueID(cwd, branch, sender)
+		if err := doneAssertSafeForAutoSave(branch, defaultBranch, autoSaveIssueID); err != nil {
+			doneRecordAutoSaveRefusal(townRoot, cwd, branch, sender, err)
+			return err
 		}
 	}
 
@@ -826,11 +956,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				if stagedDeletions, delErr := g.StagedDeletions(); delErr == nil && len(stagedDeletions) > 0 {
 					_ = g.ResetFiles(stagedDeletions...)
 				}
-				// Build a descriptive commit message
-				autoMsg := "fix: auto-save uncommitted implementation work (gt-pvx safety net)"
-				if issueFromBranch := parseBranchName(branch).Issue; issueFromBranch != "" {
-					autoMsg = fmt.Sprintf("fix: auto-save uncommitted implementation work (%s, gt-pvx safety net)", issueFromBranch)
-				}
+				// Build a descriptive commit message. The preflight above already
+				// established autoSaveIssueID and sender as this commit's
+				// source/actor provenance before any mutation was allowed to run.
+				autoMsg := fmt.Sprintf("fix: auto-save uncommitted implementation work (%s, %s, gt-pvx safety net)", autoSaveIssueID, sender)
 				if commitErr := g.Commit(autoMsg); commitErr != nil {
 					style.PrintWarning("auto-commit: git commit failed: %v — uncommitted work may be at risk", commitErr)
 				} else {
@@ -942,10 +1071,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatExiting, "gt done", issueID)
 	}
 
-	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
+	// Get configured default branch for this rig. Already resolved by the
+	// auto-save preflight above when there was uncommitted/stash work to gate;
+	// otherwise resolve it now.
+	if defaultBranch == "" {
+		defaultBranch = doneRigDefaultBranch(townRoot, rigName)
 	}
 	baseRef := g.CleanBaseRef("origin", defaultBranch, doneTarget)
 	// workRefs resolves where this work publishes to and what a PR/MR targets,
