@@ -42,32 +42,13 @@ const completionClaimLockTimeout = 5 * time.Second
 func ClaimCompletionNotification(townRoot, convoyID string) (claimed bool, fields *beads.ConvoyFields, err error) {
 	lockPath := filepath.Join(townRoot, ".runtime", "convoy-notify-locks", convoyID+".lock")
 	if mkErr := os.MkdirAll(filepath.Dir(lockPath), 0755); mkErr == nil {
-		if unlock, acquired, lockErr := tryAcquireWithTimeout(lockPath, completionClaimLockTimeout); lockErr == nil && acquired {
+		if unlock, acquired, lockErr := lock.FlockTryAcquireWithTimeout(lockPath, completionClaimLockTimeout); lockErr == nil && acquired {
 			defer unlock()
 		}
 		// On timeout or lock error, fall through to the unlocked best-effort
 		// claim below instead of failing the notification outright.
 	}
 	return claimUnlocked(townRoot, convoyID)
-}
-
-// tryAcquireWithTimeout polls a non-blocking flock attempt until it succeeds
-// or the timeout elapses, never blocking indefinitely on a stuck holder.
-func tryAcquireWithTimeout(path string, timeout time.Duration) (func(), bool, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		unlock, ok, err := lock.FlockTryAcquire(path)
-		if err != nil {
-			return nil, false, err
-		}
-		if ok {
-			return unlock, true, nil
-		}
-		if time.Now().After(deadline) {
-			return nil, false, nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
 }
 
 // claimUnlocked performs the fresh read-check-write of CompletionNotifiedAt.
@@ -105,6 +86,12 @@ func claimUnlocked(townRoot, convoyID string) (bool, *beads.ConvoyFields, error)
 	if err := updateCmd.Run(); err != nil {
 		return false, nil, fmt.Errorf("persisting convoy completion claim for %s: %w", convoyID, err)
 	}
+
+	// Best-effort JSONL export mirror so the claim survives a later Dolt
+	// rebuild from issues.jsonl. The update above already committed to Dolt,
+	// which is authoritative — export failure here does not fail the claim.
+	exportCmd := beads.Command(beadsDir, beadsDir, beads.MutationPinned, "export", "-o", filepath.Join(beadsDir, "issues.jsonl"))
+	_ = exportCmd.Run()
 
 	return true, fields, nil
 }

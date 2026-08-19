@@ -1800,6 +1800,10 @@ func prioritySeverityLabel(priority Priority) string {
 //   - Message type is TypeReply (recipient is already replying)
 //   - Sender is not a direct mail address that can receive a reply
 //   - Configured delay is zero or negative (feature disabled)
+//
+// Enqueueing is deduplicated by Kind+ThreadID (see EnqueueUniqueByKindThread)
+// so a retried send after a transient failure cannot queue a second reminder
+// for the same thread.
 func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if r.townRoot == "" {
 		return
@@ -1822,7 +1826,7 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 		ThreadID:     msg.ThreadID,
 		DeliverAfter: time.Now().Add(delay),
 	}
-	if err := nudge.Enqueue(r.townRoot, sessionID, reminder); err != nil {
+	if _, err := nudge.EnqueueUniqueByKindThread(r.townRoot, sessionID, reminder); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to enqueue reply reminder for %s: %v\n", sessionID, err)
 	}
 }

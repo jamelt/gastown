@@ -414,6 +414,17 @@ func (bm *BeadsMessage) ToMessage() *Message {
 		ccAddrs = append(ccAddrs, identityToAddress(cc))
 	}
 
+	// A message with no persisted "thread:" label falls back to its own ID as
+	// the thread key. Without this, ThreadID is "" for such messages, and
+	// every reply-reminder keyed on it (enqueue and later clear) becomes
+	// permanently unmatchable — the reminder fires forever even after a
+	// successful reply, since the reply mints an unrelated fresh thread ID
+	// instead of reusing the (missing) original.
+	threadID := bm.threadID
+	if threadID == "" {
+		threadID = bm.ID
+	}
+
 	return &Message{
 		ID:              bm.ID,
 		From:            identityToAddress(bm.sender),
@@ -424,7 +435,7 @@ func (bm *BeadsMessage) ToMessage() *Message {
 		Read:            bm.Status == "closed" || bm.HasLabel("read"),
 		Priority:        priority,
 		Type:            msgType,
-		ThreadID:        bm.threadID,
+		ThreadID:        threadID,
 		ReplyTo:         bm.replyTo,
 		Wisp:            bm.Wisp,
 		CC:              ccAddrs,

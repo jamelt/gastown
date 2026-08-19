@@ -28,6 +28,38 @@ var (
 	ErrInvalidLock = errors.New("invalid lock file")
 )
 
+// flockPollInterval is how often FlockTryAcquireWithTimeout retries a
+// non-blocking flock attempt while waiting for the timeout to elapse.
+const flockPollInterval = 50 * time.Millisecond
+
+// FlockTryAcquireWithTimeout polls FlockTryAcquire until it succeeds or the
+// timeout elapses. Unlike FlockAcquire (which blocks forever), this bounds
+// how long a caller waits on a contended or stuck lock holder — critical for
+// callers on latency-sensitive hot paths (e.g. a merge-queue loop) where
+// blocking indefinitely on a dead holder would be a worse failure mode than
+// proceeding without the lock.
+//
+// Returns (cleanup, true, nil) if acquired. Returns (nil, false, nil) if the
+// timeout elapsed without acquiring — this is not an error; callers should
+// treat it as "lock unavailable, decide your own fallback" (e.g. proceed
+// unlocked with a best-effort operation, or skip and retry later).
+func FlockTryAcquireWithTimeout(path string, timeout time.Duration) (func(), bool, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		cleanup, ok, err := FlockTryAcquire(path)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok {
+			return cleanup, true, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, false, nil
+		}
+		time.Sleep(flockPollInterval)
+	}
+}
+
 // LockInfo contains information about who holds a lock.
 type LockInfo struct {
 	PID       int       `json:"pid"`
