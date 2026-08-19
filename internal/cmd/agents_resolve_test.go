@@ -3,6 +3,8 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -180,4 +182,136 @@ func candidate(id string, source agentBeadSource, status string) agentBeadCandid
 		Status: status,
 		Issue:  &beads.Issue{ID: id, Status: status},
 	}
+}
+
+// TestHealRigSingletons_ReopensRigLocalCandidateInPlace covers gt-n99t: a
+// Witness/Refinery singleton's rig-local record (see beads.Beads.ForLocalBeads)
+// can be transiently closed (e.g. by the reaper) while a same-ID town-sourced
+// bead stays open. healRigSingletons must reopen the rig-local record in
+// place (mutating the slice element's Status), not return a detached copy —
+// pickBestAgentBead reads straight from this same slice afterward.
+func TestHealRigSingletons_ReopensRigLocalCandidateInPlace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd script uses POSIX shell")
+	}
+
+	rigBeadsDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	installAgentsResolveMockBD(t, logPath)
+
+	matches := []agentBeadCandidate{
+		candidate("gt-gastown-refinery", agentSourceTownIssues, "open"),
+		{
+			ID:       "gt-gastown-refinery",
+			Source:   agentSourceRigIssues,
+			BeadsDir: rigBeadsDir,
+			Status:   "closed",
+			Issue:    &beads.Issue{ID: "gt-gastown-refinery", Status: "closed"},
+		},
+	}
+
+	healRigSingletons(matches, "refinery")
+
+	if matches[1].Status != "open" {
+		t.Fatalf("matches[1].Status = %q, want \"open\" after healing", matches[1].Status)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	logStr := string(logData)
+	if !strings.Contains(logStr, "BEADS_DIR="+rigBeadsDir) {
+		t.Fatalf("expected a bd invocation against rig BEADS_DIR=%s; log:\n%s", rigBeadsDir, logStr)
+	}
+	if !strings.Contains(logStr, "update gt-gastown-refinery --status=open") {
+		t.Fatalf("expected an 'update ... --status=open' call; log:\n%s", logStr)
+	}
+}
+
+// TestHealRigSingletons_ThenPickBestPrefersReopenedRigCandidate is the
+// regression test for the bug a post-implementation review caught: calling
+// the healer AFTER pickBestAgentBead reads a corrupted slice, because
+// pickBestAgentBead's closed-candidate filter (`open := candidates[:0]`)
+// overwrites the input slice's backing array in place. Healing must run
+// BEFORE pickBestAgentBead so ranking sees the reopened status and picks the
+// rig-local record over the town duplicate (gt-n99t).
+func TestHealRigSingletons_ThenPickBestPrefersReopenedRigCandidate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd script uses POSIX shell")
+	}
+
+	rigBeadsDir := t.TempDir()
+	installAgentsResolveMockBD(t, filepath.Join(t.TempDir(), "bd.log"))
+
+	matches := []agentBeadCandidate{
+		{
+			ID:       "gt-gastown-refinery",
+			Source:   agentSourceRigIssues,
+			BeadsDir: rigBeadsDir,
+			Status:   "closed",
+			Issue:    &beads.Issue{ID: "gt-gastown-refinery", Status: "closed"},
+		},
+		candidate("gt-gastown-refinery", agentSourceTownIssues, "open"),
+	}
+
+	healRigSingletons(matches, "refinery")
+	got := pickBestAgentBead(matches)
+
+	if got == nil {
+		t.Fatal("pickBestAgentBead returned nil after healing")
+	}
+	if got.Source != agentSourceRigIssues {
+		t.Fatalf("pickBestAgentBead picked source %v, want agentSourceRigIssues (the reopened rig-local record)", got.Source)
+	}
+}
+
+// TestHealRigSingletons_IgnoresNonSingletonRoles verifies crew/polecat beads
+// (legitimately closed forever once nuked/retired) are never auto-reopened —
+// only Witness/Refinery are rig-local singletons.
+func TestHealRigSingletons_IgnoresNonSingletonRoles(t *testing.T) {
+	matches := []agentBeadCandidate{
+		{
+			ID:       "gt-gastown-polecat-shiny",
+			Source:   agentSourceRigIssues,
+			BeadsDir: t.TempDir(),
+			Status:   "closed",
+			Issue:    &beads.Issue{ID: "gt-gastown-polecat-shiny", Status: "closed"},
+		},
+	}
+	healRigSingletons(matches, "polecat")
+	if matches[0].Status != "closed" {
+		t.Fatalf("matches[0].Status = %q, want unchanged \"closed\" for a non-singleton role", matches[0].Status)
+	}
+}
+
+// TestHealRigSingletons_NoClosedRigCandidateIsNoop verifies the healer
+// leaves an already-open town candidate untouched when there's nothing to
+// reopen — resolve still falls through to its existing town-source error in
+// that case.
+func TestHealRigSingletons_NoClosedRigCandidateIsNoop(t *testing.T) {
+	matches := []agentBeadCandidate{
+		candidate("gt-gastown-refinery", agentSourceTownIssues, "open"),
+	}
+	healRigSingletons(matches, "refinery")
+	if matches[0].Status != "open" {
+		t.Fatalf("matches[0].Status = %q, want unchanged \"open\"", matches[0].Status)
+	}
+}
+
+// installAgentsResolveMockBD installs a fake `bd` on PATH that logs the
+// BEADS_DIR env var and full argument list per invocation to logPath and
+// exits 0, so beads.Beads.Update() succeeds without touching a real Dolt
+// server.
+func installAgentsResolveMockBD(t *testing.T, logPath string) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+printf 'BEADS_DIR=%s ARGS=%s\n' "$BEADS_DIR" "$*" >> "` + logPath + `"
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

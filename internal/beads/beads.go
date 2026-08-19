@@ -619,6 +619,16 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 	return &Beads{workDir: workDir, beadsDir: beadsDir}
 }
 
+// NewRigLocal returns a Beads wrapper pinned to rigBeadsDir, bypassing town
+// routing (see ForLocalBeads). rigBeadsDir is the resolved rig .beads
+// directory, e.g. from ResolveRepoAliasBeadsDir. Callers that need a durable
+// rig-local record — Witness/Refinery singleton identities, or any bead
+// whose ownership is pinned to a specific rig's database — should use this
+// instead of repeating the NewWithBeadsDir(...).ForLocalBeads() idiom.
+func NewRigLocal(rigBeadsDir string) *Beads {
+	return NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForLocalBeads()
+}
+
 // ForLocalBeads returns a wrapper whose agent-bead operations remain pinned to
 // the wrapper's selected database. Most agent lifecycle records intentionally
 // live in town state, so CreateAgentBead normally re-roots through

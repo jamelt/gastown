@@ -454,7 +454,7 @@ func markSchedulerCleared(townRoot, workBeadID string) {
 			style.Dim.Render("Warning:"), rigName, workBeadID)
 		return
 	}
-	b := beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForLocalBeads()
+	b := beads.NewRigLocal(rigBeadsDir)
 	if err := b.Update(workBeadID, beads.UpdateOptions{AddLabels: []string{capacity.LabelSchedulerCleared}}); err != nil {
 		fmt.Printf("  %s Could not set scheduler-cleared marker on %s: %v (a later feed pass may re-enqueue it)\n",
 			style.Dim.Render("Warning:"), workBeadID, err)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 var (
@@ -96,6 +97,17 @@ func runAgentsResolve(cmd *cobra.Command, _ []string) error {
 			matches = append(matches, candidate)
 		}
 	}
+
+	// A rig-local Witness/Refinery record can be closed for a mundane
+	// reason (e.g. auto-closed by the reaper for heartbeat staleness) while
+	// a same-ID town-sourced bead stays open. Reopen it in place — mirroring
+	// the reopen-don't-recreate pattern already used by EnsureRigIdentities
+	// and gt doctor --fix — before ranking, so pickBestAgentBead sees it as
+	// open and picks the authoritative rig record over the town duplicate.
+	// This MUST run before pickBestAgentBead: that function's in-place
+	// closed-candidate filter reuses matches's backing array, so anything
+	// read from matches afterward may already be overwritten (gt-n99t).
+	healRigSingletons(matches, role)
 
 	match := pickBestAgentBead(matches)
 	if match == nil {
@@ -239,6 +251,41 @@ func agentBeadMatches(issue *beads.Issue, role, rig string) bool {
 		return idRig == ""
 	}
 	return idRig == rig
+}
+
+// healRigSingletons reopens every closed rig-local Witness/Refinery
+// singleton candidate in matches, in place. Only these two roles get this
+// treatment — they're the sole rig-local singleton exception
+// (beads.Beads.ForLocalBeads); other roles (crew, polecat, ...) can be
+// legitimately closed forever, so auto-reopening them would resurrect
+// deliberately-retired identities.
+//
+// Must run before pickBestAgentBead, for two reasons: pickBestAgentBead's
+// in-place closed-candidate filter reuses matches's backing array, so a
+// closed candidate read from matches afterward may already have been
+// overwritten (gt-n99t); and mutating in place — rather than returning a
+// single winner — lets pickBestAgentBead's existing canonical-ID tie-break
+// (agentBeadIDRank) decide when a legacy and a canonical closed duplicate
+// both need reopening, instead of this function guessing which one to heal.
+func healRigSingletons(matches []agentBeadCandidate, role string) {
+	if role != constants.RoleWitness && role != constants.RoleRefinery {
+		return
+	}
+	for i := range matches {
+		c := &matches[i]
+		if c.Source != agentSourceRigIssues && c.Source != agentSourceRigWisps {
+			continue
+		}
+		if !strings.EqualFold(c.Status, "closed") {
+			continue
+		}
+		bd := beads.NewRigLocal(c.BeadsDir)
+		open := "open"
+		if err := bd.Update(c.ID, beads.UpdateOptions{Status: &open}); err != nil {
+			continue
+		}
+		c.Status = "open"
+	}
 }
 
 // pickBestAgentBead picks the single authoritative candidate. When several
