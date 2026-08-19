@@ -58,6 +58,34 @@ func TestEvaluateTownUnfedWork_SkipsWispsAndEphemeral(t *testing.T) {
 	}
 }
 
+func TestEvaluateTownUnfedWork_SkipsProtectedAndInternalLabels(t *testing.T) {
+	issues := []*beads.Issue{
+		{ID: "hq-role1", Type: "task", Priority: 1, Title: "Role bead mistyped as task", Labels: []string{"gt:role"}},
+		{ID: "hq-queue1", Type: "task", Priority: 1, Title: "Queue bead mistyped as task", Labels: []string{"gt:queue"}},
+	}
+
+	got := evaluateTownUnfedWork(issues)
+	if len(got) != 0 {
+		t.Fatalf("expected no flagged beads, got %v", got)
+	}
+}
+
+func TestEvaluateTownUnfedWork_MixedList(t *testing.T) {
+	issues := []*beads.Issue{
+		{ID: "hq-1", Type: "bug", Priority: 0, Title: "Real defect"},
+		{ID: "hq-1s4w", Type: "directive", Priority: 0, Title: "Standing hard-prohibition policy"},
+		{ID: "hq-epic1", Type: "epic", Priority: 0, Title: "Epic container"},
+	}
+
+	got := evaluateTownUnfedWork(issues)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 flagged bead, got %d: %v", len(got), got)
+	}
+	if want := "hq-1 [P0 bug]: Real defect"; got[0] != want {
+		t.Fatalf("detail mismatch:\n got:  %s\n want: %s", got[0], want)
+	}
+}
+
 func TestEvaluateTownUnfedWork_SortedByPriorityThenID(t *testing.T) {
 	issues := []*beads.Issue{
 		{ID: "hq-zzz", Type: "bug", Priority: 1, Title: "P1 bug"},
