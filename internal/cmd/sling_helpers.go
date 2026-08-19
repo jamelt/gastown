@@ -425,6 +425,8 @@ func getBeadInfo(beadID string) (*beadInfo, error) {
 // eliminating the race condition where concurrent writers could overwrite each other's fields.
 type beadFieldUpdates struct {
 	Dispatcher       string   // Agent that dispatched the work
+	DispatchContext  string   // Dispatch context (e.g., sling context ID)
+	DispatchActor    string   // Actor that dispatched the work
 	Args             string   // Natural language instructions
 	Vars             []string // Formula variables (key=value pairs)
 	AttachedMolecule string   // Wisp root ID
@@ -436,6 +438,7 @@ type beadFieldUpdates struct {
 	MergeStrategy    string   // Convoy merge strategy: "direct", "mr", "local"
 	ConvoyOwned      bool     // Convoy has gt:owned label (caller-managed lifecycle)
 	FormulaVars      string   // Newline-separated key=value pairs for formula template substitution
+	ClearAttachment  bool     // Clear the attachment if set to true
 }
 
 func buildSlingFieldUpdates(
@@ -446,6 +449,7 @@ func buildSlingFieldUpdates(
 	attachedFormula string,
 	noMerge bool,
 	reviewOnly bool,
+	mode string,
 	formulaVars string,
 	convoyID string,
 	mergeStrategy string,
@@ -459,6 +463,7 @@ func buildSlingFieldUpdates(
 		AttachedFormula:  attachedFormula,
 		NoMerge:          noMerge,
 		ReviewOnly:       reviewOnly,
+		Mode:             mode,
 		ConvoyID:         convoyID,
 		MergeStrategy:    mergeStrategy,
 		ConvoyOwned:      convoyOwned,
@@ -878,8 +883,9 @@ func isPolecatTarget(target string) bool {
 
 // FormulaOnBeadResult contains the result of instantiating a formula on a bead.
 type FormulaOnBeadResult struct {
-	WispRootID string // The wisp root ID (compound root after bonding)
-	BeadToHook string // The bead ID to hook (BASE bead, not wisp - lifecycle fix)
+	WispRootID  string   // The wisp root ID (compound root after bonding)
+	BeadToHook  string   // The bead ID to hook (BASE bead, not wisp - lifecycle fix)
+	FormulaVars []string // The instantiated formula variables
 }
 
 // InstantiateFormulaOnBead creates a wisp from a formula, bonds it to a bead.

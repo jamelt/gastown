@@ -548,6 +548,12 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 	return &Beads{workDir: workDir, beadsDir: beadsDir}
 }
 
+// WithContext is a builder method that currently returns the Beads instance unchanged.
+// It's reserved for future use when context-aware timeouts are needed on Beads operations.
+func (b *Beads) WithContext(ctx context.Context) *Beads {
+	return b
+}
+
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
 //
 // Agent beads (labeled gt:agent) live in the TOWN database, but their IDs
@@ -1371,6 +1377,39 @@ func (b *Beads) ListByAssignee(assignee string) ([]*Issue, error) {
 	})
 }
 
+// ListIssueStatuses returns all issues matching any of the given statuses.
+// It performs multiple List calls, one per status, and deduplicates the results.
+func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
+	if len(statuses) == 0 {
+		return []*Issue{}, nil
+	}
+
+	seen := make(map[string]bool)
+	var issues []*Issue
+
+	for _, status := range statuses {
+		statusStr := strings.ToLower(strings.TrimSpace(string(status)))
+		if statusStr == "" {
+			continue
+		}
+		results, err := b.List(ListOptions{
+			Status:   statusStr,
+			Priority: -1,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, issue := range results {
+			if !seen[issue.ID] {
+				seen[issue.ID] = true
+				issues = append(issues, issue)
+			}
+		}
+	}
+
+	return issues, nil
+}
+
 // GetAssignedIssue returns the first issue assigned to the given assignee.
 // Checks open, in_progress, and hooked statuses (hooked = work on agent's hook).
 // Returns nil if no matching issue is assigned.
@@ -2158,4 +2197,19 @@ func ProvisionPrimeMDForWorktree(worktreePath string) error {
 
 	// Provision PRIME.md in the target directory
 	return ProvisionPrimeMD(beadsDir)
+}
+
+// IsMoleculeContainerOrStep reports whether an issue is a molecule (wisp) container or step (both internal types).
+func IsMoleculeContainerOrStep(issue *Issue) bool {
+	if issue == nil {
+		return false
+	}
+	issueID := strings.ToLower(strings.TrimSpace(issue.ID))
+	if strings.HasPrefix(issueID, "gt-wisp-") {
+		return true
+	}
+	if strings.HasPrefix(issueID, "mol-") {
+		return true
+	}
+	return false
 }
