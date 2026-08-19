@@ -2325,9 +2325,12 @@ func (m *Manager) List() ([]*Polecat, error) {
 // Idle means no hook, no active session, and no pending completion/MR cleanup state.
 // isReuseCandidateState reports whether a polecat's lifecycle state makes it
 // eligible to be considered for reuse. It mirrors DecideWorkstate, which lets
-// StateIdle and StateDone fall through to the real reuse predicates.
+// StateIdle, StateDone and StateStuck fall through to the real reuse
+// predicates. StateStuck is included per hq-f2n8c: `gt done --status DEFERRED`
+// maps to stuck, so excluding it permanently stranded every polecat that
+// correctly reported its work unnecessary.
 func isReuseCandidateState(s State) bool {
-	return s == StateIdle || s == StateDone
+	return s == StateIdle || s == StateDone || s == StateStuck
 }
 
 func (m *Manager) FindIdlePolecat() (*Polecat, error) {

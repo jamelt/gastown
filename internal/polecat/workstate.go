@@ -70,7 +70,19 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	// lands) falls through to the real predicate checks below instead of
 	// bailing out here — otherwise a merged/clean polecat gets NEEDS_RECOVERY
 	// with no blockers, disagreeing with git-state for no reason (gt-check-recovery-bug).
-	if in.State != StateIdle && in.State != StateDone {
+	//
+	// StateStuck falls through for the identical reason (hq-f2n8c). `gt done
+	// --status DEFERRED` and `--status ESCALATED` both map to agent_state=stuck,
+	// and DEFERRED is the sanctioned way to report "this work turned out
+	// unnecessary". Bailing out here classified every such polecat
+	// NEEDS_RECOVERY unconditionally — at any level of worktree cleanliness —
+	// because every predicate that could clear it is defined below this return.
+	// The slot could then only be freed by an external actor mutating
+	// agent_state, which is how a whole rig reaches reusable=0 and stops
+	// dispatching. Falling through classifies a stuck polecat on its merits;
+	// genuinely dirty ones are still held by the predicates below, which
+	// already encode the fail-closed behaviour.
+	if in.State != StateIdle && in.State != StateDone && in.State != StateStuck {
 		verdict := WorkstateVerdictNeedsRecovery
 		needsRecovery := true
 		if in.State == StateWorking {

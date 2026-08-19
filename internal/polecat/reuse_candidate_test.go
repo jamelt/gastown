@@ -19,6 +19,7 @@ func TestIsReuseCandidateState(t *testing.T) {
 		{StateWorking, false, "actively holds work"},
 		{StateStalled, false, "interrupted mid-work; needs recovery, not reuse"},
 		{StateReviewNeeded, false, "live session with unclear cleanup"},
+		{StateStuck, true, "hq-f2n8c: gt done --status DEFERRED/ESCALATED lands here; vet it on predicates, not on the label"},
 	} {
 		if got := isReuseCandidateState(tc.state); got != tc.want {
 			t.Errorf("isReuseCandidateState(%s) = %v, want %v (%s)", tc.state, got, tc.want, tc.why)
@@ -27,11 +28,11 @@ func TestIsReuseCandidateState(t *testing.T) {
 }
 
 // The candidate filter must stay consistent with DecideWorkstate, which lets
-// exactly these two states fall through to the real reuse predicates. If one
+// exactly these three states fall through to the real reuse predicates. If one
 // side is changed without the other, polecats become either unreusable (the
 // gt-nz5x outage) or reusable without being vetted.
 func TestReuseCandidateStatesMatchWorkstateFallthrough(t *testing.T) {
-	for _, s := range []State{StateIdle, StateDone, StateWorking, StateStalled, StateReviewNeeded} {
+	for _, s := range []State{StateIdle, StateDone, StateStuck, StateWorking, StateStalled, StateReviewNeeded} {
 		d := DecideWorkstate(WorkstateInput{State: s, CleanupStatus: CleanupClean})
 		// "not-idle" is the short-circuit DecideWorkstate returns for states it
 		// refuses to evaluate against the real predicates.
