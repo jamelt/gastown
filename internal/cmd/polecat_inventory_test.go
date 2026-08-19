@@ -206,6 +206,32 @@ func TestBuildPolecatInventoryItemMQIndex(t *testing.T) {
 			t.Fatalf("reason = %q, want mq-lookup-failed", item.Disposition.Reason)
 		}
 	})
+
+	t.Run("closed source bead with unsubmitted branch still needs mq submit", func(t *testing.T) {
+		// A terminal (closed) source bead says nothing about whether the branch
+		// still carries pushed-but-unsubmitted work — it must not be read as
+		// SAFE_TO_NUKE for stranded work (gt-6mhu).
+		fields := &beads.AgentFields{
+			AgentState:      string(beads.AgentStateIdle),
+			CleanupStatus:   string(polecat.CleanupClean),
+			Branch:          branch,
+			LastSourceIssue: "gt-src-closed",
+		}
+		sourceIssue := &beads.Issue{ID: "gt-src-closed", Status: string(beads.StatusClosed)}
+		mq := polecatMQIndex{
+			mrByBranch:   map[string]*beads.Issue{},
+			sourceIssues: map[string]*beads.Issue{"gt-src-closed": sourceIssue},
+		}
+
+		item := buildPolecatInventoryItem("gastown", "synth", fields, nil, sessions, mq)
+
+		if item.Disposition.Verdict != polecat.WorkstateVerdictNeedsMQSubmit {
+			t.Fatalf("verdict = %q, want %q (terminal source bead must not mask stranded pushed work)", item.Disposition.Verdict, polecat.WorkstateVerdictNeedsMQSubmit)
+		}
+		if item.Disposition.Reusable {
+			t.Fatalf("disposition = %+v, want Reusable=false for stranded work behind a closed source bead", item.Disposition)
+		}
+	})
 }
 
 type fakePolecatMQIndexSource struct {
