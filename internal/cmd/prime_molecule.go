@@ -215,7 +215,7 @@ func renderFormulaStepsFullParsed(formulaName string, f *formula.Formula, varMap
 func buildFormulaVarMap(f *formula.Formula, extraVars []string) map[string]string {
 	m := make(map[string]string, len(f.Vars))
 	for k, v := range f.Vars {
-		if v.Default != "" || !v.Required {
+		if v.Default != "" {
 			m[k] = v.Default
 		}
 	}

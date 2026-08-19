@@ -452,6 +452,86 @@ func TestSynthesisDescriptionRendersOutputContext(t *testing.T) {
 	}
 }
 
+func TestBuildFormulaVarMapIncludesDefaultsOnly(t *testing.T) {
+	t.Parallel()
+
+	f := &formula.Formula{
+		Vars: map[string]formula.Var{
+			"with_default": {
+				Default:  "default_value",
+				Required: false,
+			},
+			"required_with_default": {
+				Default:  "default_value",
+				Required: true,
+			},
+			"required_no_default": {
+				Required: true,
+			},
+			"optional_no_default": {
+				Required: false,
+			},
+		},
+	}
+
+	varMap := buildFormulaVarMap(f, nil)
+
+	// Vars with defaults should be in the map
+	if val, ok := varMap["with_default"]; !ok || val != "default_value" {
+		t.Errorf("with_default not properly added to varMap: got %q, want %q", val, "default_value")
+	}
+	if val, ok := varMap["required_with_default"]; !ok || val != "default_value" {
+		t.Errorf("required_with_default not properly added to varMap: got %q, want %q", val, "default_value")
+	}
+
+	// Vars without defaults should NOT be in the map
+	if _, ok := varMap["required_no_default"]; ok {
+		t.Errorf("required_no_default should not be in varMap (no default)")
+	}
+	if _, ok := varMap["optional_no_default"]; ok {
+		t.Errorf("optional_no_default should not be in varMap (no default)")
+	}
+}
+
+func TestBuildFormulaVarMapExtraVarsOverrideDefaults(t *testing.T) {
+	t.Parallel()
+
+	f := &formula.Formula{
+		Vars: map[string]formula.Var{
+			"selector": {
+				Default: "default_selector",
+			},
+		},
+	}
+
+	// Extra vars should override formula defaults
+	varMap := buildFormulaVarMap(f, []string{"selector=override_selector"})
+	if varMap["selector"] != "override_selector" {
+		t.Errorf("extra var did not override default: got %q, want %q", varMap["selector"], "override_selector")
+	}
+}
+
+func TestApplyFormulaVarsToStepTitles(t *testing.T) {
+	t.Parallel()
+
+	// Test that step titles are interpolated with vars
+	title := "Prepare a decision card for {{decision_id}}"
+	varMap := map[string]string{"decision_id": "gti-2fr"}
+	got := applyFormulaVars(title, varMap)
+	want := "Prepare a decision card for gti-2fr"
+	if got != want {
+		t.Errorf("step title interpolation failed: got %q, want %q", got, want)
+	}
+
+	// Test that unknown vars are not substituted
+	title = "Prepare {{unknown}} and use {{decision_id}}"
+	got = applyFormulaVars(title, varMap)
+	want = "Prepare {{unknown}} and use gti-2fr"
+	if got != want {
+		t.Errorf("partial substitution failed: got %q, want %q", got, want)
+	}
+}
+
 func TestFormulaRunExamplesUseSetVars(t *testing.T) {
 	t.Parallel()
 
