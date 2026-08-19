@@ -397,7 +397,7 @@ func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			snapshot := polecatCapacitySnapshot{}
-			applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "synth", tt.fields, tt.activeWork, nil)
+			applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "synth", tt.fields, tt.activeWork, nil, polecatMQIndex{})
 			if snapshot.Working != tt.want.Working || snapshot.RecoveryBlocked != tt.want.RecoveryBlocked || snapshot.ReusableIdle != tt.want.ReusableIdle || snapshot.PendingMR != tt.want.PendingMR || snapshot.capacityUsed != tt.want.capacityUsed {
 				t.Fatalf("snapshot = %+v, want %+v", snapshot, tt.want)
 			}
@@ -429,7 +429,7 @@ func TestCapacitySnapshotLegacyMissingCleanupCannotExhaustScheduler(t *testing.T
 	for i := 0; i < 36; i++ {
 		item := buildPolecatInventoryItem("gastown", fmt.Sprintf("legacy-%d", i), &beads.AgentFields{
 			AgentState: string(beads.AgentStateDone),
-		}, nil, nil)
+		}, nil, nil, polecatMQIndex{})
 		applyWorkstateDispositionToCapacitySnapshot(&snapshot, item.State, item.Disposition)
 	}
 	snapshot.Free = snapshot.Max - snapshot.occupied()

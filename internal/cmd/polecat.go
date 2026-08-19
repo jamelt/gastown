@@ -516,15 +516,21 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			activeWork = nil
 		}
 
+		fieldsByName := make(map[string]*beads.AgentFields, len(polecatNames))
+		for _, name := range polecatNames {
+			agentBeadID := polecatBeadIDForRig(r, r.Name, name)
+			fieldsByName[name] = parsePolecatAgentFields(agents[agentBeadID])
+		}
+		mqIndex := buildPolecatMQIndex(bd, fieldsByName)
+
 		// Track known polecat names from filesystem for zombie detection
 		knownNames := make(map[string]bool)
 		for _, name := range polecatNames {
-			agentBeadID := polecatBeadIDForRig(r, r.Name, name)
-			fields := parsePolecatAgentFields(agents[agentBeadID])
+			fields := fieldsByName[name]
 			workEvidence := assessPolecatAssignedIssueWork(activeWork[name])
-			item := buildPolecatInventoryItemFromEvidence(r.Name, name, fields, workEvidence, sessions)
+			item := buildPolecatInventoryItemFromEvidence(r.Name, name, fields, workEvidence, sessions, mqIndex)
 			if activeWorkErr != nil {
-				item = buildPolecatInventoryItemFromEvidence(r.Name, name, fields, polecatActiveWorkLookupError(activeWorkErr), sessions)
+				item = buildPolecatInventoryItemFromEvidence(r.Name, name, fields, polecatActiveWorkLookupError(activeWorkErr), sessions, mqIndex)
 			} else if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" && !item.SessionRunning && !workEvidence.BlocksCleanup {
 				assessment := inventoryManager.WorkstateDispositionForPolecat(name, item.State, item.Issue)
 				item = applyLegacyCleanupCompatibility(item, fields, workEvidence, assessment)

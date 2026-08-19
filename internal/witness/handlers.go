@@ -2051,6 +2051,25 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	return zombie, true
 }
 
+// invalidateZombieCleanupStatus marks a confirmed-dead polecat's persisted
+// cleanup_status "unknown" so gt polecat list / gt scheduler status stop
+// trusting a self-report from before the session died (gt-h6u4). Guarded on
+// the snapshot value the caller already read (snapshotCleanupStatus): the
+// "clean"/"" branch of handleZombieRestart has no wisp-based dedup interlock
+// against two concurrent patrol scans both restarting the same zombie, so an
+// unguarded write here could race a fresh gt done self-report from the
+// session the other scan just restarted and clobber it back to "unknown".
+// The guard makes that write a no-op once cleanup_status has moved on from
+// the snapshot. Best-effort: a write failure must not block the restart that
+// follows. Package-level var so tests can override.
+var invalidateZombieCleanupStatus = _invalidateZombieCleanupStatus
+
+func _invalidateZombieCleanupStatus(townRoot, workDir, rigName, polecatName, snapshotCleanupStatus string) {
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+	_, _ = beads.New(workDir).UpdateAgentCleanupStatusIfMatches(agentBeadID, snapshotCleanupStatus, string(polecat.CleanupUnknown))
+}
+
 // isZombieState returns true if the agent state or hook bead indicates a zombie.
 // Uses typed AgentState to leverage IsActive() metadata rather than hardcoded
 // string comparisons. See gt-tsut.
@@ -2161,6 +2180,14 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	if skipRestart {
 		return
 	}
+
+	// gt-h6u4: invalidate the persisted cleanup_status now, before restart —
+	// the dead session's last self-report may predate whatever state it left
+	// behind, and gt polecat list / gt scheduler status trust that field
+	// between witness patrol sweeps. Safe unconditionally here: the session is
+	// already confirmed dead, so there is no live writer left to race with,
+	// and the new session (started below) hasn't reported anything yet.
+	invalidateZombieCleanupStatus(townRoot, workDir, rigName, polecatName, cleanupStatus)
 
 	// Restart regardless of cleanup state — the worktree is preserved.
 	if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
