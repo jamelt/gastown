@@ -153,6 +153,10 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		}
 	}
 
+	if err := m.rig.EnsureIdentities(); err != nil {
+		return fmt.Errorf("rig identity preflight failed; witness not started: %w", err)
+	}
+
 	// Note: No PID check per ZFC - tmux session is the source of truth
 
 	// Ensure runtime settings exist in the shared witness parent directory.

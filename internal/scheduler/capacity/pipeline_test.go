@@ -53,6 +53,25 @@ func TestPlanDispatch(t *testing.T) {
 	}
 }
 
+func TestPlanDispatchExactReservationDoesNotConsumeSpawnCapacity(t *testing.T) {
+	ready := []PendingBead{
+		{ID: "rig-first", Context: &SlingContextFields{TargetRig: "gastown"}},
+		{ID: "reserved", Context: &SlingContextFields{TargetRig: "gastown", TargetAgent: "gastown/polecats/garnet"}},
+		{ID: "rig-last", Context: &SlingContextFields{TargetRig: "gastown"}},
+	}
+
+	plan := PlanDispatch(0, 3, ready)
+	if len(plan.ToDispatch) != 1 || plan.ToDispatch[0].ID != "reserved" {
+		t.Fatalf("ToDispatch = %#v, want only exact reservation", plan.ToDispatch)
+	}
+	if plan.Skipped != 2 {
+		t.Fatalf("Skipped = %d, want 2", plan.Skipped)
+	}
+	if plan.Reason != "reservation" {
+		t.Fatalf("Reason = %q, want reservation", plan.Reason)
+	}
+}
+
 func TestFilterCircuitBroken(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -164,19 +183,25 @@ func TestNoRetryPolicy(t *testing.T) {
 
 func TestReconstructFromContext(t *testing.T) {
 	ctx := &SlingContextFields{
-		WorkBeadID:  "bead-123",
-		TargetRig:   "prod-rig",
-		Formula:     "mol-polecat-work",
-		Args:        "do stuff",
-		Vars:        "x=1\ny=2",
-		Merge:       "mr",
-		BaseBranch:  "main",
-		Account:     "acme",
-		Agent:       "codex",
-		Mode:        "ralph",
-		NoMerge:     true,
-		ReviewOnly:  true,
-		HookRawBead: true,
+		WorkBeadID:    "bead-123",
+		TargetRig:     "prod-rig",
+		TargetAgent:   "prod-rig/polecats/garnet",
+		Formula:       "mol-polecat-work",
+		Args:          "do stuff",
+		Vars:          "x=1\ny=2",
+		Merge:         "mr",
+		BaseBranch:    "main",
+		BaseRef:       "upstream/main",
+		PublishRemote: "origin",
+		PublishRef:    "polecat/garnet/bead-123",
+		PRTargetRef:   "upstream/main",
+		Account:       "acme",
+		Agent:         "codex",
+		Mode:          "ralph",
+		NoMerge:       true,
+		ReviewOnly:    true,
+		HookRawBead:   true,
+		EnqueuedBy:    "mayor/",
 	}
 
 	params := ReconstructFromContext(ctx)
@@ -186,6 +211,9 @@ func TestReconstructFromContext(t *testing.T) {
 	}
 	if params.RigName != "prod-rig" {
 		t.Errorf("RigName: got %q, want %q", params.RigName, "prod-rig")
+	}
+	if params.TargetAgent != "prod-rig/polecats/garnet" {
+		t.Errorf("TargetAgent: got %q, want %q", params.TargetAgent, "prod-rig/polecats/garnet")
 	}
 	if params.FormulaName != "mol-polecat-work" {
 		t.Errorf("FormulaName: got %q, want %q", params.FormulaName, "mol-polecat-work")
@@ -201,6 +229,18 @@ func TestReconstructFromContext(t *testing.T) {
 	}
 	if params.BaseBranch != "main" {
 		t.Errorf("BaseBranch: got %q, want %q", params.BaseBranch, "main")
+	}
+	if params.BaseRef != "upstream/main" {
+		t.Errorf("BaseRef: got %q, want %q", params.BaseRef, "upstream/main")
+	}
+	if params.PublishRemote != "origin" {
+		t.Errorf("PublishRemote: got %q, want %q", params.PublishRemote, "origin")
+	}
+	if params.PublishRef != "polecat/garnet/bead-123" {
+		t.Errorf("PublishRef: got %q, want %q", params.PublishRef, "polecat/garnet/bead-123")
+	}
+	if params.PRTargetRef != "upstream/main" {
+		t.Errorf("PRTargetRef: got %q, want %q", params.PRTargetRef, "upstream/main")
 	}
 	if params.Account != "acme" {
 		t.Errorf("Account: got %q, want %q", params.Account, "acme")
@@ -219,6 +259,9 @@ func TestReconstructFromContext(t *testing.T) {
 	}
 	if !params.HookRawBead {
 		t.Error("HookRawBead: expected true")
+	}
+	if params.EnqueuedBy != "mayor/" {
+		t.Errorf("EnqueuedBy: got %q, want mayor/", params.EnqueuedBy)
 	}
 }
 

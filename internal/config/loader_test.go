@@ -1004,6 +1004,13 @@ func TestRuntimeConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestExtractSimpleRoleDogIdentity(t *testing.T) {
+	t.Parallel()
+	if got := ExtractSimpleRole("deacon/dogs/quota"); got != "dog" {
+		t.Fatalf("ExtractSimpleRole() = %q, want dog", got)
+	}
+}
+
 func TestRuntimeConfigBuildCommand(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

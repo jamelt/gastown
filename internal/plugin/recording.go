@@ -134,78 +134,58 @@ func (r *Recorder) GetRunsSince(pluginName string, since string) ([]*PluginRunBe
 }
 
 // queryRuns queries plugin run beads from the ledger.
+//
+// Plugin run receipts are created ephemeral (they live in the wisps table,
+// not the issues table — see RecordRun's "--ephemeral" flag), so this must
+// go through the canonical ephemeral-aware query path (Beads.List with
+// Ephemeral: true). A plain "bd list --all" only searches the issues table
+// and silently misses every closed ephemeral receipt.
 func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*PluginRunBead, error) {
-	args := []string{
-		"list",
-		"--json",
-		"--all", // Include closed beads too
-		"-l", "type:plugin-run",
-		"-l", fmt.Sprintf("plugin:%s", pluginName),
-	}
-	if limit > 0 {
-		args = append(args, fmt.Sprintf("--limit=%d", limit))
-	}
+	var cutoff time.Time
 	if since != "" {
-		// Parse as Go duration and compute an absolute RFC3339 cutoff.
-		// bd's compact duration uses "m" for months, but plugin gate
-		// durations use Go's time.ParseDuration where "m" means minutes.
-		// Passing an absolute timestamp avoids this unit mismatch.
+		// Parse as Go duration. bd's compact duration uses "m" for months,
+		// but plugin gate durations use Go's time.ParseDuration where "m"
+		// means minutes, so filtering is done client-side against an
+		// absolute cutoff rather than passed through to bd.
 		d, err := time.ParseDuration(since)
 		if err != nil {
 			return nil, fmt.Errorf("parsing duration %q: %w", since, err)
 		}
-		cutoff := time.Now().Add(-d).UTC().Format(time.RFC3339)
-		args = append(args, "--created-after="+cutoff)
+		cutoff = time.Now().Add(-d).UTC()
 	}
-	args = beads.InjectFlatForListJSON(args)
 
-	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
-	defer cancel()
-	cmd := beads.CommandContext(ctx, r.townRoot, beads.ResolveBeadsDir(r.townRoot), beads.ReadOnlyPinned, args...)
+	issues, err := beads.New(r.townRoot).List(beads.ListOptions{
+		Ephemeral: true,
+		Status:    "all", // Include closed beads too
+		Priority:  -1,    // No priority filter (0 is a valid priority, not "unset")
+		Labels:    []string{"type:plugin-run", fmt.Sprintf("plugin:%s", pluginName)},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying plugin runs: %w", err)
+	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// Empty result is OK (no runs found)
-		if stderr.Len() == 0 || stdout.String() == "[]\n" {
-			return nil, nil
+	// Convert to PluginRunBead with parsed result. Results are already
+	// ordered newest-first (priority ASC, created_at DESC) by the underlying
+	// query, matching callers like GetLastRun that rely on runs[0].
+	runs := make([]*PluginRunBead, 0, len(issues))
+	for _, issue := range issues {
+		var createdAt time.Time
+		if t, err := time.Parse(time.RFC3339, issue.CreatedAt); err == nil {
+			createdAt = t
 		}
-		return nil, fmt.Errorf("querying plugin runs: %s: %w", stderr.String(), err)
-	}
-
-	// Parse JSON output
-	var beads []struct {
-		ID        string   `json:"id"`
-		Title     string   `json:"title"`
-		CreatedAt string   `json:"created_at"`
-		Labels    []string `json:"labels"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &beads); err != nil {
-		// Empty array is valid
-		if stdout.String() == "[]\n" || stdout.Len() == 0 {
-			return nil, nil
+		if since != "" && createdAt.Before(cutoff) {
+			continue
 		}
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
-	}
 
-	// Convert to PluginRunBead with parsed result
-	runs := make([]*PluginRunBead, 0, len(beads))
-	for _, b := range beads {
 		run := &PluginRunBead{
-			ID:     b.ID,
-			Title:  b.Title,
-			Labels: b.Labels,
-		}
-
-		// Parse created_at
-		if t, err := time.Parse(time.RFC3339, b.CreatedAt); err == nil {
-			run.CreatedAt = t
+			ID:        issue.ID,
+			Title:     issue.Title,
+			CreatedAt: createdAt,
+			Labels:    issue.Labels,
 		}
 
 		// Extract result from labels
-		for _, label := range b.Labels {
+		for _, label := range issue.Labels {
 			if len(label) > 7 && label[:7] == "result:" {
 				run.Result = RunResult(label[7:])
 				break
@@ -213,6 +193,10 @@ func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*Plu
 		}
 
 		runs = append(runs, run)
+	}
+
+	if limit > 0 && len(runs) > limit {
+		runs = runs[:limit]
 	}
 
 	return runs, nil

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,14 +23,19 @@ func TestBuildBdInitArgs_AlwaysIncludesServerPortWithoutReinit(t *testing.T) {
 
 	args := buildBdInitArgs(townDir)
 
-	if len(args) != 6 {
-		t.Fatalf("expected 6 args, got %d: %v", len(args), args)
+	if len(args) != 8 {
+		t.Fatalf("expected 8 args, got %d: %v", len(args), args)
 	}
-	if args[4] != "--server-port" {
-		t.Fatalf("expected args[4] = --server-port, got %q", args[4])
+	if args[6] != "--server-port" {
+		t.Fatalf("expected args[6] = --server-port, got %q", args[6])
 	}
-	if args[5] != "3307" {
-		t.Fatalf("expected default port 3307, got %q", args[5])
+	if args[7] != "3307" {
+		t.Fatalf("expected default port 3307, got %q", args[7])
+	}
+	for _, required := range []string{"--skip-agents", "--skip-hooks"} {
+		if !slices.Contains(args, required) {
+			t.Fatalf("expected %s in bd init args: %v", required, args)
+		}
 	}
 	for _, arg := range args {
 		if arg == "--force" || arg == "--reinit-local" {
@@ -45,8 +51,8 @@ func TestBuildBdInitArgs_RespectsGTDoltPortEnv(t *testing.T) {
 
 	args := buildBdInitArgs(townDir)
 
-	if args[5] != "4400" {
-		t.Fatalf("expected port 4400 from GT_DOLT_PORT, got %q", args[5])
+	if args[7] != "4400" {
+		t.Fatalf("expected port 4400 from GT_DOLT_PORT, got %q", args[7])
 	}
 }
 
@@ -66,8 +72,8 @@ func TestBuildBdInitArgs_ConfigYAMLTakesPrecedence(t *testing.T) {
 
 	args := buildBdInitArgs(townDir)
 
-	if args[5] != "5500" {
-		t.Fatalf("expected port 5500 from config.yaml (precedence over env), got %q", args[5])
+	if args[7] != "5500" {
+		t.Fatalf("expected port 5500 from config.yaml (precedence over env), got %q", args[7])
 	}
 }
 
@@ -104,8 +110,8 @@ func TestBuildBdInitArgs_IgnoresTransientRunningState(t *testing.T) {
 
 	args := buildBdInitArgs(townDir)
 
-	if args[5] != "3307" {
-		t.Fatalf("expected default configured port 3307, got %q", args[5])
+	if args[7] != "3307" {
+		t.Fatalf("expected default configured port 3307, got %q", args[7])
 	}
 }
 

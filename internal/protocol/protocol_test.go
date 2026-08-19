@@ -126,6 +126,35 @@ func TestNewMergedMessage(t *testing.T) {
 	if !strings.Contains(msg.Body, "Merge-Commit: abc123") {
 		t.Errorf("Body missing merge commit: %s", msg.Body)
 	}
+	if msg.ResponsePolicy != mail.ResponsePolicyNone {
+		t.Errorf("ResponsePolicy = %q, want none", msg.ResponsePolicy)
+	}
+}
+
+func TestMergedReceiptAndWitnessAckAreTerminal(t *testing.T) {
+	receipt := NewMergedMessage("gastown", "nux", "polecat/nux/gt-abc", "gt-abc", "main", "abc123")
+	ack := mail.NewReplyMessage(receipt.To, receipt.From, "ACK MERGED nux", "Receipt recorded.", receipt)
+
+	for name, msg := range map[string]*mail.Message{
+		"refinery receipt": receipt,
+		"witness ack":      ack,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if msg.ResponsePolicy != mail.ResponsePolicyNone {
+				t.Fatalf("ResponsePolicy = %q, want none", msg.ResponsePolicy)
+			}
+			if mail.ShouldEnqueueReplyReminder(msg) {
+				t.Fatal("terminal lifecycle message scheduled a response reminder")
+			}
+		})
+	}
+
+	if ack.ThreadID != receipt.ThreadID {
+		t.Fatalf("ACK thread = %q, want receipt thread %q", ack.ThreadID, receipt.ThreadID)
+	}
+	if ack.ReplyTo != receipt.ID {
+		t.Fatalf("ACK ReplyTo = %q, want receipt ID %q", ack.ReplyTo, receipt.ID)
+	}
 }
 
 func TestNewMergeFailedMessage(t *testing.T) {

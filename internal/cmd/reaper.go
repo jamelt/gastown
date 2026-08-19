@@ -288,6 +288,13 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 				totalReaped += r.Reaped
 				totalMoleculeSteps += r.MoleculeStepsClosed
 				totalOpen += r.OpenRemain
+				// Evaluated per database, not against the cross-database sum below —
+				// summing first would make this scale with the number of monitored
+				// databases rather than any single database's health.
+				if reaper.ExceedsOpenWispSafetyThreshold(r.OpenRemain) {
+					fmt.Fprintf(os.Stderr, "WARNING: %s: %d open wisps exceed safety threshold (%d) — possible stuck-parent leak\n",
+						r.Database, r.OpenRemain, reaper.DefaultOpenWispSafetyThreshold)
+				}
 			}
 			if len(results) > 1 {
 				prefix := ""
@@ -300,10 +307,6 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 				}
 				fmt.Printf("\n%sReap summary (%d databases): reaped %d wisps%s, %d open remain\n",
 					prefix, len(results), totalReaped, extra, totalOpen)
-				if totalOpen > reaper.DefaultAlertThreshold {
-					fmt.Fprintf(os.Stderr, "WARNING: %d open wisps exceed alert threshold (%d)\n",
-						totalOpen, reaper.DefaultAlertThreshold)
-				}
 			}
 		}
 		return nil

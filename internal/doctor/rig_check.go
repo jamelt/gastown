@@ -1054,7 +1054,7 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 		// Run bd init with the configured prefix (Dolt is the only backend since bd v0.51.0).
 		// Gas Town rigs use Dolt server mode via the shared town Dolt sql-server.
-		initArgs := []string{"init"}
+		initArgs := []string{"init", "--skip-agents", "--skip-hooks"}
 		if prefix != "" {
 			initArgs = append(initArgs, "--prefix", prefix)
 		}

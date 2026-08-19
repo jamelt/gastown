@@ -1867,6 +1867,7 @@ func fillRuntimeDefaults(rc *RuntimeConfig) *RuntimeConfig {
 	// Create result with scalar fields (strings are immutable in Go)
 	result := &RuntimeConfig{
 		Provider:      rc.Provider,
+		QuotaProvider: rc.QuotaProvider,
 		Command:       rc.Command,
 		InitialPrompt: rc.InitialPrompt,
 		PromptMode:    rc.PromptMode,
@@ -2193,6 +2194,9 @@ func ExtractSimpleRole(gtRole string) string {
 		role := parts[1]
 		if role == "polecats" {
 			return constants.RolePolecat
+		}
+		if role == "dogs" {
+			return "dog"
 		}
 		return role
 	default:

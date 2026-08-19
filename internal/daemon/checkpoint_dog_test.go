@@ -287,6 +287,54 @@ func TestCheckpointWorktreeSkipsRuntimeOnlyNestedArtifacts(t *testing.T) {
 	}
 }
 
+// TestCheckpointWorktreeSkipsAgentScaffolding reproduces gt-gvjc: a coding
+// agent (e.g. Codex CLI) writes untracked, untemplated scaffolding
+// (.codex/config.toml, .agents/skills/*/SKILL.md) into a freshly-provisioned
+// polecat worktree before any bead-scoped work happens. checkpoint_dog must
+// not commit that scaffolding as if it were real work — doing so previously
+// produced byte-identical "WIP: checkpoint (auto)" commits across unrelated
+// polecats, since the scaffold content is the same in every worktree.
+func TestCheckpointWorktreeSkipsAgentScaffolding(t *testing.T) {
+	workDir := t.TempDir()
+	mustRunGit(t, workDir, "init")
+	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
+	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
+
+	if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# repo\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	mustRunGit(t, workDir, "add", "README.md")
+	mustRunGit(t, workDir, "commit", "-m", "initial")
+	before := mustRunGit(t, workDir, "rev-parse", "HEAD")
+
+	if err := os.MkdirAll(filepath.Join(workDir, ".codex", "agents"), 0o755); err != nil {
+		t.Fatalf("setup .codex scaffolding: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".codex", "config.toml"), []byte("[agent]\n"), 0o644); err != nil {
+		t.Fatalf("write .codex/config.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".codex", "agents", "trade-risk-reviewer.toml"), []byte("[reviewer]\n"), 0o644); err != nil {
+		t.Fatalf("write .codex/agents/trade-risk-reviewer.toml: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(workDir, ".agents", "skills", "pr-sheriff"), 0o755); err != nil {
+		t.Fatalf("setup .agents scaffolding: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".agents", "skills", "pr-sheriff", "SKILL.md"), []byte("# pr-sheriff\n"), 0o644); err != nil {
+		t.Fatalf("write .agents/skills/pr-sheriff/SKILL.md: %v", err)
+	}
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree committed agent scaffolding as if it were real work")
+	}
+	if after := mustRunGit(t, workDir, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("checkpointWorktree advanced HEAD to %s, want %s", after, before)
+	}
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff", "--cached", "--name-only")); got != "" {
+		t.Fatalf("agent scaffolding remained staged: %q", got)
+	}
+}
+
 func mustRunGit(t *testing.T, workDir string, args ...string) string {
 	t.Helper()
 	out, err := runGitCmd(workDir, args...)

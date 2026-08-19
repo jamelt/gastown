@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -234,7 +235,9 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		OnSuccess: func(b capacity.PendingBead) error {
 			// OnSuccess may be retried — only do the close here, no side effects.
 			// Route to the correct rig's beads dir (GH#3468).
-			return beadsForPendingContext(townRoot, b).CloseSlingContext(b.ID, "dispatched")
+			reason := fmt.Sprintf("dispatched source=%s assignee=%s/polecats/%s actor=%s context=%s",
+				b.WorkBeadID, b.TargetRig, polecatNames[b.ID], actor, b.ID)
+			return beadsForPendingContext(townRoot, b).CloseSlingContext(b.ID, reason)
 		},
 		OnFailure: func(b capacity.PendingBead, err error) {
 			var onSuccessErr *capacity.ErrOnSuccessFailed
@@ -258,6 +261,17 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 					// Skip recordDispatchFailure to avoid writing to a closed context.
 					return
 				}
+			} else if errors.Is(err, capacity.ErrAlreadyDispatched) {
+				// Not a failure: the work IS dispatched, we simply never closed
+				// the context. Close it now so the bead stops being re-queued.
+				// Recording a dispatch failure here would circuit-break the bead
+				// after three interruptions and stop it dispatching entirely.
+				ctxBeads := beadsForPendingContext(townRoot, b)
+				if closeErr := ctxBeads.CloseSlingContext(b.ID, "already-dispatched"); closeErr != nil {
+					fmt.Fprintf(os.Stderr, "%s could not close already-dispatched context %s: %v\n",
+						style.Warning.Render("⚠"), b.ID, closeErr)
+				}
+				return
 			} else if errors.As(err, &admissionErr) {
 				fmt.Fprintf(os.Stderr, "%s Capacity full while dispatching %s; leaving context queued: %v\n",
 					style.Dim.Render("○"), b.WorkBeadID, err)
@@ -381,11 +395,11 @@ func beadsForContext(townRoot string, fields *capacity.SlingContextFields) *bead
 	if fields != nil && fields.TargetRig != "" {
 		rigBeadsDir := doltserver.FindRigBeadsDir(townRoot, fields.TargetRig)
 		if rigBeadsDir != "" {
-			return beads.NewWithBeadsDir(townRoot, rigBeadsDir)
+			return beads.NewWithBeadsDir(townRoot, rigBeadsDir).ForLocalBeads()
 		}
 	}
 	// Fallback to HQ for contexts without a valid TargetRig
-	return beads.NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads"))
+	return beads.NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads")).ForLocalBeads()
 }
 
 func beadsForPendingContext(townRoot string, b capacity.PendingBead) *beads.Beads {
@@ -394,7 +408,7 @@ func beadsForPendingContext(townRoot string, b capacity.PendingBead) *beads.Bead
 		if workDir == "" {
 			workDir = filepath.Dir(b.ContextBeadsDir)
 		}
-		return beads.NewWithBeadsDir(workDir, b.ContextBeadsDir)
+		return beads.NewWithBeadsDir(workDir, b.ContextBeadsDir).ForLocalBeads()
 	}
 	return beadsForContext(townRoot, b.Context)
 }
@@ -416,7 +430,9 @@ type scheduledContextAssessment struct {
 }
 
 func beadsForContextRecord(rec slingContextRecord) *beads.Beads {
-	return beads.NewWithBeadsDir(rec.workDir, rec.beadsDir)
+	// The scan result is direct ownership evidence. Keep mutations pinned to
+	// that database even when a legacy context ID has another rig's prefix.
+	return beads.NewWithBeadsDir(rec.workDir, rec.beadsDir).ForLocalBeads()
 }
 
 // cleanupStaleContexts closes invalid and stale sling context beads.
@@ -682,7 +698,7 @@ func readySlingContextsFromAssessments(assessments []scheduledContextAssessment)
 // dispatchSingleBead dispatches one scheduled bead via executeSling.
 // Context fields are already parsed (from PendingBead.Context).
 // Returns the SlingResult (including PolecatName) on success.
-func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResult, error) {
+func dispatchSingleBead(b capacity.PendingBead, townRoot, actor string) (*SlingResult, error) {
 	if b.Context == nil {
 		return nil, fmt.Errorf("missing sling context for %s", b.ID)
 	}
@@ -699,6 +715,7 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 	params := SlingParams{
 		BeadID:           dp.BeadID,
 		RigName:          dp.RigName,
+		TargetAgent:      dp.TargetAgent,
 		FormulaName:      dp.FormulaName,
 		Args:             dp.Args,
 		Vars:             dp.Vars,
@@ -713,13 +730,22 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 		Mode:             dp.Mode,
 		FormulaFailFatal: true,
 		CallerContext:    "scheduler-dispatch",
+		DispatchContext:  b.ID,
+		DispatchedBy:     dp.EnqueuedBy,
 		NoConvoy:         true,
 		NoBoot:           true,
 		TownRoot:         townRoot,
 		BeadsDir:         targetBeadsDir,
 	}
+	if params.DispatchedBy == "" {
+		params.DispatchedBy = actor
+	}
 
-	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, b.TargetRig)
+	target := b.TargetRig
+	if dp.TargetAgent != "" {
+		target = dp.TargetAgent
+	}
+	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, target)
 	result, err := executeSling(params)
 	if err != nil {
 		return nil, fmt.Errorf("sling failed: %w", err)
@@ -773,6 +799,17 @@ func validatePendingBeadForDispatch(townRoot string, b capacity.PendingBead, esc
 	rigPath := filepath.Join(townRoot, b.TargetRig)
 	rigPrefix := rigBeadsPrefix(townRoot, rigPath, b.TargetRig)
 	if capacity.AcceptsPrefix(rigPrefix, b.WorkBeadID) {
+		// gt-l8p0: idempotency guard. A run interrupted between Execute and
+		// OnSuccess leaves the polecat created and holding the work while its
+		// sling context stays open and re-queued. Dispatching again spawns a
+		// second polecat and orphans the first. If the bead is already held,
+		// the work is dispatched — close the context instead of repeating it.
+		if holder, held := workBeadAlreadyHeld(townRoot, b); held {
+			fmt.Fprintf(os.Stderr,
+				"%s dispatch_skipped reason=already_dispatched bead=%s holder=%s context=%s\n",
+				style.Dim.Render("○"), b.WorkBeadID, holder, b.ID)
+			return capacity.ErrAlreadyDispatched
+		}
 		return nil
 	}
 	gotPrefix := capacity.BeadIDPrefix(b.WorkBeadID)
@@ -785,13 +822,45 @@ func validatePendingBeadForDispatch(townRoot string, b capacity.PendingBead, esc
 	return capacity.ErrCrossRigPrefix
 }
 
+// workBeadAlreadyHeld reports whether the work bead is already assigned to a
+// polecat, meaning a previous dispatch succeeded but its context was never
+// closed (gt-l8p0). Returns the holder for logging.
+//
+// Fails OPEN deliberately: if the bead cannot be read we allow dispatch to
+// proceed. A false positive here would silently drop real work, which is worse
+// than the duplicate this guard exists to prevent.
+func workBeadAlreadyHeld(townRoot string, b capacity.PendingBead) (string, bool) {
+	if b.WorkBeadID == "" {
+		return "", false
+	}
+	bd := beadsForPendingContext(townRoot, b)
+	if bd == nil {
+		return "", false
+	}
+	issue, err := bd.Show(b.WorkBeadID)
+	if err != nil || issue == nil {
+		return "", false
+	}
+	assignee := strings.TrimSpace(issue.Assignee)
+	if assignee == "" {
+		return "", false
+	}
+	// Only an in-flight status indicates a live holder. A closed or open bead
+	// with a stale assignee is not evidence that a polecat is working it.
+	switch beads.IssueStatus(issue.Status) {
+	case beads.IssueStatusHooked, beads.StatusInProgress:
+		return assignee, true
+	}
+	return "", false
+}
+
 // isDaemonDispatch returns true when dispatch is triggered by the daemon heartbeat.
 func isDaemonDispatch() bool {
 	return os.Getenv("GT_DAEMON") == "1"
 }
 
 // recordDispatchFailure increments the dispatch failure counter on the sling context bead.
-func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispatchErr error) {
+func recordDispatchFailure(contextBeads *beads.Beads, b capacity.PendingBead, dispatchErr error) {
 	if b.Context == nil {
 		return
 	}
@@ -799,13 +868,13 @@ func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispa
 	b.Context.DispatchFailures++
 	b.Context.LastFailure = dispatchErr.Error()
 
-	if err := townBeads.UpdateSlingContextFields(b.ID, b.Context); err != nil {
+	if err := contextBeads.UpdateSlingContextFields(b.ID, b.Context); err != nil {
 		fmt.Printf("  %s Failed to record dispatch failure for %s: %v\n",
 			style.Warning.Render("⚠"), b.ID, err)
 	}
 
 	if b.Context.DispatchFailures >= maxDispatchFailures {
-		if err := townBeads.CloseSlingContext(b.ID, "circuit-broken"); err != nil {
+		if err := contextBeads.CloseSlingContext(b.ID, "circuit-broken"); err != nil {
 			fmt.Printf("  %s Failed to close circuit-broken context %s: %v\n",
 				style.Warning.Render("⚠"), b.ID, err)
 		}

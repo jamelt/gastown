@@ -437,7 +437,7 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 		// Run bd init against the rig-name database, not the prefix-derived default.
 		doltCfg := doltserver.DefaultConfig(ctx.TownRoot)
 		destroyToken := fmt.Sprintf("DESTROY-%s", entry.BeadsConfig.Prefix)
-		cmd := exec.Command("bd", "init", "--prefix", entry.BeadsConfig.Prefix, "--database", rigName, "--server", "--server-port", strconv.Itoa(doltCfg.Port), "--force", "--destroy-token="+destroyToken)
+		cmd := exec.Command("bd", "init", "--skip-agents", "--skip-hooks", "--prefix", entry.BeadsConfig.Prefix, "--database", rigName, "--server", "--server-port", strconv.Itoa(doltCfg.Port), "--force", "--destroy-token="+destroyToken)
 		cmd.Dir = cmdDir
 		cmd.Env = append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="),
 			"BEADS_DIR="+beadsDir,

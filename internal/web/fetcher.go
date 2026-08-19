@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -191,6 +192,7 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	tmuxSocket := dashboardTmuxSocket(townRoot)
 
 	webCfg := config.DefaultWebTimeoutsConfig()
 	workerCfg := config.DefaultWorkerStatusConfig()
@@ -218,7 +220,7 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 		townRoot:                townRoot,
 		townBeads:               filepath.Join(townRoot, ".beads"),
 		registry:                registry,
-		tmuxSocket:              tmux.GetDefaultSocket(),
+		tmuxSocket:              tmuxSocket,
 		cmdTimeout:              config.ParseDurationOrDefault(webCfg.CmdTimeout, 15*time.Second),
 		ghCmdTimeout:            config.ParseDurationOrDefault(webCfg.GhCmdTimeout, 10*time.Second),
 		tmuxCmdTimeout:          config.ParseDurationOrDefault(webCfg.TmuxCmdTimeout, 2*time.Second),
@@ -227,6 +229,28 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 		heartbeatFreshThreshold: config.ParseDurationOrDefault(workerCfg.HeartbeatFreshThreshold, 5*time.Minute),
 		mayorActiveThreshold:    config.ParseDurationOrDefault(workerCfg.MayorActiveThreshold, 5*time.Minute),
 	}, nil
+}
+
+// dashboardTmuxSocket resolves the town socket before the fetcher caches it.
+// Cobra normally initializes the package default in persistentPreRun, but the
+// dashboard is also constructed by embedded entry points where that hook may
+// not have run. Prefer the explicit environment inherited by supervised
+// dashboard processes, then initialize the registry as a final fallback.
+func dashboardTmuxSocket(townRoot string) string {
+	if socket := tmux.GetDefaultSocket(); socket != "" {
+		return socket
+	}
+
+	socket := strings.TrimSpace(os.Getenv("GT_TMUX_SOCKET"))
+	if socket != "" && socket != "default" && socket != "auto" {
+		tmux.SetDefaultSocket(socket)
+		return socket
+	}
+
+	if err := session.InitRegistry(townRoot); err != nil {
+		log.Printf("dashboard: failed to initialize town socket: %v", err)
+	}
+	return tmux.GetDefaultSocket()
 }
 
 // FetchConvoys fetches all open convoys with their activity data.
@@ -257,8 +281,25 @@ func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 		return nil, fmt.Errorf("parsing convoy list: %w", err)
 	}
 
-	// Build convoy rows with activity data
-	rows := make([]ConvoyRow, 0, len(convoys))
+	convoyIDs := make([]string, 0, len(convoys))
+	for _, c := range convoys {
+		if c.IssueType != "convoy" && !webConvoyHasLabel(c.Labels, "gt:convoy") {
+			continue
+		}
+		convoyIDs = append(convoyIDs, c.ID)
+	}
+
+	// Resolve every convoy's tracked work in two batched bd calls (one dep list
+	// and one show) instead of spawning two subprocesses per convoy. The old
+	// N+1 path made dashboard latency grow linearly with the convoy count.
+	trackedByConvoy, err := f.getTrackedIssuesBatch(convoyIDs)
+	if err != nil {
+		f.convoyBreaker.recordFailure()
+		return nil, err
+	}
+
+	// Build convoy rows with activity data.
+	rows := make([]ConvoyRow, 0, len(convoyIDs))
 	for _, c := range convoys {
 		if c.IssueType != "convoy" && !webConvoyHasLabel(c.Labels, "gt:convoy") {
 			continue
@@ -269,12 +310,7 @@ func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 			Status: c.Status,
 		}
 
-		// Get tracked issues for progress and activity calculation
-		tracked, err := f.getTrackedIssues(c.ID)
-		if err != nil {
-			log.Printf("warning: skipping convoy %s: %v", c.ID, err)
-			continue
-		}
+		tracked := trackedByConvoy[c.ID]
 		row.Total = len(tracked)
 
 		var mostRecentActivity time.Time
@@ -387,54 +423,79 @@ type trackedIssueInfo struct {
 
 // getTrackedIssues fetches tracked issues for a convoy.
 func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInfo, error) {
-	// Query tracked dependencies using bd dep list
-	stdout, err := f.runBdCmd(f.townRoot, "dep", "list", convoyID, "-t", "tracks", "--json")
+	tracked, err := f.getTrackedIssuesBatch([]string{convoyID})
 	if err != nil {
-		return nil, fmt.Errorf("querying tracked issues for %s: %w", convoyID, err)
+		return nil, err
+	}
+	return tracked[convoyID], nil
+}
+
+// getTrackedIssuesBatch fetches tracked work for all convoys with a single
+// dependency query and a single detail query. bd dep list includes issue_id in
+// batch output, which lets us retain the convoy-to-work relationship without
+// one subprocess per convoy.
+func (f *LiveConvoyFetcher) getTrackedIssuesBatch(convoyIDs []string) (map[string][]trackedIssueInfo, error) {
+	result := make(map[string][]trackedIssueInfo, len(convoyIDs))
+	if len(convoyIDs) == 0 {
+		return result, nil
+	}
+
+	// bd has two dep-list code paths: one ID uses the legacy joined lookup,
+	// which drops cross-database targets, while multiple IDs use the raw
+	// relationship batch lookup. Repeat a lone ID to retain authoritative
+	// cross-rig relationships after the active convoy set drains to one.
+	queryIDs := convoyIDs
+	if len(queryIDs) == 1 {
+		queryIDs = []string{queryIDs[0], queryIDs[0]}
+	}
+	args := append([]string{"dep", "list"}, queryIDs...)
+	args = append(args, "-t", "tracks", "--json")
+	stdout, err := f.runBdCmd(f.townRoot, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying tracked issues for %d convoys: %w", len(convoyIDs), err)
 	}
 
 	var deps []struct {
-		ID string `json:"id"`
+		IssueID     string `json:"issue_id"`
+		DependsOnID string `json:"depends_on_id"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
-		return nil, fmt.Errorf("parsing tracked issues for %s: %w", convoyID, err)
+		return nil, fmt.Errorf("parsing tracked issues for %d convoys: %w", len(convoyIDs), err)
 	}
 
-	// Collect resolved issue IDs, unwrapping external:prefix:id format
 	issueIDs := make([]string, 0, len(deps))
+	issueIDsByConvoy := make(map[string][]string, len(convoyIDs))
 	for _, dep := range deps {
-		issueIDs = append(issueIDs, beads.ExtractIssueID(dep.ID))
+		issueID := beads.ExtractIssueID(dep.DependsOnID)
+		issueIDs = append(issueIDs, issueID)
+		issueIDsByConvoy[dep.IssueID] = append(issueIDsByConvoy[dep.IssueID], issueID)
 	}
 
-	// Batch fetch issue details
 	details, err := f.getIssueDetailsBatch(issueIDs)
 	if err != nil {
-		return nil, fmt.Errorf("fetching tracked issue details for %s: %w", convoyID, err)
+		return nil, fmt.Errorf("fetching tracked issue details for %d convoys: %w", len(convoyIDs), err)
 	}
 
-	// Get worker activity from tmux sessions based on assignees
 	workers := f.getWorkersFromAssignees(details)
-
-	// Build result
-	result := make([]trackedIssueInfo, 0, len(issueIDs))
-	for _, id := range issueIDs {
-		info := trackedIssueInfo{ID: id}
-
-		if d, ok := details[id]; ok {
-			info.Title = d.Title
-			info.Status = d.Status
-			info.Assignee = d.Assignee
-			info.UpdatedAt = d.UpdatedAt
-		} else {
-			info.Title = "(external)"
-			info.Status = "unknown"
+	for _, convoyID := range convoyIDs {
+		tracked := make([]trackedIssueInfo, 0, len(issueIDsByConvoy[convoyID]))
+		for _, id := range issueIDsByConvoy[convoyID] {
+			info := trackedIssueInfo{ID: id}
+			if d, ok := details[id]; ok {
+				info.Title = d.Title
+				info.Status = d.Status
+				info.Assignee = d.Assignee
+				info.UpdatedAt = d.UpdatedAt
+			} else {
+				info.Title = "(external)"
+				info.Status = "unknown"
+			}
+			if w, ok := workers[id]; ok && w.LastActivity != nil {
+				info.LastActivity = *w.LastActivity
+			}
+			tracked = append(tracked, info)
 		}
-
-		if w, ok := workers[id]; ok && w.LastActivity != nil {
-			info.LastActivity = *w.LastActivity
-		}
-
-		result = append(result, info)
+		result[convoyID] = tracked
 	}
 
 	return result, nil
@@ -540,16 +601,16 @@ func (f *LiveConvoyFetcher) getWorkersFromAssignees(details map[string]*issueDet
 // getSessionActivityForAssignee looks up tmux session activity for an assignee.
 // Assignee format: "rigname/polecats/polecatname" -> session "gt-rigname-polecatname"
 func (f *LiveConvoyFetcher) getSessionActivityForAssignee(assignee string) *time.Time {
-	// Parse assignee: "roxas/polecats/dag" -> rig="roxas", polecat="dag"
+	// Parse assignee: "roxas/polecats/dag" -> rig="roxas", polecatName="dag"
 	parts := strings.Split(assignee, "/")
 	if len(parts) != 3 || parts[1] != "polecats" {
 		return nil
 	}
 	rig := parts[0]
-	polecat := parts[2]
+	polecatName := parts[2]
 
 	// Construct session name
-	sessionName := session.PolecatSessionName(session.PrefixFor(rig), polecat)
+	sessionName := session.PolecatSessionName(session.PrefixFor(rig), polecatName)
 
 	// Query tmux for session activity
 	// Format: session_activity returns unix timestamp
@@ -575,8 +636,22 @@ func (f *LiveConvoyFetcher) getSessionActivityForAssignee(assignee string) *time
 		return nil
 	}
 
-	activity := time.Unix(activityUnix, 0)
-	return &activity
+	activityTime := f.freshestActivity(sessionName, time.Unix(activityUnix, 0))
+	return &activityTime
+}
+
+// freshestActivity returns the more recent of a tmux activity timestamp and
+// the session's heartbeat file. Polecat/crew sessions touch their heartbeat
+// on every gt/bd invocation (gt-qjtq), which keeps advancing while an
+// ACP/Codex worker runs tool calls even though tmux's pane/session activity
+// timestamps only move on terminal keystrokes or output. Falls back to the
+// tmux timestamp when no heartbeat file exists (rollout period, non-worker
+// sessions).
+func (f *LiveConvoyFetcher) freshestActivity(sessionName string, tmuxActivity time.Time) time.Time {
+	if hb := polecat.ReadSessionHeartbeat(f.townRoot, sessionName); hb != nil && hb.Timestamp.After(tmuxActivity) {
+		return hb.Timestamp
+	}
+	return tmuxActivity
 }
 
 // getAllPolecatActivity returns the most recent activity from any running polecat session.
@@ -902,7 +977,7 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		if _, err := fmt.Sscanf(parts[1], "%d", &activityUnix); err != nil || activityUnix == 0 {
 			continue
 		}
-		activityTime := time.Unix(activityUnix, 0)
+		activityTime := f.freshestActivity(sessionName, time.Unix(activityUnix, 0))
 		activityAge := time.Since(activityTime)
 
 		// Get status hint - special handling for refinery
@@ -1126,7 +1201,7 @@ func (f *LiveConvoyFetcher) FetchMail() ([]MailRow, error) {
 			FromRaw:   m.CreatedBy,
 			To:        to,
 			Subject:   m.Title,
-			Timestamp: timestamp.Format("15:04"),
+			Timestamp: timestamp.Local().Format("15:04"),
 			Age:       age,
 			Priority:  priorityStr,
 			Type:      msgType,
@@ -1159,6 +1234,7 @@ func formatMailAge(d time.Duration) string {
 
 // formatTimestamp formats a time as "Jan 26, 3:45 PM" (or "Jan 26 2006, 3:45 PM" if different year).
 func formatTimestamp(t time.Time) string {
+	t = t.Local()
 	now := time.Now()
 	if t.Year() != now.Year() {
 		return t.Format("Jan 2 2006, 3:04 PM")
@@ -1468,7 +1544,7 @@ func (f *LiveConvoyFetcher) FetchQueues() ([]QueueRow, error) {
 // FetchSessions returns active tmux sessions with role detection.
 func (f *LiveConvoyFetcher) FetchSessions() ([]SessionRow, error) {
 	// List tmux sessions
-	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{session_activity}")
+	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{window_activity}")
 	if err != nil {
 		return nil, nil // tmux not running or no sessions
 	}
@@ -1586,7 +1662,7 @@ func (f *LiveConvoyFetcher) FetchMayor() (*MayorStatus, error) {
 	mayorSessionName := session.MayorSessionName()
 
 	// Check if mayor tmux session exists
-	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{session_activity}")
+	stdout, err := f.runTmuxCmd("list-sessions", "-F", "#{session_name}:#{window_activity}")
 	if err != nil {
 		// tmux not running or no sessions
 		return status, nil

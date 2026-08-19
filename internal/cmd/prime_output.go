@@ -105,6 +105,10 @@ func roleRigContext(ctx RoleContext) (defaultBranch string, isForkRig bool, upst
 		defaultBranch = rigCfg.DefaultBranch
 	}
 	if strings.TrimSpace(rigCfg.UpstreamURL) != "" {
+		if settings, settingsErr := config.LoadRigSettings(config.RigSettingsPath(rigPath)); settingsErr == nil &&
+			settings != nil && settings.MergeQueue != nil && settings.MergeQueue.Enabled {
+			return defaultBranch, false, util.RedactURL(rigCfg.UpstreamURL)
+		}
 		return defaultBranch, true, util.RedactURL(rigCfg.UpstreamURL)
 	}
 	return defaultBranch, false, ""

@@ -240,6 +240,9 @@ func (r *Router) buildLabels(msg *Message) []string {
 	}
 	labels = append(labels, "from:"+msg.From)
 	labels = append(labels, "msg-type:"+string(msg.Type))
+	if msg.ResponsePolicy != ResponsePolicyAuto {
+		labels = append(labels, "response-policy:"+string(msg.ResponsePolicy))
+	}
 	labels = append(labels, DeliverySendLabels()...)
 	if msg.ThreadID != "" {
 		labels = append(labels, "thread:"+msg.ThreadID)
@@ -1597,9 +1600,8 @@ func (r *Router) GetMailbox(address string) (*Mailbox, error) {
 //     the next turn boundary.
 //  3. For the overseer (human operator), always use a visible banner.
 //
-// After a successful notification, a deferred reply-reminder nudge is also
-// enqueued (after a configurable delay, default 30s) to prompt the recipient
-// to reply via gt mail send rather than in chat.
+// After a successful response-required notification, a deferred reply-reminder
+// nudge is also enqueued (after a configurable delay, default 30s).
 //
 // Supports mayor/, deacon/, rig/crew/name, rig/polecats/name, and rig/name addresses.
 // Respects agent DND/muted state - skips notification if recipient has DND enabled.
@@ -1792,20 +1794,50 @@ func prioritySeverityLabel(priority Priority) string {
 	}
 }
 
+// ShouldEnqueueReplyReminder is the central structured policy for response
+// reminders. Explicit policy wins. Otherwise only actionable message types
+// require a response; informational notifications and replies are terminal.
+// Subjects and bodies are deliberately ignored.
+func ShouldEnqueueReplyReminder(msg *Message) bool {
+	if msg == nil {
+		return false
+	}
+	switch msg.ResponsePolicy {
+	case ResponsePolicyRequired:
+		return true
+	case ResponsePolicyNone:
+		return false
+	}
+	switch msg.Type {
+	case TypeTask, TypeEscalation, TypeScavenge:
+		return true
+	default:
+		return false
+	}
+}
+
 // enqueueReplyReminder queues a deferred nudge reminding the recipient to reply
 // via gt mail send rather than in chat. Best-effort: errors are logged, not returned.
 //
 // Skipped when:
 //   - No town root (can't use nudge queue)
-//   - Message type is TypeReply (recipient is already replying)
+//   - Structured response policy says no response is required
 //   - Sender is not a direct mail address that can receive a reply
 //   - Configured delay is zero or negative (feature disabled)
 func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if r.townRoot == "" {
 		return
 	}
-	if msg.Type == TypeReply {
-		return // Already a reply — reminder would be redundant
+	if !ShouldEnqueueReplyReminder(msg) {
+		// Explicitly terminal messages may be retries of receipts created before
+		// response policy was persisted. Remove only the queued prompt for this
+		// session/thread; the durable mail record remains untouched.
+		if msg != nil && msg.ResponsePolicy == ResponsePolicyNone && msg.ThreadID != "" {
+			if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, "reply-reminder", msg.ThreadID); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to suppress terminal reply reminder for %s: %v\n", sessionID, err)
+			}
+		}
+		return
 	}
 	if !senderCanReceiveReply(msg.From) {
 		return
@@ -1822,7 +1854,7 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 		ThreadID:     msg.ThreadID,
 		DeliverAfter: time.Now().Add(delay),
 	}
-	if err := nudge.Enqueue(r.townRoot, sessionID, reminder); err != nil {
+	if _, err := nudge.EnqueueUniqueByKindThread(r.townRoot, sessionID, reminder); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to enqueue reply reminder for %s: %v\n", sessionID, err)
 	}
 }

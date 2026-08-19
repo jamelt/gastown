@@ -263,6 +263,47 @@ func TestCheckStaleBinary_OnMainBehind(t *testing.T) {
 	}
 }
 
+// TestCheckStaleBinaryForCommit_ExplicitCommit: CheckStaleBinaryForCommit
+// must behave like CheckStaleBinary for a commit that wasn't built by *this*
+// process — e.g. a daemon checking its own recorded startup commit from a
+// separate, possibly-fresher CLI invocation. Deliberately does not touch the
+// package-level Commit var, to prove the explicit-commit path doesn't depend
+// on it.
+func TestCheckStaleBinaryForCommit_ExplicitCommit(t *testing.T) {
+	dir := newGitRepo(t)
+	old := gitCommit(t, dir, "a.go", "1")
+	tip := gitCommit(t, dir, "b.go", "2")
+	gitRun(t, dir, "branch", "-M", "main")
+
+	info := CheckStaleBinaryForCommit(dir, old)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if !info.IsStale {
+		t.Fatalf("commit behind main HEAD must be stale")
+	}
+	if !info.IsForward {
+		t.Fatalf("old commit is an ancestor of tip, should be forward")
+	}
+	if info.RepoCommit != tip {
+		t.Errorf("RepoCommit = %q, want %q", info.RepoCommit, tip)
+	}
+	if info.BinaryCommit != old {
+		t.Errorf("BinaryCommit = %q, want %q", info.BinaryCommit, old)
+	}
+}
+
+// TestCheckStaleBinaryForCommit_EmptyCommit: an empty commit (e.g. a daemon
+// state file that never recorded one) must error, not panic or silently
+// report fresh.
+func TestCheckStaleBinaryForCommit_EmptyCommit(t *testing.T) {
+	dir := newGitRepo(t)
+	info := CheckStaleBinaryForCommit(dir, "")
+	if info.Error == nil {
+		t.Fatalf("expected error for empty commit")
+	}
+}
+
 // TestCheckStaleBinary_NoBuildBranchSkips: feature branch, no main/master/
 // carry/remote — the check must skip rather than diff against feature HEAD.
 func TestCheckStaleBinary_NoBuildBranchSkips(t *testing.T) {

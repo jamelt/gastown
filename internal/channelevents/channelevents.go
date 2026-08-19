@@ -22,6 +22,14 @@ import (
 // ValidChannelName restricts channel names to safe characters (no path traversal).
 var ValidChannelName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
+// RefineryChannel returns the per-rig channel name for refinery events.
+// Every rig runs its own refinery, so the channel must be rig-scoped —
+// a shared "refinery" channel would wake every rig's refinery on any
+// rig's MQ_SUBMIT/MERGE_READY, defeating await-event's idle backoff (gt-v5d4).
+func RefineryChannel(rig string) string {
+	return "refinery-" + rig
+}
+
 // emitSeq is an atomic counter to ensure unique event filenames even when
 // time.Now().UnixNano() has low resolution.
 var emitSeq atomic.Uint64

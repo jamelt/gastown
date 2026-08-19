@@ -498,16 +498,17 @@ func isResolvedDependency(dep IssueDep) bool {
 
 // ListOptions specifies filters for listing issues.
 type ListOptions struct {
-	Status     string // "open", "closed", "all"
-	Type       string // Deprecated: use Label instead. Was "task", "bug", "feature", "epic"; converted to "gt:" prefix.
-	Label      string // Label filter (e.g., "gt:agent", "gt:merge-request")
-	Priority   int    // 0-4, -1 for no filter
-	Parent     string // filter by parent ID
-	Assignee   string // filter by assignee (e.g., "gastown/Toast")
-	NoAssignee bool   // filter for issues with no assignee
-	Limit      int    // Max results (0 = unlimited, overrides bd default of 50)
-	Ephemeral  bool   // Search wisps table (ephemeral issues) instead of issues table
-	Rig        string // filter merge-request descriptions by rig before hydration
+	Status     string   // "open", "closed", "all"
+	Type       string   // Deprecated: use Label instead. Was "task", "bug", "feature", "epic"; converted to "gt:" prefix.
+	Label      string   // Label filter (e.g., "gt:agent", "gt:merge-request")
+	Labels     []string // Additional label filters, ANDed with Label/Type and each other (e.g., ["type:plugin-run", "plugin:foo"])
+	Priority   int      // 0-4, -1 for no filter
+	Parent     string   // filter by parent ID
+	Assignee   string   // filter by assignee (e.g., "gastown/Toast")
+	NoAssignee bool     // filter for issues with no assignee
+	Limit      int      // Max results (0 = unlimited, overrides bd default of 50)
+	Ephemeral  bool     // Search wisps table (ephemeral issues) instead of issues table
+	Rig        string   // filter merge-request descriptions by rig before hydration
 }
 
 // CreateOptions specifies options for creating an issue.
@@ -590,6 +591,23 @@ func NewIsolatedWithPort(workDir string, serverPort int) *Beads {
 // This is needed when running from a polecat worktree but accessing town-level beads.
 func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 	return &Beads{workDir: workDir, beadsDir: beadsDir}
+}
+
+// ForLocalBeads returns a wrapper whose agent-bead operations remain pinned to
+// the wrapper's selected database. Most agent lifecycle records intentionally
+// live in town state, so CreateAgentBead normally re-roots through
+// ForAgentBead. Rig singleton identities (Witness and Refinery) are the
+// exception: they must be durable records in the rig database so patrol and
+// resolver commands can find them from either town or rig contexts.
+func (b *Beads) ForLocalBeads() *Beads {
+	return &Beads{
+		workDir:    b.workDir,
+		beadsDir:   b.beadsDir,
+		isolated:   b.isolated,
+		serverPort: b.serverPort,
+		store:      b.store,
+		noRoute:    true,
+	}
 }
 
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
@@ -721,7 +739,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 // If ServerPort is set (via NewIsolatedWithPort), passes --server-port to bd init
 // so the database is created on the test Dolt server.
 func (b *Beads) Init(prefix string) error {
-	args := []string{"init"}
+	args := []string{"init", "--skip-agents", "--skip-hooks"}
 	if prefix != "" {
 		args = append(args, "--prefix", prefix)
 	}
@@ -832,14 +850,14 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	}
 
 	if err != nil {
-		return nil, b.wrapError(err, stderr.String(), args)
+		return nil, b.wrapError(err, stderr.String(), args, beadsDir)
 	}
 
 	// Handle bd exit code 0 bug: when issue not found,
 	// bd may exit 0 but write error to stderr with empty stdout.
 	// Detect this case and treat as error to avoid JSON parse failures.
 	if stdout.Len() == 0 && stderr.Len() > 0 {
-		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args)
+		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args, beadsDir)
 	}
 
 	return stripStdoutWarnings(stdout.Bytes()), nil
@@ -875,11 +893,11 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 
 	err := cmd.Run()
 	if err != nil {
-		return nil, b.wrapError(err, stderr.String(), args)
+		return nil, b.wrapError(err, stderr.String(), args, "bd's native prefix routing (BEADS_DIR unset, see routes.jsonl) from "+b.workDir)
 	}
 
 	if stdout.Len() == 0 && stderr.Len() > 0 {
-		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args)
+		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args, "bd's native prefix routing (BEADS_DIR unset, see routes.jsonl) from "+b.workDir)
 	}
 
 	return stripStdoutWarnings(stdout.Bytes()), nil
@@ -896,7 +914,12 @@ func (b *Beads) Run(args ...string) ([]byte, error) {
 // ZFC: Avoid parsing stderr to make decisions. Transport errors to agents instead.
 // Exception: ErrNotInstalled (exec.ErrNotFound) and ErrNotFound (issue lookup) are
 // acceptable as they enable basic error handling without decision-making.
-func (b *Beads) wrapError(err error, stderr string, args []string) error {
+//
+// searched describes where bd looked (e.g. a resolved BEADS_DIR, or "native
+// prefix routing"). It is folded into the ErrNotFound message so a miss reads
+// as "not in THIS database" rather than "does not exist" — bd only ever
+// searches one database per invocation (gt-tmd1).
+func (b *Beads) wrapError(err error, stderr string, args []string, searched string) error {
 	stderr = strings.TrimSpace(stderr)
 
 	// Check for bd not installed
@@ -908,7 +931,8 @@ func (b *Beads) wrapError(err error, stderr string, args []string) error {
 	// Match various "not found" error patterns from bd
 	if strings.Contains(stderr, "not found") || strings.Contains(stderr, "Issue not found") ||
 		strings.Contains(stderr, "no issue found") {
-		return ErrNotFound
+		return fmt.Errorf("%w: %s (searched %s; if the issue lives in a different database, try 'bd -C <dir> %s')",
+			ErrNotFound, stderr, searched, strings.Join(args, " "))
 	}
 
 	if stderr != "" {
@@ -1080,6 +1104,9 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 		// Deprecated: convert type to label for backward compatibility
 		args = append(args, "--label=gt:"+opts.Type)
 	}
+	for _, label := range opts.Labels {
+		args = append(args, "--label="+label)
+	}
 	if opts.Priority >= 0 {
 		args = append(args, fmt.Sprintf("--priority=%d", opts.Priority))
 	}
@@ -1185,6 +1212,9 @@ func (b *Beads) listEphemeral(opts ListOptions) ([]*Issue, error) {
 		clauses = append(clauses, "label="+quoteBDQueryValue(opts.Label))
 	} else if opts.Type != "" {
 		clauses = append(clauses, "label="+quoteBDQueryValue("gt:"+opts.Type))
+	}
+	for _, label := range opts.Labels {
+		clauses = append(clauses, "label="+quoteBDQueryValue(label))
 	}
 	if opts.Status != "" && opts.Status != "all" {
 		clauses = append(clauses, "status="+quoteBDQueryValue(opts.Status))

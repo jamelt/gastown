@@ -33,6 +33,7 @@ var schedulerCmd = &cobra.Command{
 Subcommands:
   gt scheduler status    # Show scheduler state
   gt scheduler list      # List all scheduled beads
+  gt scheduler feed      # Survey ready beads and schedule eligible work
   gt scheduler run       # Manual dispatch trigger
   gt scheduler pause     # Pause dispatch
   gt scheduler resume    # Resume dispatch
@@ -451,10 +452,13 @@ func beadsSearchDirs(townRoot string) ([]string, error) {
 	return dirs, nil
 }
 
-// countActivePolecats counts all running polecat tmux sessions across all rigs.
+// countActivePolecats counts running, inventory-backed polecat tmux sessions.
+// A parseable name alone is not sufficient evidence: malformed and test
+// sessions such as gt-test-nudge-1 otherwise look like polecats because a
+// polecat name may contain dashes.
 // Capacity admission uses polecatCapacitySnapshotForTown instead; active sessions
 // are shown for operator context only.
-func countActivePolecats() int {
+func countActivePolecats(townRoot string) int {
 	listCmd := tmux.BuildCommand("list-sessions", "-F", "#{session_name}")
 	out, err := listCmd.Output()
 	if err != nil {
@@ -471,7 +475,13 @@ func countActivePolecats() int {
 			continue
 		}
 		if identity.Role == session.RolePolecat {
-			count++
+			if identity.Name == "." || identity.Name == ".." || filepath.Base(identity.Name) != identity.Name {
+				continue
+			}
+			polecatDir := filepath.Join(townRoot, identity.Rig, "polecats", identity.Name)
+			if info, statErr := os.Stat(polecatDir); statErr == nil && info.IsDir() {
+				count++
+			}
 		}
 	}
 	return count

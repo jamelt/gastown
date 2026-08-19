@@ -61,6 +61,14 @@ type State struct {
 
 	// HeartbeatCount is how many heartbeats have completed.
 	HeartbeatCount int64 `json:"heartbeat_count"`
+
+	// BinaryCommit is the build commit of the binary this daemon process is
+	// running, captured once at startup. Compared against the source repo's
+	// build-branch head (via version.CheckStaleBinaryForCommit) to detect
+	// when the *running* daemon process itself has fallen behind a merged
+	// fix — which can differ from the on-disk binary's freshness once a
+	// rebuild has replaced the file underneath an already-running process.
+	BinaryCommit string `json:"binary_commit,omitempty"`
 }
 
 // StateFile returns the path to the state file.
@@ -115,22 +123,23 @@ type PatrolConfig struct {
 
 // PatrolsConfig holds configuration for all patrols.
 type PatrolsConfig struct {
-	Refinery       *PatrolConfig          `json:"refinery,omitempty"`
-	Witness        *PatrolConfig          `json:"witness,omitempty"`
-	Deacon         *PatrolConfig          `json:"deacon,omitempty"`
-	Handler        *PatrolConfig          `json:"handler,omitempty"`
-	DoltServer     *DoltServerConfig      `json:"dolt_server,omitempty"`
-	DoltRemotes    *DoltRemotesConfig     `json:"dolt_remotes,omitempty"`
-	DoltBackup     *DoltBackupConfig      `json:"dolt_backup,omitempty"`
-	JsonlGitBackup *JsonlGitBackupConfig  `json:"jsonl_git_backup,omitempty"`
-	WispReaper     *WispReaperConfig      `json:"wisp_reaper,omitempty"`
-	DoctorDog      *DoctorDogConfig       `json:"doctor_dog,omitempty"`
-	CompactorDog           *CompactorDogConfig            `json:"compactor_dog,omitempty"`
-	CheckpointDog          *CheckpointDogConfig           `json:"checkpoint_dog,omitempty"`
-	ScheduledMaintenance   *ScheduledMaintenanceConfig    `json:"scheduled_maintenance,omitempty"`
-	MainBranchTest         *MainBranchTestConfig          `json:"main_branch_test,omitempty"`
-	QuotaDog               *QuotaDogConfig                `json:"quota_dog,omitempty"`
-	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
+	Refinery             *PatrolConfig               `json:"refinery,omitempty"`
+	Witness              *PatrolConfig               `json:"witness,omitempty"`
+	Deacon               *PatrolConfig               `json:"deacon,omitempty"`
+	Handler              *PatrolConfig               `json:"handler,omitempty"`
+	DoltServer           *DoltServerConfig           `json:"dolt_server,omitempty"`
+	DoltRemotes          *DoltRemotesConfig          `json:"dolt_remotes,omitempty"`
+	DoltBackup           *DoltBackupConfig           `json:"dolt_backup,omitempty"`
+	JsonlGitBackup       *JsonlGitBackupConfig       `json:"jsonl_git_backup,omitempty"`
+	WispReaper           *WispReaperConfig           `json:"wisp_reaper,omitempty"`
+	DoctorDog            *DoctorDogConfig            `json:"doctor_dog,omitempty"`
+	CompactorDog         *CompactorDogConfig         `json:"compactor_dog,omitempty"`
+	CheckpointDog        *CheckpointDogConfig        `json:"checkpoint_dog,omitempty"`
+	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
+	MainBranchTest       *MainBranchTestConfig       `json:"main_branch_test,omitempty"`
+	QuotaDog             *QuotaDogConfig             `json:"quota_dog,omitempty"`
+	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
+	FeederDog            *FeederDogConfig            `json:"feeder_dog,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -196,14 +205,18 @@ type JsonlGitBackupConfig struct {
 
 // DaemonPatrolConfig is the structure of mayor/daemon.json.
 type DaemonPatrolConfig struct {
-	Type      string            `json:"type"`
-	Version   int               `json:"version"`
-	Heartbeat *PatrolConfig     `json:"heartbeat,omitempty"`
-	Patrols   *PatrolsConfig    `json:"patrols,omitempty"`
+	Type      string         `json:"type"`
+	Version   int            `json:"version"`
+	Heartbeat *PatrolConfig  `json:"heartbeat,omitempty"`
+	Patrols   *PatrolsConfig `json:"patrols,omitempty"`
 	// Env holds environment variables to set at startup.
 	// Propagated to all sessions spawned by the daemon and read by gt up/mayor attach.
 	// Example: {"GT_DOLT_PORT": "43211"}
-	Env       map[string]string `json:"env,omitempty"`
+	Env map[string]string `json:"env,omitempty"`
+	// OverrunFactor is how many multiples of a dog's configured interval its
+	// cycle duration may reach before the daemon logs/alarms an overrun.
+	// Applies daemon-wide across all dogs. Defaults to 2.0 when unset/<=0.
+	OverrunFactor float64 `json:"overrun_factor,omitempty"`
 }
 
 // PatrolConfigFile returns the path to the patrol config file.
@@ -307,6 +320,12 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.QuotaDog.Enabled
+	}
+	if patrol == "feeder_dog" {
+		if config == nil || config.Patrols == nil || config.Patrols.FeederDog == nil {
+			return false
+		}
+		return config.Patrols.FeederDog.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

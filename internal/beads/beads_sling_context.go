@@ -1,6 +1,8 @@
 package beads
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -38,8 +40,15 @@ func (b *Beads) CreateSlingContext(workBeadTitle, workBeadID string, fields *cap
 	}
 
 	description := FormatSlingContextDescription(fields)
+	var entropy [5]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return nil, fmt.Errorf("generating sling context id: %w", err)
+	}
+	id := fmt.Sprintf("%s-sc-%s", detectPrefix(b.getResolvedBeadsDir()), hex.EncodeToString(entropy[:]))
 
 	args := []string{"create", "--json",
+		"--id=" + id,
+		"--force",
 		"--ephemeral",
 		"--title=" + title,
 		"--description=" + description,
@@ -114,5 +123,5 @@ func (b *Beads) CloseSlingContext(contextID, reason string) error {
 // UpdateSlingContextFields updates the description (fields) of a sling context bead.
 func (b *Beads) UpdateSlingContextFields(contextID string, fields *capacity.SlingContextFields) error {
 	description := FormatSlingContextDescription(fields)
-	return b.Update(contextID, UpdateOptions{Description: &description})
+	return b.ForLocalBeads().Update(contextID, UpdateOptions{Description: &description})
 }

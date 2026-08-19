@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/formula"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -27,6 +28,54 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+var inspectRigDoltLineageFn = doltserver.InspectLineageSQL
+
+// verifyRigDoltLineage blocks work dispatch when a rig configured for remote
+// Beads sync has a registered remote whose lineage cannot be verified. A rig
+// with no Dolt remote registered at all degrades to local-only (SafeToPush,
+// matching the push path) rather than blocking dispatch permanently — see
+// SafeToPush for the risk model. The check is read-only and deliberately
+// runs before polecat creation or hook mutation.
+func verifyRigDoltLineage(townRoot, rigName string) error {
+	if townRoot == "" || rigName == "" {
+		return fmt.Errorf("cannot verify Dolt lineage for rig %q: workspace context unavailable", rigName)
+	}
+	beadsDir := doltserver.FindRigBeadsDir(townRoot, rigName)
+	configData, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // no tracked remote policy; existing database checks still apply
+		}
+		return fmt.Errorf("reading rig %q Beads config for lineage check: %w", rigName, err)
+	}
+	if !configHasSyncRemote(string(configData)) {
+		return nil
+	}
+	dbName := beads.DatabaseNameFromMetadata(beadsDir)
+	if dbName == "" {
+		return fmt.Errorf("rig %q configures Beads remote sync but has no dolt_database metadata; refusing dispatch", rigName)
+	}
+	report, err := inspectRigDoltLineageFn(townRoot, dbName)
+	if err != nil {
+		return fmt.Errorf("cannot verify rig %q Beads lineage: %w; refusing dispatch", rigName, err)
+	}
+	if !report.SafeToPush() {
+		return fmt.Errorf("refusing dispatch: %s\nRun 'gt dolt reconcile --db %s' for read-only diagnostics and an approved preservation plan", report.Diagnostic(), dbName)
+	}
+	return nil
+}
+
+func configHasSyncRemote(config string) bool {
+	for _, line := range strings.Split(config, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.HasPrefix(line, "sync.remote:") {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "sync.remote:")), `"'`) != ""
+	}
+	return false
+}
 
 // resolveBeadDir returns the directory to run bd commands for a given bead ID.
 // Uses prefix-based routing (routes.jsonl) to resolve the correct rig's .beads
@@ -139,6 +188,34 @@ func applyWorkflowStepTargetOverride(args []string) ([]string, error) {
 	redirected[1] = target
 	fmt.Printf("%s Workflow step target: %s\n", style.Dim.Render("→"), target)
 	return redirected, nil
+}
+
+// workflowStepAgentFromDescription returns a formula-persisted agent alias.
+// This lets dependency-blocked workflow and synthesis beads retain their model
+// selection when the convoy manager slings them in a later cycle.
+func workflowStepAgentFromDescription(description string) string {
+	for _, line := range strings.Split(description, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), workflowAgentField) {
+			continue
+		}
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func applyWorkflowStepAgentOverride(args []string) {
+	if len(args) != 2 || slingAgent != "" {
+		return
+	}
+	info, err := getBeadInfo(args[0])
+	if err != nil {
+		return
+	}
+	if agent := workflowStepAgentFromDescription(info.Description); agent != "" {
+		slingAgent = agent
+		fmt.Printf("%s Workflow step agent: %s\n", style.Dim.Render("→"), agent)
+	}
 }
 
 func workflowStepTargetFromDescription(description, targetRig string) string {
@@ -536,6 +613,8 @@ func parseBeadInfo(beadID string, out []byte) (*beadInfo, error) {
 // eliminating the race condition where concurrent writers could overwrite each other's fields.
 type beadFieldUpdates struct {
 	Dispatcher       string   // Agent that dispatched the work
+	DispatchContext  string   // Scheduler context ID that produced this assignment
+	DispatchActor    string   // Agent executing the dispatch transition
 	Args             string   // Natural language instructions
 	Vars             []string // Formula variables (key=value pairs)
 	AttachedMolecule string   // Wisp root ID
@@ -633,6 +712,14 @@ func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpd
 	}
 	if updates.Dispatcher != "" {
 		fields.DispatchedBy = updates.Dispatcher
+	}
+	// DispatchActor marks a complete receipt update. In direct-dispatch mode the
+	// context is intentionally empty, which must clear any stale scheduler ID.
+	if updates.DispatchContext != "" || updates.DispatchActor != "" {
+		fields.DispatchContext = updates.DispatchContext
+	}
+	if updates.DispatchActor != "" {
+		fields.DispatchActor = updates.DispatchActor
 	}
 	if updates.Args != "" {
 		fields.AttachedArgs = updates.Args
@@ -941,15 +1028,6 @@ func nudgeWitness(rigName, message string) {
 		return // Don't actually nudge tmux in tests
 	}
 
-	// Emit a file event so the witness's await-event unblocks instantly.
-	townRoot, _ := workspace.FindFromCwd()
-	if townRoot != "" {
-		_, _ = channelevents.EmitToTown(townRoot, "witness", "POLECAT_DONE", []string{
-			"source=polecat",
-			"message=" + message,
-		})
-	}
-
 	t := tmux.NewTmux()
 	if err := t.NudgeSession(witnessSession, message); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge witness %s: %v\n", witnessSession, err)
@@ -979,7 +1057,7 @@ func nudgeRefinery(rigName, message string) {
 	// This is the programmatic bridge between mq submit and the event system.
 	townRoot, _ := workspace.FindFromCwd()
 	if townRoot != "" {
-		_, _ = channelevents.EmitToTown(townRoot, "refinery", "MQ_SUBMIT", []string{
+		_, _ = channelevents.EmitToTown(townRoot, channelevents.RefineryChannel(rigName), "MQ_SUBMIT", []string{
 			"source=sling",
 			"message=" + message,
 		})

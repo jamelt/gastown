@@ -224,6 +224,9 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 				return nil, err
 			}
 		}
+		if err := verifyRigDoltLineage(townRoot, rigName); err != nil {
+			return nil, err
+		}
 		if opts.DryRun {
 			fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
 			result.Agent = fmt.Sprintf("%s/polecats/<new>", rigName)
