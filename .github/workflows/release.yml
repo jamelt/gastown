@@ -32,9 +32,12 @@ jobs:
           go-version: '1.26'
 
       - name: Install cross-compilation toolchains
+        # gcc-aarch64-linux-gnu cross-compiles the CGO gt-linux-arm64 target.
+        # mingw-w64 was dropped along with CGO for gt-windows-amd64 (see
+        # .goreleaser.yml) since no mingw-targeted ICU4C build is available.
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Reject replace directives in go.mod
         run: |
