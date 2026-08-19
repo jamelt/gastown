@@ -84,6 +84,13 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	syncFailures map[string]int
 
+	// quotaDogFailures tracks consecutive failures per quota_dog action
+	// (rotate, failover). Used to escalate logging from WARN to ERROR after
+	// repeated failures, so a permanently broken action (e.g. no accounts
+	// configured) doesn't stay silent in per-cycle "(non-fatal)" log noise.
+	// Only accessed from quota_dog's own goroutine - no sync needed.
+	quotaDogFailures map[string]int
+
 	// PATCH-006: Resolved binary paths to avoid PATH issues in subprocesses.
 	gtPath string
 	bdPath string
