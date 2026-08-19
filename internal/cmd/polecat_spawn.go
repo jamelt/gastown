@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/quota"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -410,6 +411,23 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("rig '%s' not found", s.RigName)
 	}
+	spawnTownRoot := filepath.Dir(r.Path)
+
+	// Consult quota.json before spawning (gt-wr4x): if the agent we'd
+	// otherwise spawn maps to a provider still within its cooldown window,
+	// jump straight to the next agent in the failover route instead of
+	// paying a failed spawn attempt against a known-limited provider first.
+	if route, routeErr := config.ResolveAgentRoute("polecat", s.agent, spawnTownRoot, r.Path); routeErr == nil && len(route) > 1 {
+		if state, loadErr := quota.NewManager(spawnTownRoot).Load(); loadErr == nil {
+			chosen, _, substituted := quota.SelectAvailableAgent(state, route, time.Now(), func(agent string) (string, error) {
+				return config.ResolveAgentQuotaProvider(spawnTownRoot, r.Path, agent)
+			})
+			if substituted {
+				style.PrintWarning("provider for %s is cooling down (quota.json); spawning %s with %s instead", route[0], s.PolecatName, chosen)
+				s.agent = chosen
+			}
+		}
+	}
 
 	// Resolve account
 	accountsPath := constants.MayorAccountsPath(townRoot)
@@ -437,7 +455,6 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	// strategy (delay-based for Codex vs prompt-polling for Claude). Without this,
 	// ResolveRoleAgentConfig returns the default agent (Claude) and polls for "❯ "
 	// in a Codex session, always timing out after 30 seconds (gt-1j3m).
-	spawnTownRoot := filepath.Dir(r.Path)
 	var runtimeConfig *config.RuntimeConfig
 	if s.agent != "" {
 		rc, _, err := config.ResolveAgentConfigWithOverride(spawnTownRoot, r.Path, s.agent)
