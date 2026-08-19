@@ -61,8 +61,10 @@ func (m *Manager) Load() (*config.QuotaState, error) {
 	data, err := os.ReadFile(m.statePath())
 	if os.IsNotExist(err) {
 		return &config.QuotaState{
-			Version:  config.CurrentQuotaVersion,
-			Accounts: make(map[string]config.AccountQuotaState),
+			Version:       config.CurrentQuotaVersion,
+			Accounts:      make(map[string]config.AccountQuotaState),
+			Providers:     make(map[string]config.ProviderQuotaState),
+			AgentSessions: make(map[string]config.AgentFailoverSessionState),
 		}, nil
 	}
 	if err != nil {
@@ -75,6 +77,12 @@ func (m *Manager) Load() (*config.QuotaState, error) {
 	}
 	if state.Accounts == nil {
 		state.Accounts = make(map[string]config.AccountQuotaState)
+	}
+	if state.Providers == nil {
+		state.Providers = make(map[string]config.ProviderQuotaState)
+	}
+	if state.AgentSessions == nil {
+		state.AgentSessions = make(map[string]config.AgentFailoverSessionState)
 	}
 	return &state, nil
 }

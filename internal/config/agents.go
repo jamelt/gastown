@@ -62,6 +62,11 @@ type AgentPresetInfo struct {
 	// Name is the preset identifier (e.g., "claude", "gemini", "codex", "cursor", "auggie", "amp", "copilot").
 	Name AgentPreset `json:"name"`
 
+	// QuotaProvider identifies the shared billing/allocation pool for
+	// provider-aware fallback. It is intentionally separate from the runtime
+	// preset name because many aliases share one provider allocation.
+	QuotaProvider string `json:"quota_provider,omitempty"`
+
 	// Command is the CLI binary to invoke.
 	Command string `json:"command"`
 
@@ -740,10 +745,11 @@ func runtimeConfigFromAgentInfo(preset AgentPreset, info *AgentPresetInfo) *Runt
 	}
 
 	rc := &RuntimeConfig{
-		Provider: string(info.Name),
-		Command:  info.Command,
-		Args:     append([]string(nil), info.Args...),
-		Env:      envCopy,
+		Provider:      string(info.Name),
+		QuotaProvider: info.QuotaProvider,
+		Command:       info.Command,
+		Args:          append([]string(nil), info.Args...),
+		Env:           envCopy,
 	}
 
 	if preset == AgentClaude && rc.Command == "claude" {

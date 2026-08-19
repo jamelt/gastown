@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -77,6 +78,33 @@ func TestListEphemeralQuotesQueryValuesAndDisablesLimit(t *testing.T) {
 	}
 }
 
+// TestListEphemeralMultipleLabelsANDsClauses verifies that ListOptions.Labels
+// produces one ANDed label clause per entry, on top of any Label/Type filter.
+// Plugin-run receipts (ephemeral wisps) are discoverable only by combining
+// "type:plugin-run" and "plugin:<name>" label filters; a single-label query
+// silently returns nothing even though matching wisps exist.
+func TestListEphemeralMultipleLabelsANDsClauses(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	_, err := b.List(ListOptions{
+		Status:    "all",
+		Priority:  -1,
+		Ephemeral: true,
+		Labels:    []string{"type:plugin-run", "plugin:gitignore-reconcile"},
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	want := `query --json ephemeral=true AND label="type:plugin-run" AND label="plugin:gitignore-reconcile" --all --limit=0`
+	if !strings.Contains(logOutput, want) {
+		t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
+	}
+}
+
 func TestListIssueStatusesUsesSingleQuery(t *testing.T) {
 	ResetBdAllowStaleCacheForTest()
 	logPath := installMockBDRecorder(t)
@@ -123,6 +151,29 @@ func TestListDurableUsesBDListFilters(t *testing.T) {
 	}
 	if strings.Contains(logOutput, "sql --json") {
 		t.Fatalf("List() should not use raw SQL\nlog:\n%s", logOutput)
+	}
+}
+
+// TestListDurableMultipleLabelsUsesRepeatedFlag verifies that ListOptions.Labels
+// emits one repeated --label flag per entry, ANDed together by bd list.
+func TestListDurableMultipleLabelsUsesRepeatedFlag(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	_, err := b.List(ListOptions{
+		Status:   "all",
+		Priority: -1,
+		Labels:   []string{"type:plugin-run", "plugin:gitignore-reconcile"},
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	want := "list --json --status=all --label=type:plugin-run --label=plugin:gitignore-reconcile"
+	if !strings.Contains(logOutput, want) {
+		t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
 	}
 }
 
@@ -213,6 +264,39 @@ func TestBuildPinnedBDEnvUsesSelectedConnectionMetadata(t *testing.T) {
 	}
 	if got["BEADS_DOLT_AUTO_START"] != "0" {
 		t.Fatalf("BEADS_DOLT_AUTO_START should be forced off, got %q in %v", got["BEADS_DOLT_AUTO_START"], env)
+	}
+}
+
+func TestBuildPinnedBDEnvOverridesContributorPlanningRoute(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{
+		"PATH=/usr/bin",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=user.name",
+		"GIT_CONFIG_VALUE_0=Test User",
+	}, beadsDir)
+	got := envMap(env)
+	if got["GIT_CONFIG_COUNT"] != "2" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want 2 in %v", got["GIT_CONFIG_COUNT"], env)
+	}
+	if got["GIT_CONFIG_KEY_0"] != "user.name" || got["GIT_CONFIG_VALUE_0"] != "Test User" {
+		t.Fatalf("existing git config env was not preserved: %v", env)
+	}
+	if got["GIT_CONFIG_KEY_1"] != "beads.role" || got["GIT_CONFIG_VALUE_1"] != "maintainer" {
+		t.Fatalf("pinned env does not suppress contributor planning routing: %v", env)
+	}
+
+	routing := envMap(BuildRoutingBDEnv([]string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=beads.role",
+		"GIT_CONFIG_VALUE_0=contributor",
+	}, beadsDir))
+	if routing["GIT_CONFIG_COUNT"] != "1" || routing["GIT_CONFIG_VALUE_0"] != "contributor" {
+		t.Fatalf("routing env should preserve caller role selection: %v", routing)
 	}
 }
 
@@ -1939,14 +2023,17 @@ func TestWrapError(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		err := b.wrapError(nil, tt.stderr, []string{"test"})
+		err := b.wrapError(nil, tt.stderr, []string{"test"}, "/test/.beads")
 		if tt.wantNil {
 			if err != nil {
 				t.Errorf("wrapError(%q) = %v, want nil", tt.stderr, err)
 			}
 		} else {
-			if err != tt.wantErr {
-				t.Errorf("wrapError(%q) = %v, want %v", tt.stderr, err, tt.wantErr)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("wrapError(%q) = %v, want errors.Is match for %v", tt.stderr, err, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), "/test/.beads") {
+				t.Errorf("wrapError(%q) = %v, want message to name the searched database", tt.stderr, err)
 			}
 		}
 	}

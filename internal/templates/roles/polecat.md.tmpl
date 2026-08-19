@@ -399,7 +399,7 @@ Use `gt done --cleanup-status clean` when completing with no code changes.
 {{ if .IsForkRig -}}
 **Applies here:** this rig is fork-backed. Use PRs against upstream and do not route upstream changes through the local Refinery/MQ.
 
-1. Implement → Test
+1. Implement and test — follow your formula's steps for ordering
 2. Push your branch to `origin`
 3. Create/update a GitHub PR against upstream `{{ .DefaultBranch }}`
 4. Monitor CI and review
@@ -423,7 +423,7 @@ Do not submit upstream changes to the local Refinery/MQ unless explicitly instru
 **Applies to:** longeye and other repos that require code review via GitHub PRs
 
 ### New Workflow (PR-based)
-1. Implement → Test
+1. Implement and test — follow your formula's steps for ordering
 2. **Create PR** (with branch naming: adam/YY/M/description)
 3. **Monitor PR** — Check CI and review status
 4. **Address feedback** — Fix issues if CI fails or reviewers comment

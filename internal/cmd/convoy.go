@@ -517,21 +517,16 @@ func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) 
 		return ids, nil
 	}
 
-	var lastErr error
-	for _, legacy := range []bool{false, true} {
-		query := rawDepSQLLiteral(issueID, direction, depType, legacy)
-		out, err := runBdJSONWithAutoCommit(dir, "sql", query, "--json")
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		ids, err := parseRawDepRows(out, parseKey)
-		if err != nil {
-			return nil, fmt.Errorf("parsing dep sql for %s: %w", issueID, err)
-		}
-		return ids, nil
+	query := rawDepSQLLiteral(issueID, direction, depType)
+	out, err := runBdJSONWithAutoCommit(dir, "sql", query, "--json")
+	if err != nil {
+		return nil, fmt.Errorf("bd sql for deps of %s: %w", issueID, err)
 	}
-	return nil, fmt.Errorf("bd sql for deps of %s: %w", issueID, lastErr)
+	ids, err := parseRawDepRows(out, parseKey)
+	if err != nil {
+		return nil, fmt.Errorf("parsing dep sql for %s: %w", issueID, err)
+	}
+	return ids, nil
 }
 
 func bdDepListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, error) {
@@ -554,29 +549,16 @@ func bdDepListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	typedQuery, typedArgs := rawDepSQLArgs(issueID, direction, depType, false)
-	ids, err := queryRawDepIDs(ctx, db, typedQuery, typedArgs)
-	if err == nil {
-		return ids, nil
-	}
-	legacyQuery, legacyArgs := rawDepSQLArgs(issueID, direction, depType, true)
-	return queryRawDepIDs(ctx, db, legacyQuery, legacyArgs)
+	query, args := rawDepSQLArgs(issueID, direction, depType)
+	return queryRawDepIDs(ctx, db, query, args)
 }
 
-func rawDepSQLArgs(issueID, direction, depType string, legacy bool) (string, []any) {
+func rawDepSQLArgs(issueID, direction, depType string) (string, []any) {
 	var query string
 	var args []any
 	if direction == "up" {
-		if legacy {
-			query = "SELECT issue_id FROM dependencies WHERE depends_on_id = ?"
-			args = append(args, issueID)
-		} else {
-			query = "SELECT issue_id FROM dependencies WHERE (depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external LIKE ? ESCAPE '!')"
-			args = append(args, issueID, issueID, "%:"+strings.ReplaceAll(issueID, "_", "!_"))
-		}
-	} else if legacy {
-		query = "SELECT depends_on_id FROM dependencies WHERE issue_id = ?"
-		args = append(args, issueID)
+		query = "SELECT issue_id FROM dependencies WHERE (depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external LIKE ? ESCAPE '!')"
+		args = append(args, issueID, issueID, "%:"+strings.ReplaceAll(issueID, "_", "!_"))
 	} else {
 		query = "SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id FROM dependencies WHERE issue_id = ?"
 		args = append(args, issueID)
@@ -588,8 +570,8 @@ func rawDepSQLArgs(issueID, direction, depType string, legacy bool) (string, []a
 	return query, args
 }
 
-func rawDepSQLLiteral(issueID, direction, depType string, legacy bool) string {
-	query, args := rawDepSQLArgs(issueID, direction, depType, legacy)
+func rawDepSQLLiteral(issueID, direction, depType string) string {
+	query, args := rawDepSQLArgs(issueID, direction, depType)
 	for _, arg := range args {
 		query = strings.Replace(query, "?", "'"+arg.(string)+"'", 1)
 	}
@@ -1571,7 +1553,7 @@ func runConvoyStranded(cmd *cobra.Command, args []string) error {
 	if len(feedable) > 0 {
 		fmt.Println("To feed stranded convoys, run:")
 		for _, s := range feedable {
-			fmt.Printf("  gt sling mol-convoy-feed deacon/dogs --var convoy=%s\n", s.ID)
+			fmt.Printf("  gt sling mol-convoy-feed deacon/dogs --var convoy=%s --var title=%q\n", s.ID, s.Title)
 		}
 	}
 	if len(needsAttention) > 0 {

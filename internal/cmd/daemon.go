@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -64,7 +67,8 @@ Displays whether the daemon is running, its PID, uptime, heartbeat
 count, and whether the binary has been rebuilt since the daemon started.
 
 Examples:
-  gt daemon status`,
+  gt daemon status
+  gt daemon status --json`,
 	RunE: runDaemonStatus,
 }
 
@@ -145,8 +149,9 @@ Examples:
 }
 
 var (
-	daemonLogLines  int
-	daemonLogFollow bool
+	daemonLogLines   int
+	daemonLogFollow  bool
+	daemonStatusJSON bool
 )
 
 func init() {
@@ -161,6 +166,7 @@ func init() {
 
 	daemonLogsCmd.Flags().IntVarP(&daemonLogLines, "lines", "n", 50, "Number of lines to show")
 	daemonLogsCmd.Flags().BoolVarP(&daemonLogFollow, "follow", "f", false, "Follow log output")
+	daemonStatusCmd.Flags().BoolVar(&daemonStatusJSON, "json", false, "Output as JSON")
 	daemonRotateLogsCmd.Flags().BoolVar(&daemonRotateLogsForce, "force", false, "Rotate all logs regardless of size")
 
 	rootCmd.AddCommand(daemonCmd)
@@ -267,6 +273,39 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking daemon status: %w", err)
 	}
 
+	state, stateErr := daemon.LoadState(townRoot)
+	binaryModTime, binaryErr := getBinaryModTime()
+
+	if daemonStatusJSON {
+		sessions, sessionsErr := tmux.NewTmux().ListSessions()
+		if sessions == nil {
+			sessions = []string{}
+		}
+		sort.Strings(sessions)
+		status := daemonStatusOutput{
+			Running:  running,
+			PID:      pid,
+			Town:     townRoot,
+			Sessions: sessions,
+		}
+		if sessionsErr != nil {
+			status.SessionsError = sessionsErr.Error()
+		}
+		if stateErr == nil && state != nil {
+			status.StartedAt = optionalTime(state.StartedAt)
+			status.LastHeartbeat = optionalTime(state.LastHeartbeat)
+			status.HeartbeatCount = state.HeartbeatCount
+		}
+		if binaryErr == nil {
+			status.BinaryModifiedAt = optionalTime(binaryModTime)
+			status.BinaryNewer = status.StartedAt != nil && binaryModTime.After(*status.StartedAt)
+		}
+
+		encoder := json.NewEncoder(cmd.OutOrStdout())
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(status)
+	}
+
 	if running {
 		fmt.Printf("%s Daemon is %s (PID %d)\n",
 			style.Bold.Render("●"),
@@ -275,8 +314,7 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Town: %s\n", townRoot)
 
 		// Load state for more details
-		state, err := daemon.LoadState(townRoot)
-		if err == nil && !state.StartedAt.IsZero() {
+		if stateErr == nil && state != nil && !state.StartedAt.IsZero() {
 			fmt.Printf("  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
 			if !state.LastHeartbeat.IsZero() {
 				fmt.Printf("  Last heartbeat: %s (#%d)\n",
@@ -285,7 +323,7 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 			}
 
 			// Check if binary is newer than process
-			if binaryModTime, err := getBinaryModTime(); err == nil {
+			if binaryErr == nil {
 				fmt.Printf("  Binary: %s\n", binaryModTime.Format("2006-01-02 15:04:05"))
 				if binaryModTime.After(state.StartedAt) {
 					fmt.Printf("  %s Binary is newer than process - consider '%s'\n",
@@ -302,6 +340,28 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// daemonStatusOutput is the stable machine-readable form of `gt daemon status`.
+// Pointer timestamps are omitted when the daemon has not written that state yet.
+type daemonStatusOutput struct {
+	Running          bool       `json:"running"`
+	PID              int        `json:"pid,omitempty"`
+	Town             string     `json:"town"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	LastHeartbeat    *time.Time `json:"last_heartbeat,omitempty"`
+	HeartbeatCount   int64      `json:"heartbeat_count,omitempty"`
+	BinaryModifiedAt *time.Time `json:"binary_modified_at,omitempty"`
+	BinaryNewer      bool       `json:"binary_newer"`
+	Sessions         []string   `json:"sessions"`
+	SessionsError    string     `json:"sessions_error,omitempty"`
+}
+
+func optionalTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
 }
 
 // getBinaryModTime returns the modification time of the current executable

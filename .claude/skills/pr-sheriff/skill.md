@@ -109,6 +109,43 @@ The deep review formula (mol-pr-deep-review) applies six lenses:
 
 Final verdicts: MERGE | CHERRY-PICK | REWORK | REIMPLEMENT | CLOSE
 
+## Branch Hygiene Gate (required before any replacement PR)
+
+Before opening or recommending a maintainer **replacement PR** (a
+fix-merge/clean-redo branch that carries forward a contributor's original
+PR), run:
+
+```bash
+gt pr-sheriff-check --merge-gate
+```
+
+This computes how far the current branch has diverged from its base
+(commits behind, commits ahead) and fails loudly if the branch is stale
+or carries commits unrelated to the intended fix — the exact failure mode
+that let PR #4238 (~553 behind / ~86 ahead) and PR #4257 (~553 behind /
+~98 ahead) get created and merge-recommended as contaminated replacements.
+
+The check also raises the bar structurally: `gt tap guard branch-hygiene`
+is wired to `Bash(gh pr create*)` in Gas Town's default hook set, so an
+agent running a literal `gh pr create` Bash command from a contaminated
+branch is blocked before the PR is even opened. That match is a
+command-string prefix match, not a universal interception point — it does
+not see a PR opened via the GitHub API, a different tool, or shell
+indirection, so `gt pr-sheriff-check --merge-gate` above is still the
+step of record; treat the hook as defense in depth, not the whole guard.
+Existing rigs pick the hook up via the normal `gt hooks sync` /
+`gt doctor --fix hooks-sync` propagation path (also run by the standing
+deacon patrol), not automatically the moment this code ships.
+
+**If a rig's fork is known to lag its upstream** (see the fork-rig-setup
+guide), pass `--base` explicitly (e.g. `--base upstream/main` or
+`--base origin/main`) rather than relying on auto-detection — the
+auto-detected base can otherwise report normal fork lag as "unrelated
+ahead" contamination.
+
+Record the check's output (or its `--json` form) as the branch-hygiene
+evidence artifact in the PR-Sheriff evidence record for the replacement.
+
 ## Output Format
 
 For each PR, print a recommendation block:

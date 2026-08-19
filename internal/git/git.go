@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -2558,6 +2559,65 @@ type BranchContamination struct {
 	Ahead  int // commits HEAD is ahead of base
 }
 
+// Contamination thresholds shared by every caller that gates on branch
+// divergence (gt done's preflight, gt pr-sheriff-check --merge-gate, and the
+// branch-hygiene tap guard). Behind thresholds were established for GH#2220.
+// Ahead thresholds close a gap GH#2220 left open: a branch can carry commits
+// unrelated to its intended diff without ever falling behind. The known
+// contamination cases (PR #4238: ~86 ahead, PR #4257: ~98 ahead) were both
+// well past these Ahead thresholds; a small legitimate replacement/fixup
+// branch is expected to stay in the low single-to-double digits.
+const (
+	ContaminationWarnBehind  = 50
+	ContaminationBlockBehind = 200
+	ContaminationWarnAhead   = 20
+	ContaminationBlockAhead  = 50
+)
+
+// ContaminationSeverity classifies how severe a BranchContamination reading is.
+type ContaminationSeverity int
+
+const (
+	SeverityClean ContaminationSeverity = iota
+	SeverityWarn
+	SeverityBlock
+)
+
+// Evaluate classifies a contamination reading against the shared thresholds,
+// returning the worst severity found across both dimensions (Behind and
+// Ahead) plus a human-readable reason for each dimension that is at or above
+// its warn threshold.
+func (bc BranchContamination) Evaluate() (ContaminationSeverity, []string) {
+	severity := SeverityClean
+	reasons := []string{}
+
+	raise := func(s ContaminationSeverity) {
+		if s > severity {
+			severity = s
+		}
+	}
+
+	switch {
+	case bc.Behind >= ContaminationBlockBehind:
+		raise(SeverityBlock)
+		reasons = append(reasons, fmt.Sprintf("%d commits behind (block threshold: %d)", bc.Behind, ContaminationBlockBehind))
+	case bc.Behind >= ContaminationWarnBehind:
+		raise(SeverityWarn)
+		reasons = append(reasons, fmt.Sprintf("%d commits behind (warn threshold: %d)", bc.Behind, ContaminationWarnBehind))
+	}
+
+	switch {
+	case bc.Ahead >= ContaminationBlockAhead:
+		raise(SeverityBlock)
+		reasons = append(reasons, fmt.Sprintf("%d commits ahead, likely unrelated changes (block threshold: %d)", bc.Ahead, ContaminationBlockAhead))
+	case bc.Ahead >= ContaminationWarnAhead:
+		raise(SeverityWarn)
+		reasons = append(reasons, fmt.Sprintf("%d commits ahead, check for unrelated changes (warn threshold: %d)", bc.Ahead, ContaminationWarnAhead))
+	}
+
+	return severity, reasons
+}
+
 // CheckBranchContamination checks whether the current branch has diverged
 // significantly from a base ref (typically origin/main). Returns the number
 // of commits behind and ahead, letting callers decide severity thresholds.
@@ -2578,6 +2638,32 @@ func (g *Git) CheckBranchContamination(baseRef string) (BranchContamination, err
 	result.Ahead = ahead
 
 	return result, nil
+}
+
+// ResolveContaminationCheck resolves the base ref to compare against (the
+// explicit ref if given, otherwise the fork-aware default), best-effort
+// fetches its remote, and returns the resulting BranchContamination reading.
+// Shared by gt pr-sheriff-check and the branch-hygiene tap guard so both
+// follow the identical resolve/fetch/check sequence.
+//
+// The fetch error (if any) is returned separately rather than swallowed,
+// since callers differ on whether to surface it: gt pr-sheriff-check warns
+// on fetch failure and proceeds with local refs, the tap guard ignores it
+// silently as part of its documented fail-open contract.
+func (g *Git) ResolveContaminationCheck(explicitBase string) (base string, contam BranchContamination, fetchErr error, err error) {
+	base = explicitBase
+	if base == "" {
+		base = g.CleanBaseRef("origin", g.RemoteDefaultBranch(), "")
+	}
+
+	remote := RemoteForRef(base)
+	if remote == "" {
+		remote = "origin"
+	}
+	fetchErr = g.Fetch(remote)
+
+	contam, err = g.CheckBranchContamination(base)
+	return base, contam, fetchErr, err
 }
 
 // StashCount returns the number of stashes belonging to the current branch.
@@ -3041,6 +3127,20 @@ func isBeadsPath(path string) bool {
 	return strings.Contains(path, ".beads/") || strings.Contains(path, ".beads\\")
 }
 
+// AgentRuntimeDirs lists the config/scaffolding directories that coding-agent
+// tools write into a worktree (agent instructions, generated skill/tool
+// config). None of it is bead-scoped work, so it must be excluded from both
+// checkpoint/gt-done "real work" detection (runtimeArtifactRoot below) and
+// the gitignore patterns seeded into fresh worktrees (rig.gasTownIgnorePatterns,
+// which composes this list with its own extras the same way it composes
+// gasTownLocalExcludePatterns with ".beads/").
+//
+// Add a new agent tool's directory here, not by copy-pasting a literal into
+// both call sites separately — that drift is what let checkpoint_dog
+// auto-commit a Codex-CLI polecat's untemplated ".codex"/".agents" scaffolding
+// as if it were real work (gt-gvjc).
+var AgentRuntimeDirs = []string{".claude", ".opencode", ".codex", ".agents"}
+
 // runtimeArtifactRoot returns the path that should be reset when a runtime artifact
 // is staged. Directory artifacts return the directory root so large trees like
 // nested node_modules are unstaged with one pathspec instead of thousands.
@@ -3053,8 +3153,11 @@ func runtimeArtifactRoot(path string) (string, bool) {
 
 	parts := strings.Split(bare, "/")
 	for i, part := range parts {
+		if slices.Contains(AgentRuntimeDirs, part) {
+			return strings.Join(parts[:i+1], "/") + "/", true
+		}
 		switch part {
-		case ".beads", ".claude", ".opencode", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "coverage", "htmlcov":
+		case ".beads", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "coverage", "htmlcov":
 			return strings.Join(parts[:i+1], "/") + "/", true
 		}
 	}

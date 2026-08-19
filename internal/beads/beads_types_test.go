@@ -972,13 +972,16 @@ func TestDetectPrefix(t *testing.T) {
 		}
 	})
 
-	t.Run("routed path falls back to default", func(t *testing.T) {
-		// Routed beads path: mayor/rig/.beads — filepath.Base(filepath.Dir)
-		// yields "rig", not the actual rig name. Should fall back to "gt".
+	t.Run("routed path resolves via routes", func(t *testing.T) {
 		townDir := t.TempDir()
 		mayorDir := filepath.Join(townDir, "mayor")
 		os.MkdirAll(mayorDir, 0755)
 		os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte("{}"), 0644)
+		if err := WriteRoutes(filepath.Join(townDir, ".beads"), []Route{
+			{Prefix: "myrig-", Path: "myrig/mayor/rig"},
+		}); err != nil {
+			t.Fatalf("write routes: %v", err)
+		}
 
 		rigDir := filepath.Join(townDir, "myrig")
 		routedDir := filepath.Join(rigDir, "mayor", "rig")
@@ -986,9 +989,8 @@ func TestDetectPrefix(t *testing.T) {
 		os.MkdirAll(beadsDir, 0755)
 
 		got := detectPrefix(beadsDir)
-		// "rig" won't be found in rigs.json → falls to "gt" default
-		if got != "gt" {
-			t.Errorf("detectPrefix() for routed path = %q, want %q", got, "gt")
+		if got != "myrig" {
+			t.Errorf("detectPrefix() for routed path = %q, want %q", got, "myrig")
 		}
 	})
 }

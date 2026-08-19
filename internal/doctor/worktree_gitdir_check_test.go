@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -416,6 +417,135 @@ func TestWorktreeGitdirCheck_DeaconDogs_MultipleDogs(t *testing.T) {
 	if !strings.Contains(result.Message, "3 worktree") {
 		t.Errorf("expected 3 broken worktrees, got %q", result.Message)
 	}
+}
+
+func TestWorktreeGitdirCheck_FixRepairsLinkWithoutReplacingWorktree(t *testing.T) {
+	tmpDir, rigDir, bareRepo, worktree := setupRepairableWorktree(t)
+	branch := "polecat/alpha/gt-yuwe+test"
+
+	if err := os.WriteFile(filepath.Join(worktree, "README.md"), []byte("local edit\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "sentinel"), []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The existing admin entry and index must survive; only the link is stale.
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: /old/town/testrig/.repo.git/worktrees/alpha\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewWorktreeGitdirCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+	if result := check.Run(ctx); result.Status != StatusError {
+		t.Fatalf("expected broken worktree, got %v: %s", result.Status, result.Message)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := doctorGit(t, worktree, "branch", "--show-current"); got != branch {
+		t.Errorf("branch = %q, want %q", got, branch)
+	}
+	if got := doctorGit(t, worktree, "status", "--porcelain"); got != "M README.md\n?? sentinel" {
+		t.Errorf("status = %q, want preserved tracked and untracked changes", got)
+	}
+	if got := doctorGit(t, worktree, "diff", "--", "README.md"); !strings.Contains(got, "+local edit") {
+		t.Errorf("tracked edit was not preserved: %s", got)
+	}
+	if got := doctorGit(t, worktree, "ls-files", "--stage"); got == "" {
+		t.Error("repaired worktree has an empty index")
+	}
+	for _, path := range []string{".beads/config.yaml", ".beads/metadata.json"} {
+		if got := doctorGit(t, worktree, "ls-files", "-v", "--", path); !strings.HasPrefix(got, "S "+path) {
+			t.Errorf("skip-worktree bit for %s = %q", path, got)
+		}
+	}
+	if got := doctorGit(t, bareRepo, "worktree", "list", "--porcelain"); !strings.Contains(got, "worktree "+worktree) {
+		t.Errorf("worktree not registered after repair: %s", got)
+	}
+	if result := check.Run(ctx); result.Status != StatusOK {
+		t.Errorf("expected repaired worktree to validate, got %v: %s", result.Status, result.Message)
+	}
+	_ = rigDir
+}
+
+func TestWorktreeGitdirCheck_FixRefusesMissingMetadataWithoutMutation(t *testing.T) {
+	tmpDir, _, bareRepo, worktree := setupRepairableWorktree(t)
+	brokenGitFile := []byte("gitdir: /old/town/testrig/.repo.git/worktrees/alpha\n")
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), brokenGitFile, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(bareRepo, "worktrees", "testrig")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "sentinel"), []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewWorktreeGitdirCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+	check.Run(ctx)
+	if err := check.Fix(ctx); err == nil {
+		t.Fatal("expected missing metadata repair to fail")
+	}
+	if got, err := os.ReadFile(filepath.Join(worktree, ".git")); err != nil || string(got) != string(brokenGitFile) {
+		t.Errorf(".git mutated after failed repair: %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(worktree, "sentinel")); err != nil || string(got) != "keep me" {
+		t.Errorf("worktree content mutated after failed repair: %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(bareRepo, "worktrees", "testrig")); !os.IsNotExist(err) {
+		t.Errorf("failed repair recreated worktree metadata: %v", err)
+	}
+}
+
+func setupRepairableWorktree(t *testing.T) (tmpDir, rigDir, bareRepo, worktree string) {
+	t.Helper()
+	tmpDir = t.TempDir()
+	rigDir = filepath.Join(tmpDir, "testrig")
+	bareRepo = filepath.Join(rigDir, ".repo.git")
+	seed := filepath.Join(tmpDir, "seed")
+	worktree = filepath.Join(rigDir, "polecats", "alpha", "testrig")
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	doctorGit(t, "", "init", "--bare", "--initial-branch=main", bareRepo)
+	doctorGit(t, "", "init", "--initial-branch=main", seed)
+	doctorGit(t, seed, "config", "user.email", "test@example.com")
+	doctorGit(t, seed, "config", "user.name", "Test User")
+	for path, content := range map[string]string{"README.md": "initial\n", ".beads/config.yaml": "config\n", ".beads/metadata.json": "metadata\n"} {
+		fullPath := filepath.Join(seed, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	doctorGit(t, seed, "add", ".")
+	doctorGit(t, seed, "commit", "-m", "initial")
+	doctorGit(t, seed, "remote", "add", "origin", bareRepo)
+	doctorGit(t, seed, "push", "origin", "main")
+	doctorGit(t, bareRepo, "worktree", "add", "-b", "polecat/alpha/gt-yuwe+test", worktree, "main")
+	doctorGit(t, worktree, "update-index", "--skip-worktree", "--", ".beads/config.yaml", ".beads/metadata.json")
+	return tmpDir, rigDir, bareRepo, worktree
+}
+
+func doctorGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmdArgs := append([]string{}, args...)
+	if dir != "" {
+		cmdArgs = append([]string{"-C", dir}, cmdArgs...)
+	}
+	out, err := exec.Command("git", cmdArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(cmdArgs, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestWorktreeGitdirCheck_NoDeaconDogs(t *testing.T) {

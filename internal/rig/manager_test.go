@@ -967,8 +967,17 @@ cmd="$1"
 shift
 case "$cmd" in
   show)
-    # Return empty to indicate agent doesn't exist yet
-    echo "[]"
+    id="$1"
+    if [[ -f "$AGENT_LOG" ]] && grep -Fxq "$id" "$AGENT_LOG"; then
+      labels='["gt:rig"]'; description='Rig identity'
+      case "$id" in
+        *-witness) labels='["gt:agent"]'; description='role_type: witness\nrig: demo\nagent_state: idle' ;;
+        *-refinery) labels='["gt:agent"]'; description='role_type: refinery\nrig: demo\nagent_state: idle' ;;
+      esac
+      printf '[{"id":"%s","title":"%s","description":"%s","issue_type":"task","status":"open","labels":%s}]' "$id" "$id" "$description" "$labels"
+    else
+      echo "[]"
+    fi
     ;;
   create)
     id=""
@@ -981,7 +990,12 @@ case "$cmd" in
     done
     # Log the created agent ID for verification
     echo "$id" >> "$AGENT_LOG"
-    printf '{"id":"%s","title":"%s","description":"","issue_type":"agent"}' "$id" "$title"
+    labels='["gt:rig"]'; description='Rig identity'
+    case "$id" in
+      *-witness) labels='["gt:agent"]'; description='role_type: witness\nrig: demo\nagent_state: idle' ;;
+      *-refinery) labels='["gt:agent"]'; description='role_type: refinery\nrig: demo\nagent_state: idle' ;;
+    esac
+    printf '{"id":"%s","title":"%s","description":"%s","issue_type":"task","status":"open","labels":%s}' "$id" "$title" "$description" "$labels"
     ;;
   slot)
     # Accept slot commands
@@ -1020,8 +1034,9 @@ esac
 	}
 	createdAgents = strings.Split(strings.TrimSpace(string(data)), "\n")
 
-	// Should create witness and refinery for the rig
+	// Should create the rig plus Witness and Refinery in the rig database.
 	expectedAgents := map[string]bool{
+		"gt-rig-demo":      false,
 		"gt-demo-witness":  false,
 		"gt-demo-refinery": false,
 	}
@@ -1815,26 +1830,48 @@ func createTestGitRepoForRig(t *testing.T, name string) string {
 func fakeBDForAddRig(t *testing.T) {
 	t.Helper()
 	script := `#!/bin/bash
-# no-op bd shim for AddRig tests
+set -e
 cmd="$1"
 [[ "$cmd" == "--allow-stale" ]] && { shift; cmd="$1"; }
 shift
 case "$cmd" in
   init|config|slot) exit 0 ;;
-  show) echo "[]" ;;
+  show)
+    id="$1"
+    if [[ -f "$FAKE_BD_STATE/$id" ]]; then
+      printf '['; cat "$FAKE_BD_STATE/$id"; printf ']\n'
+    else
+      echo "[]"
+    fi
+    ;;
   create)
     id=""; title=""
     for arg in "$@"; do
       case "$arg" in --id=*) id="${arg#--id=}" ;; --title=*) title="${arg#--title=}" ;; esac
     done
-    printf '{"id":"%s","title":"%s","description":"","issue_type":"agent"}' "$id" "$title"
+    [[ ! -f "$FAKE_BD_STATE/$id" ]] || exit 1
+    labels='["gt:rig"]'; description='Rig identity'
+    case "$id" in
+      *-witness)
+        role=witness; rig="${id#*-}"; rig="${rig%-witness}"
+        labels='["gt:agent"]'; description="role_type: witness\\nrig: $rig\\nagent_state: idle"
+        ;;
+      *-refinery)
+        role=refinery; rig="${id#*-}"; rig="${rig%-refinery}"
+        labels='["gt:agent"]'; description="role_type: refinery\\nrig: $rig\\nagent_state: idle"
+        ;;
+    esac
+    printf '{"id":"%s","title":"%s","description":"%s","issue_type":"task","status":"open","labels":%s}' "$id" "$title" "$description" "$labels" | tee "$FAKE_BD_STATE/$id"
     ;;
+  update|reopen) exit 0 ;;
   *) exit 0 ;;
 esac
 `
 	windowsScript := "@echo off\r\nif \"%1\"==\"init\" exit /b 0\r\nif \"%1\"==\"config\" exit /b 0\r\nif \"%1\"==\"slot\" exit /b 0\r\nif \"%1\"==\"--allow-stale\" shift\r\nif \"%1\"==\"show\" echo [] & exit /b 0\r\nif \"%1\"==\"create\" echo {\"id\":\"x\",\"title\":\"x\"} & exit /b 0\r\nexit /b 0\r\n"
 	binDir := writeFakeBD(t, script, windowsScript)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stateDir := t.TempDir()
+	t.Setenv("FAKE_BD_STATE", stateDir)
 }
 
 func TestAddRig_UpstreamURL(t *testing.T) {
@@ -2114,12 +2151,12 @@ func TestBeadsConfigHasSyncRemote_MissingFile(t *testing.T) {
 	}
 }
 
-func TestAddRig_TrackedBeadsWithSyncRemote_PassesReinitFlags(t *testing.T) {
+func TestAddRig_TrackedBeadsWithSyncRemote_FailsClosedOnBootstrapError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based bd shim not reliable on Windows CI")
 	}
 
-	// Fake bd that succeeds on all subcommands and logs bd init args.
+	// Fake bd that logs the bootstrap arguments and rejects the remote clone.
 	cmdLog := filepath.Join(t.TempDir(), "bd-cmds.log")
 	script := `#!/usr/bin/env bash
 cmd="$1"
@@ -2127,6 +2164,8 @@ cmd="$1"
 shift
 if [[ "$cmd" == "init" ]]; then
   echo "init $*" >> "$BD_CMD_LOG"
+  echo "remote clone failed" >&2
+  exit 42
 fi
 case "$cmd" in
   init|config|migrate) exit 0 ;;
@@ -2171,14 +2210,15 @@ esac
 	root, rigsConfig := setupTestTown(t)
 	manager := NewManager(root, rigsConfig, git.NewGit(root))
 
-	// AddRig may fail after the bd init step (e.g. Dolt not running); that's fine.
-	// We only care that bd init was called with the right flags.
-	_, _ = manager.AddRig(AddRigOptions{
+	_, addErr := manager.AddRig(AddRigOptions{
 		Name:          "testrip",
 		GitURL:        repoDir,
 		BeadsPrefix:   "gt",
 		SkipDoltCheck: true,
 	})
+	if addErr == nil || !strings.Contains(addErr.Error(), "bootstrapping Beads database from configured remote") {
+		t.Fatalf("AddRig error = %v, want fail-closed remote bootstrap error", addErr)
+	}
 
 	logData, err := os.ReadFile(cmdLog)
 	if err != nil {
@@ -2186,14 +2226,13 @@ esac
 	}
 	cmds := string(logData)
 
-	if !strings.Contains(cmds, "--reinit-local") {
-		t.Errorf("bd init missing --reinit-local; full log:\n%s", cmds)
+	if !strings.Contains(cmds, "--remote git+https://github.com/steveyegge/gastown.git") {
+		t.Errorf("bd init missing configured remote bootstrap; full log:\n%s", cmds)
 	}
-	if !strings.Contains(cmds, "--discard-remote") {
-		t.Errorf("bd init missing --discard-remote; full log:\n%s", cmds)
-	}
-	if !strings.Contains(cmds, "--destroy-token=DESTROY-gt") {
-		t.Errorf("bd init missing --destroy-token=DESTROY-gt; full log:\n%s", cmds)
+	for _, destructive := range []string{"--reinit-local", "--discard-remote", "--destroy-token"} {
+		if strings.Contains(cmds, destructive) {
+			t.Errorf("bd init must not use destructive flag %s; full log:\n%s", destructive, cmds)
+		}
 	}
 }
 

@@ -377,6 +377,11 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 
 	townSettings := config.NewTownSettings()
 	townSettings.DefaultAgent = "claude"
+	townSettings.Agents["next-agent"] = &config.RuntimeConfig{
+		Provider: "generic",
+		Command:  "next-runtime",
+		Args:     []string{"--safe"},
+	}
 	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
@@ -429,6 +434,28 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 		}
 		if strings.Contains(cmd, "--continue") {
 			t.Errorf("expected no --continue flag when ContinueSession is false, got: %q", cmd)
+		}
+	})
+
+	t.Run("agent override uses durable-state startup prompt", func(t *testing.T) {
+		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+			AgentOverride: "next-agent",
+			StartupPrompt: "Provider failover: run gt prime --hook and continue from durable state.",
+		})
+		if err != nil {
+			t.Fatalf("buildRestartCommandWithOpts: %v", err)
+		}
+		if !strings.Contains(cmd, "next-runtime --safe") {
+			t.Errorf("expected override runtime in restart command, got: %q", cmd)
+		}
+		if !strings.Contains(cmd, "GT_AGENT=next-agent") {
+			t.Errorf("expected GT_AGENT override in restart environment, got: %q", cmd)
+		}
+		if !strings.Contains(cmd, "Provider failover") {
+			t.Errorf("expected durable-state startup prompt, got: %q", cmd)
+		}
+		if strings.Contains(cmd, "--continue") {
+			t.Errorf("cross-provider override must not continue provider-specific transcript: %q", cmd)
 		}
 	})
 }

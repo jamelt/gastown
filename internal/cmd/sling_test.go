@@ -159,7 +159,7 @@ func assertNoRawReviewMetadata(t *testing.T, desc string) {
 		t.Fatalf("stale raw review metadata remains in description:\n%s", desc)
 	}
 	fields := beads.ParseAttachmentFields(&beads.Issue{Description: desc})
-	if fields != nil && (fields.NoMerge || fields.ReviewOnly) {
+	if fields != nil && (fields.NoMerge || fields.ReviewOnly || fields.DispatchContext != "") {
 		t.Fatalf("parsed stale raw review metadata from description: %+v", fields)
 	}
 }
@@ -1950,7 +1950,9 @@ func TestExecuteSlingRawReviewOnlySuccessKeepsMetadata(t *testing.T) {
 	}
 	hookBeadWithRetryWithTownRootFn = func(beadID, targetAgent, hookDir, townRoot string) error {
 		assertHasRawReviewMetadata(t, readMutableBDDescription(t, descPath))
-		return nil
+		return BdCmd("update", beadID, "--status=hooked", "--assignee="+targetAgent).
+			Dir(resolveBeadDirFromTownRoot(townRoot, beadID)).
+			StripBeadsDir().Run()
 	}
 
 	result, err := executeSling(SlingParams{
@@ -4770,6 +4772,81 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 				t.Fatalf("expected error containing %q, got: %v", tt.wantError, err)
 			}
 		})
+	}
+}
+
+func TestSlingExplicitPolecatInDeferredModePreservesReservation(t *testing.T) {
+	townRoot, _, _ := setupMutableBDRawSlingTest(t, "Original description.")
+	settingsDir := filepath.Dir(config.TownSettingsPath(townRoot))
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	if err := os.WriteFile(config.TownSettingsPath(townRoot), []byte(`{"version":1,"scheduler":{"max_polecats":2,"batch_size":1}}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	prevResolve := resolveTargetAgentFn
+	prevVerifyWorktree := verifyDeferredTargetWorktreeFn
+	prevBranch := deferredTargetBranchFn
+	prevAssignment := deferredTargetAssignmentFn
+	prevSchedule := scheduleBeadForSling
+	prevResumeBranch := slingResumeBranch
+	prevResumePR := slingResumePR
+	prevBaseBranch := slingBaseBranch
+	prevForce := slingForce
+	prevOnTarget := slingOnTarget
+	t.Cleanup(func() {
+		resolveTargetAgentFn = prevResolve
+		verifyDeferredTargetWorktreeFn = prevVerifyWorktree
+		deferredTargetBranchFn = prevBranch
+		deferredTargetAssignmentFn = prevAssignment
+		scheduleBeadForSling = prevSchedule
+		slingResumeBranch = prevResumeBranch
+		slingResumePR = prevResumePR
+		slingBaseBranch = prevBaseBranch
+		slingForce = prevForce
+		slingOnTarget = prevOnTarget
+	})
+
+	workDir := filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown")
+	resolveTargetAgentFn = func(target string) (string, string, string, error) {
+		if target != "gastown/toast" {
+			t.Fatalf("resolved target = %q, want gastown/toast", target)
+		}
+		return "gastown/polecats/toast", "%42", workDir, nil
+	}
+	verifyDeferredTargetWorktreeFn = func(got string) error {
+		if got != workDir {
+			t.Fatalf("verified worktree = %q, want %q", got, workDir)
+		}
+		return nil
+	}
+	deferredTargetBranchFn = func(string) (string, error) { return "preserved-branch", nil }
+	deferredTargetAssignmentFn = func(*beads.Beads, string) (*beads.Issue, error) { return nil, nil }
+
+	var gotRig string
+	var gotOpts ScheduleOptions
+	scheduleBeadForSling = func(beadID, rigName string, opts ScheduleOptions) error {
+		if beadID != "gt-rawrollback" {
+			t.Fatalf("scheduled bead = %q, want gt-rawrollback", beadID)
+		}
+		gotRig, gotOpts = rigName, opts
+		return nil
+	}
+	slingResumeBranch = "preserved-branch"
+	slingResumePR = 0
+	slingBaseBranch = ""
+	slingForce = true
+	slingOnTarget = ""
+
+	if err := runSling(nil, []string{"gt-rawrollback", "gastown/toast"}); err != nil {
+		t.Fatalf("runSling explicit deferred polecat: %v", err)
+	}
+	if gotRig != "gastown" {
+		t.Fatalf("scheduled rig = %q, want gastown", gotRig)
+	}
+	if gotOpts.TargetAgent != "gastown/polecats/toast" || gotOpts.ResumeBranch != "preserved-branch" {
+		t.Fatalf("scheduled options = %#v, want exact target and preserved branch", gotOpts)
 	}
 }
 

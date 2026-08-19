@@ -481,6 +481,19 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, workDir, command, envVars); err != nil {
 		return fmt.Errorf("creating session: %w", err)
 	}
+	startupComplete := false
+	defer func() {
+		if startupComplete {
+			return
+		}
+		_ = m.tmux.KillSessionWithProcesses(sessionID)
+		RemoveSessionHeartbeat(townRoot, sessionID)
+	}()
+
+	// Replace any inherited activity state before the daemon can inspect this
+	// newly-created session. Startup below can wait on agent readiness for long
+	// enough that an old exiting heartbeat would otherwise be reaped.
+	TouchSessionHeartbeat(townRoot, sessionID)
 
 	// Record agent's pane_id for ZFC-compliant liveness checks (gt-qmsx).
 	// Declared pane identity replaces process-tree inference in IsRuntimeRunning
@@ -600,10 +613,6 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Track PID for defense-in-depth orphan cleanup (non-fatal)
 	_ = session.TrackSessionPID(townRoot, sessionID, m.tmux)
 
-	// Touch initial heartbeat so liveness detection works from the start (gt-qjtq).
-	// Subsequent touches happen on every gt command via persistentPreRun.
-	TouchSessionHeartbeat(townRoot, sessionID)
-
 	// Stream polecat's Claude Code JSONL conversation log to VictoriaLogs (opt-in).
 	if os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {
 		if err := session.ActivateAgentLogging(sessionID, workDir, runID); err != nil {
@@ -616,6 +625,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	session.RecordAgentInstantiateFromDir(context.Background(), runID, runtimeConfig.ResolvedAgent,
 		"polecat", polecat, sessionID, m.rig.Name, townRoot, opts.Issue, workDir)
 
+	startupComplete = true
 	return nil
 }
 

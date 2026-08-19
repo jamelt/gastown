@@ -121,6 +121,22 @@ func TestGetGitStateTreatsPushedSourceBranchAsClean(t *testing.T) {
 	}
 }
 
+func TestGetGitStateTreatsDetachedHEADAsUnsafe(t *testing.T) {
+	repo := setupGitStateRemoteRepo(t)
+	runGitCmd(t, repo, "switch", "--detach", "HEAD")
+
+	state, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if !state.DetachedHead {
+		t.Fatal("DetachedHead = false, want true")
+	}
+	if state.Clean {
+		t.Fatalf("detached HEAD must not be safe for destructive cleanup: %+v", state)
+	}
+}
+
 func TestGetGitStateIgnoresOpenCodeRuntimeArtifacts(t *testing.T) {
 	repo := setupGitStateRemoteRepo(t)
 	runGitCmd(t, repo, "switch", "-c", "polecat/opencode-runtime")
