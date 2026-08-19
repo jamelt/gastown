@@ -309,6 +309,27 @@ Town state rather than trying to carry a provider-specific transcript across
 runtimes. The opt-in `quota_dog` runs same-provider account rotation first and
 then provider failover for sessions that remain blocked.
 
+**Scheduling and worst-case latency.** `quota_dog` runs on its own ticker and
+goroutine, independent of the daemon's other patrol dogs and the recovery
+heartbeat — a slow or hung sibling (the heartbeat has no per-step timeout and
+can legitimately run for minutes) cannot delay it (gt-yycw). Each cycle runs
+two sequential actions, `rotate` then `failover`, each capped at a fixed
+2-minute internal timeout, so a single cycle takes at most 4 minutes; under
+normal conditions (nothing rate-limited) a cycle completes in sub-second to a
+few seconds. Worst-case latency from a session becoming rate-limited to
+`quota_dog` acting on it is therefore bounded: at most one in-flight cycle
+finishing (≤4m) plus one full subsequent cycle (≤4m) under sustained load —
+roughly 8m in the pathological worst case, independent of the configured
+interval — or one configured interval plus a fast cycle (interval + a few
+seconds) under normal conditions. The interval defaults to 5 minutes
+(`quota_dog.interval` in `mayor/daemon.json`; this town currently configures
+1 minute), so the common-case bound is ~5m out of the box or ~1m as
+currently configured here. Previously this was unbounded — a hung daemon dog
+could stall `quota_dog` indefinitely. The daemon also logs and records a
+`gastown.daemon.dog_overrun.total` metric whenever any patrol dog's cycle
+exceeds `overrun_factor` (default 2x) times its configured interval, so
+scheduling regressions are observable regardless of which dog is slow.
+
 ---
 
 ## Tier 2: Hooks Integration
