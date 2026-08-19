@@ -61,9 +61,18 @@ while IFS=$'\t' read -r _ RPATH; do
   DBPATH="$DBPATH/.beads"
   [ -d "$DBPATH" ] || continue
 
+  # Space-joined for the case/glob loop below, comma-joined for the
+  # single-line report so a multi-prefix path (e.g. "." -> hq-, hq-cv-)
+  # never breaks a line-oriented reading of the output.
   ALLOWED=$(jq -r --arg p "$RPATH" 'select(.path==$p) | .prefix' "$ROUTES")
+  ALLOWED_DISPLAY=$(echo "$ALLOWED" | tr '\n' ',' | sed 's/,$//')
 
-  IDS=$(bd list --all --db "$DBPATH" --json 2>/dev/null | jq -r '.[].id')
+  RAW=$(bd list --all --db "$DBPATH" --json 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "ERROR: bd list failed for $DBPATH (excluded from counts, not zero): $RAW"
+    continue
+  fi
+  IDS=$(echo "$RAW" | jq -r '.[].id')
   BAD=$(echo "$IDS" | while read -r id; do
     ok=0
     for pfx in $ALLOWED; do
@@ -74,13 +83,16 @@ while IFS=$'\t' read -r _ RPATH; do
 
   if [ -n "$BAD" ]; then
     COUNT=$(echo "$BAD" | grep -c .)
-    echo "MISMATCH: $DBPATH expects [$ALLOWED] — $COUNT offending, sample: $(echo "$BAD" | head -5 | tr '\n' ' ')"
+    echo "MISMATCH: $DBPATH expects [$ALLOWED_DISPLAY] — $COUNT offending, sample: $(echo "$BAD" | head -5 | tr '\n' ' ')"
   fi
 done
 ```
 
 Record the full list of `(db, count, sample-ids)` mismatches for the report
-in Step 5. Do not move any of them.
+in Step 5. Do not move any of them. If any database errored instead of
+returning zero, say so explicitly in the report — an error is not a clean
+result and must never be folded into a "0 found" count (see Step 5's
+no-silent-caps note).
 
 ## Step 2: Semantic misrouting (judgment)
 
@@ -99,11 +111,18 @@ if gt-xmd3 has landed and it exists there — check first):
 | `bd` (beads) CLI itself | *(no local rig — upstream steveyegge/beads; cannot be dispatched from this town; say so explicitly)* | n/a |
 
 ```bash
-for rig_name in $(gt rig list --json | jq -r '.[].name'); do
+# Include the town root ("." -> hq-*) alongside every registered rig — the
+# routing table above explicitly covers hq- beads, so the sample must too.
+for rig_name in $(gt rig list --json | jq -r '.[].name') .; do
   DBPATH="$GT_ROOT/$rig_name/mayor/rig/.beads"
+  [ "$rig_name" = "." ] && DBPATH="$GT_ROOT/.beads"
   [ -d "$DBPATH" ] || continue
-  bd list --all --status=open --db "$DBPATH" --json 2>/dev/null \
-    | jq -c 'sort_by(.updated_at) | reverse | .[:30] | .[]'
+  RAW=$(bd list --all --status=open --db "$DBPATH" --json 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "ERROR: bd list failed for $DBPATH (excluded, not zero): $RAW"
+    continue
+  fi
+  echo "$RAW" | jq -c 'sort_by(.updated_at) | reverse | .[:30] | .[]'
 done
 ```
 
@@ -132,24 +151,45 @@ report so the reader knows the coverage, per "no silent caps."
 
 ```bash
 # Dogs can sling; polecats cannot. This step must run as a dog.
-gt sling <bead-id> --dry-run
-# A "bead not found" / resolution error despite the bead showing up in
-# `bd show <bead-id>` is the undispatchable signature.
+# CANDIDATES = every Step-1 mismatch id, plus ~15 ids drawn at random from
+# the Step-2 open-bead listing (or a fresh `bd list --all --status=open
+# --db <path> --json` per db if Step 2's sample is exhausted).
+SAMPLED=0
+UNDISPATCHABLE=""
+for bead_id in $CANDIDATES; do
+  SAMPLED=$((SAMPLED + 1))
+  OUT=$(gt sling "$bead_id" --dry-run 2>&1)
+  if [ $? -ne 0 ] || echo "$OUT" | grep -qi "not found\|no issue\|no matching"; then
+    UNDISPATCHABLE="$UNDISPATCHABLE $bead_id"
+  fi
+done
+# Record $SAMPLED and $UNDISPATCHABLE for the report; also record the total
+# open-bead count across all dbs so Step 5 can state <sampled>/<open-total>.
 ```
+
+A "bead not found" / resolution error despite the bead showing up in
+`bd show <bead-id>` is the undispatchable signature.
 
 ## Step 4: Stale-environment beads
 
 Flag open beads referencing paths or diagnostics that no longer exist on
-this host (e.g. a defunct town root like `/home/coder/gt`). ~194 such beads
-were closed on 2026-08-18 (hq-t9wlm); the class regrows over time.
+this host (e.g. a defunct town root like `/home/coder/gt`). 95 such beads
+were closed on 2026-08-18 (hq-t9wlm — read it for the exact methodology);
+the class regrows over time.
 
 ```bash
 for rig_name in $(gt rig list --json | jq -r '.[].name') .; do
   DBPATH="$GT_ROOT/$rig_name/mayor/rig/.beads"
   [ "$rig_name" = "." ] && DBPATH="$GT_ROOT/.beads"
   [ -d "$DBPATH" ] || continue
-  bd list --all --status=open --db "$DBPATH" --json 2>/dev/null \
-    | jq -r '.[] | select(.description // "" | test("/home/[a-zA-Z0-9_.-]+")) | .id'
+  RAW=$(bd list --all --status=open --db "$DBPATH" --json 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "ERROR: bd list failed for $DBPATH (excluded, not zero): $RAW"
+    continue
+  fi
+  # Check title AND description; absolute-path roots aren't limited to
+  # /home (e.g. /Users/..., /root/..., /data/...).
+  echo "$RAW" | jq -r '.[] | select(((.title // "") + " " + (.description // "")) | test("/(home|Users|root|data)/[a-zA-Z0-9_./-]+")) | .id'
 done
 ```
 
