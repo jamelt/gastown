@@ -18,6 +18,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
+	"github.com/steveyegge/gastown/internal/testguard"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -822,6 +823,17 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
 	// (e.g., after daemon is killed during shutdown). Only if bd supports it.
 	beadsDir := b.getResolvedBeadsDir()
+
+	// Fail closed before a test binary can mutate a non-isolated (i.e. live)
+	// beads directory. b.isolated instances (NewIsolatedWithPort etc.) are
+	// explicitly trusted; everything else must resolve to a recognized
+	// isolated sandbox. See gt-8ik.
+	if !b.isolated && !ArgsAreReadOnly(args) {
+		if err := testguard.RequireIsolated(fmt.Sprintf("bd %s", strings.Join(args, " ")), beadsDir); err != nil {
+			return nil, err
+		}
+	}
+
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
 

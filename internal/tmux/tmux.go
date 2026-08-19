@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/telemetry"
+	"github.com/steveyegge/gastown/internal/testguard"
 )
 
 // sessionNudgeLocks serializes nudges to the same session.
@@ -301,6 +302,15 @@ func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 }
 
 func (t *Tmux) createNewSession(name, workDir string, env map[string]string) error {
+	// Fail closed before a test binary can create a session on a socket that
+	// isn't a recognized isolated-test socket (see TestMain in this repo's
+	// packages for the "gt-test-" naming convention). This stops a stale
+	// worktree's test run from creating real sessions on the live town
+	// socket it inherited. See gt-8ik.
+	if err := testguard.RequireIsolatedSocket("tmux new-session "+name, t.socketName); err != nil {
+		return err
+	}
+
 	if err := t.ensureNewSessionSocketSafe(); err != nil {
 		return err
 	}

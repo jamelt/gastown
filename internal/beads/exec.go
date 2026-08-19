@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/testguard"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -38,9 +39,25 @@ func CommandContext(ctx context.Context, dir, fallbackBeadsDir string, mode Subp
 
 // ConfigureCommand applies the shared bd subprocess policy to an existing
 // command. This is for callers that need a custom bd path.
+//
+// Mutation-mode commands are fail-closed guarded: a test binary whose target
+// beads directory doesn't resolve to a recognized isolated sandbox never
+// actually runs bd — see gt-8ik.
 func ConfigureCommand(cmd *exec.Cmd, dir, fallbackBeadsDir string, mode SubprocessEnvMode) {
 	cmd.Dir = dir
 	cmd.Env = EnvForSubprocessMode(os.Environ(), fallbackBeadsDir, mode)
+
+	if mode == MutationRouting || mode == MutationPinned {
+		guardPath := fallbackBeadsDir
+		if guardPath == "" {
+			guardPath = dir
+		}
+		if err := testguard.RequireIsolated("bd subprocess mutation", guardPath); err != nil {
+			testguard.Block(cmd, err)
+			return
+		}
+	}
+
 	util.SetDetachedProcessGroup(cmd)
 }
 
