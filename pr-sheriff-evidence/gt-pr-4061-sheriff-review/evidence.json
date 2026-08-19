@@ -1,0 +1,102 @@
+{
+  "bead": "gt-pr-4061-sheriff-review",
+  "subject": "gastownhall/gastown PR #4061",
+  "pr_url": "https://github.com/gastownhall/gastown/pull/4061",
+  "run_at": "2026-08-19T11:30:00Z",
+  "mode": "confirmed_prior_disposition",
+  "no_refinery_mq_route_used_for_pr4061_disposition": true,
+  "sheriff_code_changed": false,
+  "verdict": "confirmed_resolved_no_action",
+  "merge_path_allowed": false,
+  "reason_merge_path_not_applicable": "PR #4061 already closed as superseded; replacement PR #4447 already merged. No merge action available or needed on #4061 itself.",
+  "current_head_verified": "2f6f14071afb49b71c0a41e03545b14158e7012c",
+  "upstream_main_at_review": "649b832b7672bc7a2dbef26f5983aba6198b819b",
+  "research_legs": [
+    {"id": "R01", "finding": "PR #4061 is CLOSED (not merged), superseded by replacement PR #4447 merged at 2f6f14071afb49b71c0a41e03545b14158e7012c, per Bella-Giraffety's 2026-07-09 close comment."},
+    {"id": "R02", "finding": "#4061's original scope: 2-file, 133/-5 line change swapping IsAncestor for a single git-cherry +-line count in internal/cmd/polecat.go, plus 3 new tests."},
+    {"id": "R03", "finding": "#4061's own CI was fully green (Test/Lint/Integration/Windows) at the time it was last evaluated (2026-05-19) — unlike the #4067 precedent, CI was not the blocker here."},
+    {"id": "R04", "finding": "An inline PR-sheriff workflow comment (2026-06-09) already recorded 15 research legs + 5 pre-implementation reviews + 5 post-implementation reviews for a ported implementation, flagging that the PR's git-cherry approach only proves single-commit equivalence and needed exact push-remote-hash resolution and multi-commit-squash coverage."},
+    {"id": "R05", "finding": "bd search '4061' surfaces 5 issues: gt-sc-c69da8e9ed (sling-context, closed), gt-oae2 (fixup, closed, produced #4447), gt-qdc9 (initial review, closed, defer_human_review), gt-pr-4061-sheriff-review (this bead), gt-pr-sheriff-4061 (dispatch, closed)."},
+    {"id": "R06", "finding": "gt-qdc9 (initial review, 2026-07-06): 15/15 research legs, 5/5 pre-decision reviews approved, verdict defer_human_review / merge_path_allowed=false; identified the same multi-commit-squash and exact-hash gaps as R04 and filed follow-up hq-quuic for an approved fixup rather than merging or requesting contributor changes."},
+    {"id": "R07", "finding": "gt-oae2 (fixup, closed 2026-07-09): produced replacement PR #4447 at head 0bcc9c507ba243d5c697c5cb9634e2c614a45643, with its own persisted 15/15 research legs, 5/5 pre-implementation reviews (revised safety proposal), 5/5 post-implementation reviews, checker PASS (12 pass / 2 not_applicable / 0 fail), and a recorded required_followup to close #4061 as superseded — which the maintainer then did."},
+    {"id": "R08", "finding": "git merge-base --is-ancestor 2f6f14071afb49b71c0a41e03545b14158e7012c upstream/main exits 0 — the merge commit is a real, current ancestor of upstream/main (649b832b7), not just an API-reported field."},
+    {"id": "R09", "finding": "Merge commit 2f6f14071 carries Co-authored-by trailers for Emmanuel Sciara (original #4061 author) and Claude Opus 4.6, plus body text referencing PR #4061 and its replacement #4447 — attribution is preserved at the git level, matching the close-comment claim."},
+    {"id": "R10", "finding": "Content check: PushRemoteRefTargetStatus (internal/git/git.go) fetches the exact candidate ref via g.pushTarget(remote), verifies the fetched hash equals the listed hash (fails closed on mismatch), then classifies via a 3-tier fallback: IsAncestor -> mergeTreeNoopBetweenRefs (whole-tree no-op merge proof) -> Cherry-based CountCherryUnmergedCommits==0. This subsumes the original PR's single-tier git-cherry idea and adds the multi-commit-squash-safe merge-tree proof gt-qdc9's review demanded."},
+    {"id": "R11", "finding": "Wiring check: pruneRemotePolecatBranches (internal/cmd/polecat.go) lists push-remote refs with hashes via ListPushRemoteRefsWithHashes (not stale local tracking refs), calls PushRemoteRefTargetStatus per branch, and deletes only if status.Preserved via DeleteRemoteBranchIfAt(remote, branch, ref.Hash) — force-with-lease pinned to the exact verified hash. The only remaining raw IsAncestor call in git.go (line 3257) is in a distinct local-branch-prune code path, out of #4061's --remote scope."},
+    {"id": "R12", "finding": "Regression tests present on upstream/main: TestPushRemoteRefTargetStatusPreservesRebasedRemoteBranch, TestPushRemoteRefTargetStatusPreservesMultiCommitSquashRemoteBranch (the exact multi-commit gap flagged in R04/R06), TestPushRemoteRefTargetStatusKeepsUnmergedSplitPushRemoteBranch (negative case), TestPruneRemotePolecatBranchesDryRunIncludesPatchEquivalentBranch, TestRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch, TestPruneRemotePolecatBranchesUsesUpstreamBaseForOriginFork."},
+    {"id": "R13", "finding": "All 6 regression tests independently run and PASS against a freshly checked-out, detached upstream/main worktree (649b832b7) via CGO_ENABLED=0 go test; go build ./cmd/gt also succeeds on the same checkout."},
+    {"id": "R14", "finding": "PR #4447's own CI (Test, Lint, Integration Tests, Windows Smoke Test, plus housekeeping gates) was fully green at merge time (2026-07-09)."},
+    {"id": "R15", "finding": "Related-issue search: #3779 (the originating issue, 'Closes #3779' in #4061's body) is still OPEN because #4061 itself never merged so the auto-close keyword never fired, and #4447's body does not reference #3779 by number either. #4197 (filed 2026-06-07, independently describing the identical rebase-merge-missed-by-ancestry bug) is also OPEN and is a duplicate of #3779, fixed by the same #4447 change. #4621 ('gt orphans' ahead-count display) and #3868 (mq post-merge silent deletion failure, already CLOSED) are topically adjacent but confirmed distinct subsystems/commands; no linkage or action owed for those two."}
+  ],
+  "pre_implementation_reviews": [
+    {"id": "P01", "lens": "cleanup-first/policy", "verdict": "approve", "note": "No new code to write in this pass; confirming a prior disposition is itself the cleanup-first outcome — no bandaid, no redundant replacement PR, no re-litigating already-merged work."},
+    {"id": "P02", "lens": "correctness", "verdict": "approve", "note": "Do not trust the close comment or prior beads' own self-reported evidence alone; require independent git-level ancestry, content/wiring inspection, and a live test run against a clean upstream/main checkout before confirming."},
+    {"id": "P03", "lens": "scope/authority", "verdict": "approve", "note": "Sheriff has authority to confirm/re-verify a prior maintainer disposition and to recommend (not perform) GitHub issue closures; no refinery/MQ route needed for the #4061 disposition itself since no new code fixup is required."},
+    {"id": "P04", "lens": "technical-defect disposition", "verdict": "approve", "note": "The multi-commit-squash gap identified in gt-qdc9's initial review is the load-bearing correctness question — verify it is actually covered by a dedicated test on current upstream/main, not just claimed in a bead comment."},
+    {"id": "P05", "lens": "evidence-completeness / schema fit", "verdict": "approve-with-changes", "note": "Extend the related-issue search beyond the PR's own 'Closes #3779' reference — search independently for duplicate/adjacent open issues describing the same symptom, since the originating issue's auto-close keyword did not fire. Applied: found and dispositioned #4197 (duplicate) in addition to #3779."}
+  ],
+  "post_implementation_reviews": "not_applicable — sheriff_code_changed is false; this pass made no code change, replacement PR, or cherry-pick. The 5-review tier is conditional on Sheriff-authored code changes per this bead's own acceptance criteria.",
+  "checker_reference": "checker.txt (this directory) — raw gh/git/bd/go command output backing R01-R15",
+  "related_github_issues_disposition": [
+    {
+      "number": 3779,
+      "state": "open",
+      "relation": "originating issue for PR #4061 ('Closes #3779' in PR body, never auto-closed because #4061 was closed not merged)",
+      "recommended_disposition": "close as fixed by PR #4447 (merge commit 2f6f14071afb49b71c0a41e03545b14158e7012c, confirmed present on upstream/main)",
+      "sheriff_action_taken": "none — recommendation only, no GitHub-visible action taken in this pass"
+    },
+    {
+      "number": 4197,
+      "state": "open",
+      "relation": "independent duplicate report (filed 2026-06-07) of the same ancestry-vs-rebase-merge classification bug as #3779",
+      "recommended_disposition": "close as fixed by PR #4447, duplicate of #3779",
+      "sheriff_action_taken": "none — recommendation only, no GitHub-visible action taken in this pass"
+    },
+    {
+      "number": 4621,
+      "state": "open",
+      "relation": "topically adjacent (polecat-branch-lifecycle correctness) but distinct subsystem: 'gt orphans' ahead-count display, not 'gt polecat prune --remote' merge classification",
+      "recommended_disposition": "no linkage; no action",
+      "sheriff_action_taken": "none"
+    },
+    {
+      "number": 3868,
+      "state": "closed",
+      "relation": "topically adjacent (mq post-merge remote branch deletion) but distinct root cause: silent deletion failure, not a missed-classification bug",
+      "recommended_disposition": "already closed independently; no linkage",
+      "sheriff_action_taken": "none"
+    }
+  ],
+  "prior_attempt_disposition": [
+    {"bead": "gt-qdc9", "assignee": "gastown/polecats/vault", "outcome": "correctly identified #4061 was not safe to merge as-is (multi-commit-squash gap, stale local ref reliance); deferred to human/fixup rather than merging or requesting contributor changes; filed follow-up hq-quuic."},
+    {"bead": "gt-oae2", "assignee": "gastown/polecats/brahmin", "outcome": "built replacement PR #4447 converging classification through a 3-tier ancestor/merge-tree-noop/cherry helper, fixing the multi-commit-squash gap; merged with full green CI; preserved attribution; closed #4061 as superseded per its own required_followup."}
+  ],
+  "verification_run": {
+    "merge_ancestry_check": "git merge-base --is-ancestor 2f6f14071afb49b71c0a41e03545b14158e7012c upstream/main -> exit 0",
+    "tests_run": [
+      "TestPushRemoteRefTargetStatusPreservesRebasedRemoteBranch",
+      "TestPushRemoteRefTargetStatusPreservesMultiCommitSquashRemoteBranch",
+      "TestPushRemoteRefTargetStatusKeepsUnmergedSplitPushRemoteBranch",
+      "TestPruneRemotePolecatBranchesDryRunIncludesPatchEquivalentBranch",
+      "TestRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch",
+      "TestPruneRemotePolecatBranchesUsesUpstreamBaseForOriginFork"
+    ],
+    "tests_result": "6/6 PASS, run against fresh detached upstream/main worktree (649b832b7)",
+    "build_result": "go build ./cmd/gt -> exit 0 on same checkout"
+  },
+  "implementation": {
+    "code_changed_by_sheriff": false,
+    "replacement_pr_authored_by_sheriff": false,
+    "note": "PR #4061 was already fully resolved by a prior Sheriff pass (gt-oae2) before this review bead was dispatched. This pass performs independent re-verification only."
+  },
+  "branch_hygiene_gate": {
+    "applicable": false,
+    "reason": "No new replacement branch/PR authored by Sheriff in this pass."
+  },
+  "final_verdict": "confirmed_resolved_no_action",
+  "required_actions": [
+    "None for PR #4061 — fully resolved.",
+    "Recommend the overseer close GitHub issue #3779 as fixed by PR #4447.",
+    "Recommend the overseer close GitHub issue #4197 as fixed by PR #4447 (duplicate of #3779)."
+  ]
+}
