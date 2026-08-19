@@ -587,9 +587,10 @@ func cleanupStaleContexts(townRoot string) error {
 
 // beadStatusInfo holds batch-fetched bead status, title, and labels.
 type beadStatusInfo struct {
-	Status string
-	Title  string
-	Labels []string
+	Status       string
+	Title        string
+	Labels       []string
+	Dependencies []beads.IssueDep
 }
 
 func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
@@ -597,9 +598,10 @@ func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
 		return beadStatusInfo{}
 	}
 	return beadStatusInfo{
-		Status: info.Status,
-		Title:  info.Title,
-		Labels: info.Labels,
+		Status:       info.Status,
+		Title:        info.Title,
+		Labels:       info.Labels,
+		Dependencies: info.Dependencies,
 	}
 }
 
@@ -627,19 +629,21 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			continue
 		}
 		var items []struct {
-			ID     string   `json:"id"`
-			Status string   `json:"status"`
-			Title  string   `json:"title"`
-			Labels []string `json:"labels"`
+			ID           string           `json:"id"`
+			Status       string           `json:"status"`
+			Title        string           `json:"title"`
+			Labels       []string         `json:"labels"`
+			Dependencies []beads.IssueDep `json:"dependencies"`
 		}
 		if err := json.Unmarshal(out, &items); err != nil {
 			continue
 		}
 		for _, item := range items {
 			result[item.ID] = beadStatusInfo{
-				Status: item.Status,
-				Title:  item.Title,
-				Labels: item.Labels,
+				Status:       item.Status,
+				Title:        item.Title,
+				Labels:       item.Labels,
+				Dependencies: item.Dependencies,
 			}
 		}
 	}

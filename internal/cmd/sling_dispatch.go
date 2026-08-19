@@ -146,6 +146,15 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		return result, fmt.Errorf("bead %s is %s (work already completed)", params.BeadID, info.Status)
 	}
 
+	// Molecule-machinery guard (gt-6va3): never dispatch a formula-molecule
+	// container or one of its materialized step beads as real work. Mirrors the
+	// closed/tombstone guard above and the same check in scheduleBead, so a
+	// stale step bead is rejected even if a sling context slipped past enqueue.
+	if reason := moleculeScaffoldRejectReason(info); reason != "" {
+		result.ErrMsg = reason
+		return result, fmt.Errorf("bead %s is %s", params.BeadID, reason)
+	}
+
 	// hq-1s4w hard-prohibition guard (gt-b2qi). No override here: batch,
 	// convoy, epic sling, and queue dispatch all funnel through executeSling,
 	// and hq-1s4w requires fresh, per-dispatch approval that a bulk operation

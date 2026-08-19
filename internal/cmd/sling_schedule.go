@@ -251,6 +251,13 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
 	}
 
+	// Molecule-machinery guard (gt-6va3): never enqueue a formula-molecule
+	// container or one of its materialized step beads as real work. Mirrors the
+	// closed/tombstone guard above and the same check in executeSling.
+	if reason := moleculeScaffoldRejectReason(info); reason != "" {
+		return fmt.Errorf("bead %s is %s", beadID, reason)
+	}
+
 	// hq-1s4w hard-prohibition guard (gt-b2qi). Mirrors the closed/tombstone
 	// guard above: independently re-validated here, in runSling's direct
 	// path (sling.go), and in executeSling (sling_dispatch.go) rather than
