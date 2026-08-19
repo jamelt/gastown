@@ -36,7 +36,6 @@ func (c *OrphanedTmuxSocketsCheck) CanFix() bool {
 
 // Fix kills all orphaned tmux servers and removes their socket files.
 func (c *OrphanedTmuxSocketsCheck) Fix(ctx *CheckContext) error {
-	socketDir := tmux.SocketDir()
 	var errs []string
 
 	for _, socket := range c.sockets {

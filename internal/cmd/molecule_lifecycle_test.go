@@ -944,6 +944,10 @@ case "$cmd" in
         ;;
     esac
     ;;
+  comments)
+    # Return empty comments array (no decision cards)
+    echo '[]'
+    ;;
   close)
     echo "$1" >> "%s"
     ;;
@@ -979,6 +983,10 @@ if "%%cmd%%"=="show" (
     echo [{^"id^":^"gt-wisp-xyz^",^"title^":^"mol-polecat-work^",^"status^":^"open^",^"ephemeral^":true}]
     exit /b 0
   )
+  echo []
+  exit /b 0
+)
+if "%%cmd%%"=="comments" (
   echo []
   exit /b 0
 )

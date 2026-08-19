@@ -339,7 +339,12 @@ if [ "$1" = "create" ]; then
   echo '{"id":"gt-mr","title":"Merge: bd-source","status":"open","priority":1,"issue_type":"task","labels":["gt:merge-request"]}'
   exit 0
 fi
-if [ "$1" = "comments" ] && [ "$2" = "add" ]; then
+if [ "$1" = "comments" ]; then
+  if [ "$2" = "add" ]; then
+    exit 0
+  fi
+  # Return empty comments array (no decision cards) for "comments <id> --json"
+  echo '[]'
   exit 0
 fi
 if [ "$1" = "close" ]; then

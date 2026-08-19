@@ -375,6 +375,68 @@ func IsProtectedBead(issue *Issue) bool {
 	return false
 }
 
+// ConcreteWorkIssueRejectReason returns why issue is not a concrete source/work
+// issue suitable for completion or merge-request source tracking. Empty means OK.
+func ConcreteWorkIssueRejectReason(issue *Issue) string {
+	if issue == nil || strings.TrimSpace(issue.ID) == "" {
+		return "source-missing"
+	}
+	if issue.Ephemeral {
+		return "ephemeral"
+	}
+	issueID := strings.ToLower(strings.TrimSpace(issue.ID))
+	if strings.Contains(issueID, "-wisp-") {
+		return "wisp-id"
+	}
+	if strings.HasPrefix(issueID, "mol-") {
+		return "formula-id"
+	}
+	if InternalIssueType(issue.Type) {
+		return "internal-type:" + strings.ToLower(strings.TrimSpace(issue.Type))
+	}
+	for _, label := range issue.Labels {
+		if InternalIssueLabel(label) {
+			return "internal-label:" + strings.ToLower(strings.TrimSpace(label))
+		}
+		if ProtectedIssueLabel(label) {
+			return "protected-label:" + strings.ToLower(strings.TrimSpace(label))
+		}
+	}
+	return ""
+}
+
+// InternalIssueType reports whether an issue type represents Gas Town runtime
+// state rather than user/code work.
+func InternalIssueType(issueType string) bool {
+	switch strings.ToLower(strings.TrimSpace(issueType)) {
+	case "wisp", "message", "handoff", "merge-request", "agent", "queue", "convoy", "formula":
+		return true
+	default:
+		return false
+	}
+}
+
+// InternalIssueLabel reports whether a label marks Gas Town runtime state.
+func InternalIssueLabel(label string) bool {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "gt:wisp", "gt:message", "gt:handoff", "gt:merge-request", "gt:agent", "gt:queue", "gt:convoy", "gt:formula":
+		return true
+	default:
+		return false
+	}
+}
+
+// ProtectedIssueLabel reports whether a label marks a bead that automated
+// completion paths must not close as ordinary work.
+func ProtectedIssueLabel(label string) bool {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "gt:standing-orders", "gt:keep", "gt:role", "gt:rig":
+		return true
+	default:
+		return false
+	}
+}
+
 // IssueDep represents a dependency or dependent issue with its relation.
 type IssueDep struct {
 	ID             string `json:"id"`
@@ -1529,6 +1591,18 @@ func (b *Beads) Comments(id string) ([]Comment, error) {
 		return nil, fmt.Errorf("parsing comments: %w", err)
 	}
 	return comments, nil
+}
+
+// AddComment appends a comment to an issue, routing by issue ID when needed.
+func (b *Beads) AddComment(id, comment string) error {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return target.AddComment(id, comment)
+		}
+	}
+
+	_, err := b.run("comments", "add", id, comment)
+	return err
 }
 
 // Blocked returns issues that are blocked by dependencies.
