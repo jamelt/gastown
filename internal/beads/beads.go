@@ -177,6 +177,8 @@ type Issue struct {
 	ID          string   `json:"id"`
 	Title       string   `json:"title"`
 	Description string   `json:"description"`
+	Design      string   `json:"design,omitempty"`
+	Notes       string   `json:"notes,omitempty"`
 	Status      string   `json:"status"`
 	Priority    int      `json:"priority"`
 	Type        string   `json:"issue_type"`
@@ -185,6 +187,7 @@ type Issue struct {
 	UpdatedAt   string   `json:"updated_at"`
 	ClosedAt    string   `json:"closed_at,omitempty"`
 	Parent      string   `json:"parent,omitempty"`
+	ExternalRef string   `json:"external_ref,omitempty"`
 	Assignee    string   `json:"assignee,omitempty"`
 	Children    []string `json:"children,omitempty"`
 	DependsOn   []string `json:"depends_on,omitempty"`
@@ -214,6 +217,16 @@ type Issue struct {
 	// delegation state (delegated_from key) and merge-slot state (holder/waiters).
 	// Populated by both bd show --json and the in-process store path.
 	Metadata json.RawMessage `json:"metadata,omitempty"`
+	Comments []Comment       `json:"comments,omitempty"`
+}
+
+// Comment represents a beads issue comment needed by review evidence checks.
+type Comment struct {
+	ID        string `json:"id"`
+	IssueID   string `json:"issue_id"`
+	Author    string `json:"author"`
+	Text      string `json:"text"`
+	CreatedAt string `json:"created_at"`
 }
 
 // HasLabel checks if an issue has a specific label.
@@ -240,6 +253,95 @@ func HasUncheckedCriteria(issue *Issue) int {
 		}
 	}
 	return count
+}
+
+var blockingDependencyTypes = map[string]bool{
+	"blocks":             true,
+	"conditional-blocks": true,
+	"waits-for":          true,
+	"merge-blocks":       true,
+}
+
+func isBlockingDependencyType(depType string) bool {
+	return blockingDependencyTypes[strings.ToLower(strings.TrimSpace(depType))]
+}
+
+func isResolvedDependency(dep IssueDep) bool {
+	status := strings.ToLower(strings.TrimSpace(dep.Status))
+	switch status {
+	case "tombstone", "pinned":
+		return true
+	case "closed":
+		if strings.EqualFold(strings.TrimSpace(dep.DependencyType), "merge-blocks") {
+			return strings.HasPrefix(dep.CloseReason, "Merged in ")
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// HasUnresolvedBlockers reports whether an issue has any unresolved blocking dependencies.
+func HasUnresolvedBlockers(issue *Issue) bool {
+	_, count := unresolvedBlockingDependencyIDs(issue)
+	return count > 0
+}
+
+// FirstUnresolvedBlockerID returns the first unresolved blocker ID, or empty if unblocked.
+func FirstUnresolvedBlockerID(issue *Issue) string {
+	ids, _ := unresolvedBlockingDependencyIDs(issue)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+func unresolvedBlockingDependencyIDs(issue *Issue) ([]string, int) {
+	if issue == nil {
+		return nil, 0
+	}
+	if len(issue.Dependencies) == 0 {
+		ids := normalizedIssueIDs(issue.BlockedBy)
+		count := len(ids)
+		if issue.BlockedByCount > count {
+			count = issue.BlockedByCount
+		}
+		if issue.DependencyCount > count {
+			count = issue.DependencyCount
+		}
+		return ids, count
+	}
+
+	seen := make(map[string]bool)
+	ids := make([]string, 0, len(issue.Dependencies))
+	count := 0
+	for _, dep := range issue.Dependencies {
+		if !isBlockingDependencyType(dep.DependencyType) || isResolvedDependency(dep) {
+			continue
+		}
+		count++
+		id := ExtractIssueID(dep.ID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids, count
+}
+
+func normalizedIssueIDs(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = ExtractIssueID(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result
 }
 
 // IsAgentBead checks if an issue is an agent bead by checking for the gt:agent
@@ -281,19 +383,22 @@ type IssueDep struct {
 	Priority       int    `json:"priority"`
 	Type           string `json:"issue_type"`
 	DependencyType string `json:"dependency_type,omitempty"`
+	CloseReason    string `json:"close_reason,omitempty"`
 }
 
 // ListOptions specifies filters for listing issues.
 type ListOptions struct {
-	Status     string // "open", "closed", "all"
-	Type       string // Deprecated: use Label instead. Was "task", "bug", "feature", "epic"; converted to "gt:" prefix.
-	Label      string // Label filter (e.g., "gt:agent", "gt:merge-request")
-	Priority   int    // 0-4, -1 for no filter
-	Parent     string // filter by parent ID
-	Assignee   string // filter by assignee (e.g., "gastown/Toast")
-	NoAssignee bool   // filter for issues with no assignee
-	Limit      int    // Max results (0 = unlimited, overrides bd default of 50)
-	Ephemeral  bool   // Search wisps table (ephemeral issues) instead of issues table
+	Status     string   // "open", "closed", "all"
+	Type       string   // Deprecated: use Label instead. Was "task", "bug", "feature", "epic"; converted to "gt:" prefix.
+	Label      string   // Label filter (e.g., "gt:agent", "gt:merge-request")
+	Labels     []string // Multiple label filters (all must match)
+	Priority   int      // 0-4, -1 for no filter
+	Parent     string   // filter by parent ID
+	Assignee   string   // filter by assignee (e.g., "gastown/Toast")
+	NoAssignee bool     // filter for issues with no assignee
+	Limit      int      // Max results (0 = unlimited, overrides bd default of 50)
+	Ephemeral  bool     // Search wisps table (ephemeral issues) instead of issues table
+	Rig        string   // Target rig database (e.g., "gantry"). When set, binds list to the rig's .beads directory.
 }
 
 // CreateOptions specifies options for creating an issue.
@@ -350,6 +455,10 @@ type Beads struct {
 	// and forIssueID() skip ResolveRoutingTarget and operate against
 	// beadsDir directly.
 	noRoute bool
+
+	// Cached wisps-based agent beads for fallback lookup when agent beads are not in git.
+	wispAgentBeadsOnce sync.Once
+	wispAgentBeads     map[string]*Issue
 }
 
 // New creates a new Beads wrapper for the given directory.
@@ -418,6 +527,19 @@ func (b *Beads) agentBeadTarget() *Beads {
 		return b
 	}
 	return b.ForAgentBead()
+}
+
+// ForLocalBeads returns a Beads wrapper that bypasses prefix routing for local rig beads.
+// Used when a bead's ownership is pinned to a specific rig's database (e.g., Witness/Refinery singletons).
+func (b *Beads) ForLocalBeads() *Beads {
+	return &Beads{
+		workDir:    b.workDir,
+		beadsDir:   b.beadsDir,
+		isolated:   b.isolated,
+		serverPort: b.serverPort,
+		store:      b.store,
+		noRoute:    true,
+	}
 }
 
 // getActor returns the BD_ACTOR value for this context.
@@ -1375,6 +1497,40 @@ func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {
 	return result, nil
 }
 
+// Comments fetches all comments on an issue.
+func (b *Beads) Comments(id string) ([]Comment, error) {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return target.Comments(id)
+		}
+	}
+
+	if b.store != nil {
+		comments, err := b.store.GetIssueComments(context.Background(), id)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Comment, 0, len(comments))
+		for _, comment := range comments {
+			converted, ok := sdkCommentToComment(comment)
+			if ok {
+				out = append(out, converted)
+			}
+		}
+		return out, nil
+	}
+
+	out, err := b.run("comments", id, "--json")
+	if err != nil {
+		return nil, err
+	}
+	var comments []Comment
+	if err := json.Unmarshal(out, &comments); err != nil {
+		return nil, fmt.Errorf("parsing comments: %w", err)
+	}
+	return comments, nil
+}
+
 // Blocked returns issues that are blocked by dependencies.
 func (b *Beads) Blocked() ([]*Issue, error) {
 	if b.store != nil {
@@ -1685,6 +1841,11 @@ func (b *Beads) Close(ids ...string) error {
 		return nil
 	}
 
+	// Guard against closing decision beads with unruled cards (gt-v0kz).
+	if err := b.guardDecisionBeads(ids...); err != nil {
+		return err
+	}
+
 	if b.store != nil {
 		return b.storeClose("", runtime.SessionIDFromEnv(), ids...)
 	}
@@ -1706,6 +1867,12 @@ func (b *Beads) Close(ids ...string) error {
 func (b *Beads) CloseWithReason(reason string, ids ...string) error {
 	if len(ids) == 0 {
 		return nil
+	}
+
+	// Guard against closing decision beads with unruled cards (gt-v0kz).
+	// This applies to all close paths: store, CLI, and force.
+	if err := b.guardDecisionBeads(ids...); err != nil {
+		return err
 	}
 
 	if b.store != nil {
@@ -1732,6 +1899,14 @@ func (b *Beads) ForceCloseWithReason(reason string, ids ...string) error {
 		return nil
 	}
 
+	// Guard against closing decision beads with unruled cards (gt-v0kz).
+	// This applies even under --force: burying a pending human decision is
+	// precisely the harm force would otherwise cause, and no agent has
+	// standing to waive the overseer's ruling.
+	if err := b.guardDecisionBeads(ids...); err != nil {
+		return err
+	}
+
 	// In-process store close doesn't enforce dependency checks (no --force
 	// needed). Note: this means the store path bypasses the dependency
 	// validation that the CLI's --force flag overrides. Callers relying on
@@ -1750,6 +1925,12 @@ func (b *Beads) ForceCloseWithReason(reason string, ids ...string) error {
 	}
 
 	_, err := b.run(args...)
+	return err
+}
+
+// deleteBead removes a bead from the database.
+func (b *Beads) deleteBead(id string) error {
+	_, err := b.run("delete", id, "--force")
 	return err
 }
 
