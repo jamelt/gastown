@@ -419,7 +419,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 			existingMode = fields.Mode
 		}
 		if existingMode != mode {
-			if err := storeFieldsInBeadFromTownRoot(townRoot, existing.ID, beadFieldUpdates{Mode: &mode}); err != nil {
+			if err := storeFieldsInBeadFromTownRoot(townRoot, existing.ID, beadFieldUpdates{Mode: mode}); err != nil {
 				return fmt.Errorf("updating existing formula mode: %w", err)
 			}
 			if mode != "" || existingMode != "" {
@@ -527,7 +527,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		Args:            slingArgs,
 		Vars:            append([]string(nil), slingVars...),
 		AttachedFormula: formulaName,
-		Mode:            &mode,
+		Mode:            mode,
 		FormulaVars:     strings.Join(slingVars, "\n"),
 	}
 	if err := storeFieldsInBeadFromTownRoot(townRoot, wispRootID, fieldUpdates); err != nil {

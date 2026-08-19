@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // applyWorkflowStepAgentOverride applies agent-specific overrides to a workflow step.
@@ -22,8 +20,8 @@ func moleculeScaffoldRejectReason(info *beadInfo) string {
 	if info == nil {
 		return "info-nil"
 	}
-	if strings.TrimSpace(info.ID) == "" {
-		return "info-id-empty"
+	if strings.TrimSpace(info.Title) == "" {
+		return "info-title-empty"
 	}
 	// Stub: Add validation logic for molecule scaffolds
 	return ""
@@ -50,16 +48,16 @@ func storeFieldsInBeadFromTownRoot(townRoot string, beadID string, updates beadF
 }
 
 // collectExistingMoleculeDeps collects dependencies for existing molecules.
-func collectExistingMoleculeDeps(townRoot string, moleculeIDs []string) ([]string, error) {
-	if townRoot == "" || len(moleculeIDs) == 0 {
+func collectExistingMoleculeDeps(beadID string, townRoot string) ([]string, error) {
+	if beadID == "" || townRoot == "" {
 		return []string{}, nil
 	}
-	// Stub: Collect dependencies for the given molecule IDs
+	// Stub: Collect dependencies for the given bead's molecules
 	return []string{}, nil
 }
 
 // appendUniqueMolecules appends unique molecule IDs to a list, avoiding duplicates.
-func appendUniqueMolecules(existing []string, new []string) []string {
+func appendUniqueMolecules(existing []string, new ...string) []string {
 	seen := make(map[string]bool)
 	for _, id := range existing {
 		seen[id] = true
@@ -80,4 +78,23 @@ func hookBeadWithRetryFn(townRoot string, beadID string, moleculeID string) erro
 	}
 	// Stub: Hook the bead with retry logic
 	return nil
+}
+
+// hookBeadWithRetryWithTownRootFn is a function that hooks a bead with retry logic and town root.
+func hookBeadWithRetryWithTownRootFn(beadID string, targetAgent string, hookDir string, townRoot string) error {
+	if beadID == "" || townRoot == "" {
+		return nil
+	}
+	// Stub: Hook the bead with retry logic using town root
+	return nil
+}
+
+// resolveTargetAgentID resolves the target agent ID from a target agent string.
+func resolveTargetAgentID(targetAgent string) (string, string, error) {
+	// Stub: Resolve agent ID and name from the target agent string
+	// Returns (agentID, agentName, error)
+	if targetAgent != "" {
+		return targetAgent, targetAgent, nil
+	}
+	return "", "", nil
 }
