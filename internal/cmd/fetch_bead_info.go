@@ -7,15 +7,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// beadInfo holds fetched bead information from a beads database.
-type beadInfo struct {
-	ID           string
-	Status       string
-	Title        string
-	Labels       []string
-	Dependencies []beads.IssueDep
-}
-
 // getBeadInfoFromTownRoot fetches a single bead's information from the town root beads database.
 func getBeadInfoFromTownRoot(townRoot string, beadID string) (*beadInfo, error) {
 	townBeadsDir := filepath.Join(townRoot, ".beads")
@@ -31,8 +22,11 @@ func getBeadInfoFromTownRoot(townRoot string, beadID string) (*beadInfo, error) 
 		ID           string           `json:"id"`
 		Status       string           `json:"status"`
 		Title        string           `json:"title"`
+		Assignee     string           `json:"assignee"`
+		Description  string           `json:"description"`
 		Labels       []string         `json:"labels"`
 		Dependencies []beads.IssueDep `json:"dependencies"`
+		IssueType    string           `json:"issue_type"`
 	}
 
 	if err := json.Unmarshal(out, &items); err != nil {
@@ -45,10 +39,12 @@ func getBeadInfoFromTownRoot(townRoot string, beadID string) (*beadInfo, error) 
 
 	item := items[0]
 	return &beadInfo{
-		ID:           item.ID,
-		Status:       item.Status,
 		Title:        item.Title,
+		Status:       item.Status,
+		Assignee:     item.Assignee,
+		Description:  item.Description,
 		Labels:       item.Labels,
 		Dependencies: item.Dependencies,
+		IssueType:    item.IssueType,
 	}, nil
 }

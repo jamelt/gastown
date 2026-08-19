@@ -16,6 +16,7 @@ type bdCmd struct {
 	args        []string
 	dir         string
 	env         []string
+	stdin       io.Reader
 	stderr      io.Writer
 	autoCommit  bool
 	gtRoot      string
@@ -78,6 +79,12 @@ func (b *bdCmd) Dir(dir string) *bdCmd {
 // only strips inherited values from the parent process.
 func (b *bdCmd) StripBeadsDir() *bdCmd {
 	b.env = filterEnvKey(b.env, "BEADS_DIR")
+	return b
+}
+
+// Stdin sets the stdin reader for the command.
+func (b *bdCmd) Stdin(r io.Reader) *bdCmd {
+	b.stdin = r
 	return b
 }
 
@@ -184,6 +191,7 @@ func (b *bdCmd) Build() *exec.Cmd {
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = b.dir
 	cmd.Env = b.buildEnv()
+	cmd.Stdin = b.stdin
 	cmd.Stderr = b.stderr
 	return cmd
 }
