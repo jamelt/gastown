@@ -382,16 +382,52 @@ if [ "$TOTAL_ISSUES" -ge "$MASS_DEATH_THRESHOLD" ]; then
 fi
 
 # --- Take action --------------------------------------------------------------
+#
+# Restart requests are gated behind `gt escalate --fingerprint`, keyed on
+# rig:polecat:hook (not on time). That reuses the escalation system's own
+# duplicate-suppression (ListEscalationsByFingerprint / a closed-match
+# window) instead of adding separate dedup state here — the same
+# one-shot-`mail`-vs-`escalate` convention documented in
+# bead-audit/plugin.md. This is what stops an already-resolved crash from
+# re-flooding witness mail every cooldown cycle, including across
+# independent dog runs that share no local state: once the escalation for
+# a fingerprint exists (and stays open, or closes within its suppression
+# window), repeat reports of the SAME crash are suppressed. A genuinely new
+# crash gets a fresh hook bead and thus a fresh fingerprint, so it still
+# alerts.
+
+restart_fingerprint_suppressed() {
+  local fingerprint="$1" title="$2" reason="$3" hook="$4"
+  local escalate_json=""
+
+  escalate_json=$(gt escalate "$title" \
+    -s HIGH \
+    --source "plugin:stuck-agent-dog" \
+    --fingerprint "$fingerprint" \
+    --related "$hook" \
+    --reason "$reason" \
+    --json 2>/dev/null) || escalate_json=""
+
+  [ "$(printf '%s' "$escalate_json" | jq -r '.status // empty' 2>/dev/null)" = "duplicate_suppressed" ]
+}
 
 if [ "$MASS_DEATH" -eq 1 ]; then
   log "Skipping per-agent restart/kill actions during mass-death escalation"
 else
-  # Crashed polecats: notify witness to restart
+  # Crashed polecats: notify witness to restart, deduped per incident
   # Note: `"${arr[@]:-}"` expands an empty array to a single empty string under
   # `set -u`, which would fire a phantom `RESTART_POLECAT: /` notification. The
   # `${arr[@]+"${arr[@]}"}` form expands to nothing when the array is empty.
   for ENTRY in ${CRASHED[@]+"${CRASHED[@]}"}; do
     IFS='|' read -r SESSION RIG PCAT HOOK <<< "$ENTRY"
+    if restart_fingerprint_suppressed \
+      "stuck-agent-dog:polecat:crashed:$RIG:$PCAT:$HOOK" \
+      "Polecat crash: $RIG/$PCAT" \
+      "Context-aware inspection confirmed $SESSION crashed with hook=$HOOK still hooked/in_progress." \
+      "$HOOK"; then
+      log "  Skipping RESTART_POLECAT for $RIG/$PCAT: already escalated for this crash (hook=$HOOK)"
+      continue
+    fi
     log "Requesting restart for $RIG/polecats/$PCAT (hook=$HOOK)"
     gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT" --stdin <<BODY || log "  WARN: restart mail failed for $RIG/$PCAT"
 Polecat $PCAT crash confirmed by stuck-agent-dog plugin.
@@ -400,11 +436,20 @@ action: restart requested
 BODY
   done
 
-  # Zombie polecats: kill zombie session, then request restart
+  # Zombie polecats: kill zombie session, then request restart, deduped per incident
   for ENTRY in ${STUCK[@]+"${STUCK[@]}"}; do
     IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
-    log "Killing zombie session $SESSION and requesting restart"
+    log "Killing zombie session $SESSION"
     tmux kill-session -t "$SESSION" 2>/dev/null || true
+    if restart_fingerprint_suppressed \
+      "stuck-agent-dog:polecat:zombie:$RIG:$PCAT:$HOOK" \
+      "Polecat zombie: $RIG/$PCAT" \
+      "Context-aware inspection cleared zombie $SESSION (reason=$REASON) with hook=$HOOK still hooked/in_progress." \
+      "$HOOK"; then
+      log "  Skipping RESTART_POLECAT for $RIG/$PCAT: already escalated for this zombie (hook=$HOOK)"
+      continue
+    fi
+    log "Requesting restart for $RIG/polecats/$PCAT (hook=$HOOK, zombie cleared)"
     gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT (zombie cleared)" --stdin <<BODY || log "  WARN: restart mail failed for $RIG/$PCAT"
 Polecat $PCAT zombie session cleared by stuck-agent-dog plugin.
 hook_bead: $HOOK
