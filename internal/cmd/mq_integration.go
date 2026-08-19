@@ -174,12 +174,12 @@ func createLandWorktree(rigPath, startBranch string) (*git.Git, func(), error) {
 	return git.NewGit(landPath), cleanup, nil
 }
 
-// branchNameExists checks if a branch name exists locally or on origin.
-func branchNameExists(g *git.Git, name string) bool {
+// branchNameExists checks if a branch name exists locally or on the publish remote.
+func branchNameExists(g *git.Git, remote, name string) bool {
 	if exists, _ := g.BranchExists(name); exists {
 		return true
 	}
-	if exists, _ := g.RemoteBranchExists("origin", name); exists {
+	if exists, _ := g.RemoteBranchExists(remote, name); exists {
 		return true
 	}
 	return false
@@ -200,8 +200,8 @@ func extractEpicNumericSuffix(epicID string) string {
 // resolveUniqueBranchName checks if branchName already exists and disambiguates
 // by appending the epic's numeric suffix if needed. Returns an error if both the
 // original and disambiguated names are taken.
-func resolveUniqueBranchName(g *git.Git, branchName, epicID string) (string, error) {
-	if !branchNameExists(g, branchName) {
+func resolveUniqueBranchName(g *git.Git, remote, branchName, epicID string) (string, error) {
+	if !branchNameExists(g, remote, branchName) {
 		return branchName, nil
 	}
 
@@ -210,7 +210,7 @@ func resolveUniqueBranchName(g *git.Git, branchName, epicID string) (string, err
 	if err := validateBranchName(disambiguated); err != nil {
 		return "", fmt.Errorf("disambiguated branch name invalid: %w", err)
 	}
-	if !branchNameExists(g, disambiguated) {
+	if !branchNameExists(g, remote, disambiguated) {
 		fmt.Printf("  %s\n", style.Dim.Render(
 			fmt.Sprintf("(branch '%s' already exists, using '%s')", branchName, disambiguated)))
 		return disambiguated, nil
@@ -233,15 +233,16 @@ func resolveIntegrationBranchName(bd *beads.Beads, rigPath, epicID string) strin
 		// (the {title} template with no title would fall back to epic ID anyway).
 		return buildIntegrationBranchName(beads.LegacyIntegrationBranchTemplate, epicID, "")
 	}
-	// Delegate to resolveEpicBranch (nil checker = no existence check)
-	return resolveEpicBranch(epic, rigPath, nil)
+	// Delegate to resolveEpicBranch (nil checker = no existence check, so the
+	// remote is unused here; "origin" is a harmless placeholder).
+	return resolveEpicBranch(epic, rigPath, "origin", nil)
 }
 
 // resolveEpicBranch resolves an epic's integration branch name.
 // Resolution order: metadata → configured template → legacy {epic} template.
 // When checker is non-nil, branch existence is verified and the legacy template
 // is tried as a fallback for epics created before the {title} default.
-func resolveEpicBranch(epic *beads.Issue, rigPath string, checker beads.BranchChecker) string {
+func resolveEpicBranch(epic *beads.Issue, rigPath, remote string, checker beads.BranchChecker) string {
 	// 1. Explicit metadata takes precedence
 	if branch := getIntegrationBranchField(epic.Description); branch != "" {
 		return branch
@@ -257,13 +258,13 @@ func resolveEpicBranch(epic *beads.Issue, rigPath string, checker beads.BranchCh
 	}
 
 	// 4. Check if primary branch exists
-	if branchExistsAnywhere(checker, primaryBranch) {
+	if branchExistsAnywhere(checker, remote, primaryBranch) {
 		return primaryBranch
 	}
 
 	// 5. Try legacy {epic} template as fallback for pre-{title} epics
 	legacyBranch := buildIntegrationBranchName(beads.LegacyIntegrationBranchTemplate, epic.ID, epic.Title)
-	if legacyBranch != primaryBranch && branchExistsAnywhere(checker, legacyBranch) {
+	if legacyBranch != primaryBranch && branchExistsAnywhere(checker, remote, legacyBranch) {
 		return legacyBranch
 	}
 
@@ -276,8 +277,8 @@ func resolveEpicBranch(epic *beads.Issue, rigPath string, checker beads.BranchCh
 }
 
 // branchExistsAnywhere checks if a branch exists on the remote or locally.
-func branchExistsAnywhere(checker beads.BranchChecker, name string) bool {
-	exists, err := checker.RemoteBranchExists("origin", name)
+func branchExistsAnywhere(checker beads.BranchChecker, remote, name string) bool {
+	exists, err := checker.RemoteBranchExists(remote, name)
 	if err == nil && exists {
 		return true
 	}
@@ -391,17 +392,23 @@ func runMqIntegrationCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing git: %w", err)
 	}
 
+	// Resolve the remote integration branches live on. Integration work is all
+	// published to (and based off) the publish remote; with no override
+	// producer this is "origin" (see git.ResolveWorkRefs), so the substitutions
+	// below are identical to the previously hardcoded "origin".
+	workRefs := g.ResolveWorkRefs(r.DefaultBranch(), git.WorkRefs{})
+
 	// Check if integration branch already exists (local or remote).
 	// With {title} templates, two epics can produce the same branch name.
 	// Disambiguate by appending the epic's numeric suffix (e.g., -123).
-	branchName, err = resolveUniqueBranchName(g, branchName, epicID)
+	branchName, err = resolveUniqueBranchName(g, workRefs.PublishRemote, branchName, epicID)
 	if err != nil {
 		return err
 	}
 
 	// Ensure we have latest refs
 	fmt.Printf("Fetching latest from origin...\n")
-	if err := g.Fetch("origin"); err != nil {
+	if err := g.Fetch(workRefs.PublishRemote); err != nil {
 		return fmt.Errorf("fetching from origin: %w", err)
 	}
 
@@ -410,7 +417,7 @@ func runMqIntegrationCreate(cmd *cobra.Command, args []string) error {
 	if mqIntegrationCreateBaseBranch != "" {
 		baseBranchName = strings.TrimPrefix(mqIntegrationCreateBaseBranch, "origin/")
 	}
-	baseBranch := "origin/" + baseBranchName
+	baseBranch := workRefs.PublishRemote + "/" + baseBranchName
 	baseBranchDisplay := baseBranchName
 	fmt.Printf("Creating branch '%s' from %s...\n", branchName, baseBranchDisplay)
 	if err := g.CreateBranchFrom(branchName, baseBranch); err != nil {
@@ -419,7 +426,7 @@ func runMqIntegrationCreate(cmd *cobra.Command, args []string) error {
 
 	// 3. Push to origin
 	fmt.Printf("Pushing to origin...\n")
-	if err := g.Push("origin", branchName, false); err != nil {
+	if err := g.Push(workRefs.PublishRemote, branchName, false); err != nil {
 		// Clean up local branch on push failure (best-effort cleanup)
 		_ = g.DeleteBranch(branchName, true)
 		return fmt.Errorf("pushing to origin: %w", err)
@@ -478,6 +485,11 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing git: %w", err)
 	}
 
+	// Resolve the remote integration branches are published to/based off. With
+	// no override producer this is "origin" (see git.ResolveWorkRefs), so every
+	// substitution below is identical to the previously hardcoded "origin".
+	workRefs := g.ResolveWorkRefs(r.DefaultBranch(), git.WorkRefs{})
+
 	// Show what we're about to do
 	if mqIntegrationLandDryRun {
 		fmt.Printf("%s Dry run - no changes will be made\n\n", style.Bold.Render("🔍"))
@@ -505,13 +517,13 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 	// Fetch early so resolveEpicBranch and subsequent branch-existence
 	// checks operate on up-to-date refs (matches status which also fetches first).
 	fmt.Printf("Fetching latest from origin...\n")
-	if err := g.Fetch("origin"); err != nil {
+	if err := g.Fetch(workRefs.PublishRemote); err != nil {
 		return fmt.Errorf("fetching from origin: %w", err)
 	}
 
 	// Get integration branch name — tries metadata, then {title} template,
 	// then legacy {epic} template with branch existence checking.
-	branchName := resolveEpicBranch(epic, r.Path, g)
+	branchName := resolveEpicBranch(epic, r.Path, workRefs.PublishRemote, g)
 
 	// Read base_branch from epic metadata (where to merge back)
 	// Fall back to rig's default_branch for backward compat with pre-base-branch epics
@@ -530,8 +542,8 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking branch existence: %w", err)
 	}
 
-	// Check remote — land uses origin/ refs throughout, so the branch must be pushed
-	remoteExists, err := g.RemoteBranchExists("origin", branchName)
+	// Check remote — land uses publish-remote refs throughout, so the branch must be pushed
+	remoteExists, err := g.RemoteBranchExists(workRefs.PublishRemote, branchName)
 	if err != nil {
 		return fmt.Errorf("checking remote branch: %w", err)
 	}
@@ -545,7 +557,7 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 	if !exists {
 		// Remote-only: fetch and create local tracking branch
 		fmt.Printf("Fetching integration branch from origin...\n")
-		if err := g.FetchBranch("origin", branchName); err != nil {
+		if err := g.FetchBranch(workRefs.PublishRemote, branchName); err != nil {
 			return fmt.Errorf("fetching branch: %w", err)
 		}
 	}
@@ -624,11 +636,11 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 	// Idempotency check: if integration branch is already an ancestor of the
 	// target branch, the merge was already completed (e.g., previous run crashed
 	// after push but before cleanup). Skip directly to branch deletion and epic close.
-	alreadyMerged, err := g.IsAncestor("origin/"+branchName, "origin/"+targetBranch)
+	alreadyMerged, err := g.IsAncestor(workRefs.PublishRemote+"/"+branchName, workRefs.PublishRemote+"/"+targetBranch)
 	if err == nil && alreadyMerged {
 		fmt.Printf("  %s Integration branch already merged into %s — skipping to cleanup\n",
 			style.Bold.Render("✓"), targetBranch)
-		if warnings := cleanupIntegrationBranch(g, bd, epicID, branchName, targetBranch, epicAlreadyClosed); len(warnings) > 0 {
+		if warnings := cleanupIntegrationBranch(g, workRefs.PublishRemote, bd, epicID, branchName, targetBranch, epicAlreadyClosed); len(warnings) > 0 {
 			return fmt.Errorf("landed but cleanup incomplete: %s", strings.Join(warnings, "; "))
 		}
 		return nil
@@ -645,7 +657,7 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 	defer cleanup()
 
 	// Pull latest target branch into the worktree
-	if err := landGit.Pull("origin", targetBranch); err != nil {
+	if err := landGit.Pull(workRefs.PublishRemote, targetBranch); err != nil {
 		// Non-fatal if pull fails (e.g., first time)
 		fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(pull from origin/%s skipped)", targetBranch)))
 	}
@@ -653,7 +665,7 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 	// 4. Merge integration branch into target
 	fmt.Printf("Merging %s to %s...\n", branchName, targetBranch)
 	mergeMsg := fmt.Sprintf("Merge %s: %s\n\nEpic: %s", branchName, epic.Title, epicID)
-	if err := landGit.MergeNoFF("origin/"+branchName, mergeMsg); err != nil {
+	if err := landGit.MergeNoFF(workRefs.PublishRemote+"/"+branchName, mergeMsg); err != nil {
 		// Capture conflicting files BEFORE aborting (abort wipes them).
 		// Best-effort: if GetConflictingFiles fails, we still want to abort and return.
 		conflictPaths, _ := landGit.GetConflictingFiles()
@@ -718,12 +730,12 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 
 	// 6. Push to origin
 	fmt.Printf("Pushing %s to origin...\n", targetBranch)
-	if err := landGit.PushWithEnv("origin", targetBranch, false, []string{"GT_INTEGRATION_LAND=1"}); err != nil {
+	if err := landGit.PushWithEnv(workRefs.PublishRemote, targetBranch, false, []string{"GT_INTEGRATION_LAND=1"}); err != nil {
 		return fmt.Errorf("push failed: %w", err)
 	}
 	fmt.Printf("  %s Pushed to origin\n", style.Bold.Render("✓"))
 
-	if warnings := cleanupIntegrationBranch(g, bd, epicID, branchName, targetBranch, epicAlreadyClosed); len(warnings) > 0 {
+	if warnings := cleanupIntegrationBranch(g, workRefs.PublishRemote, bd, epicID, branchName, targetBranch, epicAlreadyClosed); len(warnings) > 0 {
 		return fmt.Errorf("landed but cleanup incomplete: %s", strings.Join(warnings, "; "))
 	}
 	return nil
@@ -737,16 +749,16 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 // Epic close happens BEFORE branch deletion so that a crash between the two
 // steps leaves the operation in a retriable state (branch still exists for
 // idempotent re-run, but the epic is already marked done).
-func cleanupIntegrationBranch(g *git.Git, bd *beads.Beads, epicID, branchName, targetBranch string, epicAlreadyClosed bool) []string {
+func cleanupIntegrationBranch(g *git.Git, remote string, bd *beads.Beads, epicID, branchName, targetBranch string, epicAlreadyClosed bool) []string {
 	var warnings []string
-	branchHead, err := g.PushRemoteBranchTip("origin", branchName)
+	branchHead, err := g.PushRemoteBranchTip(remote, branchName)
 	if err != nil {
 		return append(warnings, fmt.Sprintf("could not read remote integration branch: %v", err))
 	}
 	if strings.TrimSpace(branchHead) == "" {
 		return append(warnings, "remote integration branch missing before cleanup")
 	}
-	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", targetBranch, branchHead); err != nil {
+	if err := g.VerifyPushedCommitReachableFromPushTarget(remote, targetBranch, branchHead); err != nil {
 		return append(warnings, fmt.Sprintf("integration branch is not proven on %s: %v", targetBranch, err))
 	}
 
@@ -765,7 +777,7 @@ func cleanupIntegrationBranch(g *git.Git, bd *beads.Beads, epicID, branchName, t
 	// Delete integration branch (use bare repo git — ref-only operations)
 	fmt.Printf("Deleting integration branch...\n")
 	// Delete remote first
-	if err := g.DeleteRemoteBranchIfAt("origin", branchName, branchHead); err != nil {
+	if err := g.DeleteRemoteBranchIfAt(remote, branchName, branchHead); err != nil {
 		warning := fmt.Sprintf("could not delete remote branch: %v", err)
 		warnings = append(warnings, warning)
 		fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(%s)", warning)))
@@ -885,8 +897,13 @@ func runMqIntegrationStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing git: %w", err)
 	}
 
+	// Resolve the remote integration branches live on. With no override producer
+	// this is "origin" (see git.ResolveWorkRefs) — identical to the previously
+	// hardcoded "origin".
+	workRefs := g.ResolveWorkRefs(r.DefaultBranch(), git.WorkRefs{})
+
 	// Fetch from origin to ensure we have latest refs (needed for branch detection)
-	if err := g.Fetch("origin"); err != nil {
+	if err := g.Fetch(workRefs.PublishRemote); err != nil {
 		// Non-fatal, continue with local data
 	}
 
@@ -901,7 +918,7 @@ func runMqIntegrationStatus(cmd *cobra.Command, args []string) error {
 
 	// Get integration branch name — tries metadata, then {title} template,
 	// then legacy {epic} template with branch existence checking.
-	branchName := resolveEpicBranch(epic, r.Path, g)
+	branchName := resolveEpicBranch(epic, r.Path, workRefs.PublishRemote, g)
 
 	// Read base_branch from epic metadata (where to merge back)
 	// Fall back to rig's default_branch for backward compat with pre-base-branch epics
@@ -912,7 +929,7 @@ func runMqIntegrationStatus(cmd *cobra.Command, args []string) error {
 
 	// Check if integration branch exists (locally or remotely)
 	localExists, _ := g.BranchExists(branchName)
-	remoteExists, _ := g.RemoteBranchExists("origin", branchName)
+	remoteExists, _ := g.RemoteBranchExists(workRefs.PublishRemote, branchName)
 
 	if !localExists && !remoteExists {
 		return fmt.Errorf("integration branch '%s' does not exist", branchName)
@@ -921,7 +938,7 @@ func runMqIntegrationStatus(cmd *cobra.Command, args []string) error {
 	// Determine which ref to use for comparison
 	ref := branchName
 	if !localExists && remoteExists {
-		ref = "origin/" + branchName
+		ref = workRefs.PublishRemote + "/" + branchName
 	}
 
 	// Get branch creation date
@@ -931,7 +948,7 @@ func runMqIntegrationStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get commits ahead of base branch
-	aheadCount, err := g.CommitsAhead("origin/"+baseBranch, ref)
+	aheadCount, err := g.CommitsAhead(workRefs.PublishRemote+"/"+baseBranch, ref)
 	if err != nil {
 		aheadCount = 0 // Non-fatal
 	}

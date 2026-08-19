@@ -20,14 +20,14 @@ import (
 
 func TestWitnessHasSubmittableWorkUsesBranchTargetStatus(t *testing.T) {
 	repo := setupWitnessSquashPreservedRepo(t)
-	if got := witnessHasSubmittableWork(repo, []string{"integration/test"}); got {
+	if got := witnessHasSubmittableWork(repo, "origin", []string{"integration/test"}); got {
 		t.Fatal("squash-preserved branch should not require MQ submission through witness helper")
 	}
 
 	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\nthree\n")
 	runWitnessGit(t, repo, "add", "feature.txt")
 	runWitnessGit(t, repo, "commit", "-m", "extra local work")
-	if got := witnessHasSubmittableWork(repo, []string{"integration/test"}); !got {
+	if got := witnessHasSubmittableWork(repo, "origin", []string{"integration/test"}); !got {
 		t.Fatal("new local work after squash preservation should still require MQ submission")
 	}
 }

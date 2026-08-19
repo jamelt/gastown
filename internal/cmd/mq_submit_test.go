@@ -65,7 +65,7 @@ func TestVerifyMQSubmitPushedBranchRequiresRemoteBranch(t *testing.T) {
 	featureSHA := runGitForMQSubmitTest(t, repo, "rev-parse", "HEAD")
 
 	g := gitpkg.NewGit(repo)
-	err := verifyMQSubmitPushedBranch(g, "feature/pr-target", featureSHA)
+	err := verifyMQSubmitPushedBranch(g, "origin", "feature/pr-target", featureSHA)
 	if err == nil {
 		t.Fatal("verifyMQSubmitPushedBranch() = nil, want missing remote branch error")
 	}
@@ -76,7 +76,7 @@ func TestVerifyMQSubmitPushedBranchRequiresRemoteBranch(t *testing.T) {
 	}
 
 	runGitForMQSubmitTest(t, repo, "push", "origin", "feature/pr-target")
-	if err := verifyMQSubmitPushedBranch(g, "feature/pr-target", featureSHA); err != nil {
+	if err := verifyMQSubmitPushedBranch(g, "origin", "feature/pr-target", featureSHA); err != nil {
 		t.Fatalf("verifyMQSubmitPushedBranch() after push: %v", err)
 	}
 }

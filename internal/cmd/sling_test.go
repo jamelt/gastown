@@ -4725,6 +4725,7 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 		resumeBranch string
 		resumePR     int
 		baseBranch   string
+		baseRef      string
 		wantError    string
 	}{
 		{
@@ -4737,13 +4738,25 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 			name:         "branch with base-branch is rejected",
 			resumeBranch: "feature/foo",
 			baseBranch:   "develop",
-			wantError:    "--base-branch cannot be combined with --branch or --pr",
+			wantError:    "--base-branch/--base-ref cannot be combined with --branch or --pr",
 		},
 		{
 			name:       "pr with base-branch is rejected",
 			resumePR:   42,
 			baseBranch: "develop",
-			wantError:  "--base-branch cannot be combined with --branch or --pr",
+			wantError:  "--base-branch/--base-ref cannot be combined with --branch or --pr",
+		},
+		{
+			name:         "branch with base-ref is rejected",
+			resumeBranch: "feature/foo",
+			baseRef:      "upstream/main",
+			wantError:    "--base-branch/--base-ref cannot be combined with --branch or --pr",
+		},
+		{
+			name:      "pr with base-ref is rejected",
+			resumePR:  42,
+			baseRef:   "upstream/main",
+			wantError: "--base-branch/--base-ref cannot be combined with --branch or --pr",
 		},
 	}
 
@@ -4753,10 +4766,12 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 	prevResumeBranch := slingResumeBranch
 	prevResumePR := slingResumePR
 	prevBaseBranch := slingBaseBranch
+	prevBaseRef := slingBaseRef
 	t.Cleanup(func() {
 		slingResumeBranch = prevResumeBranch
 		slingResumePR = prevResumePR
 		slingBaseBranch = prevBaseBranch
+		slingBaseRef = prevBaseRef
 	})
 
 	for _, tt := range tests {
@@ -4764,6 +4779,7 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 			slingResumeBranch = tt.resumeBranch
 			slingResumePR = tt.resumePR
 			slingBaseBranch = tt.baseBranch
+			slingBaseRef = tt.baseRef
 
 			err := runSling(nil, []string{"gt-test"})
 			if err == nil {

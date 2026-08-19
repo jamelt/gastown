@@ -116,10 +116,12 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
+	defaultBranch := rig.DefaultBranchForPath(filepath.Join(townRoot, rigName))
+
+	// Resolve where this work publishes to. With no per-bead override producer
+	// reachable at submit time, PublishRemote resolves to "origin" (see
+	// git.ResolveWorkRefs) — identical to the previously hardcoded remote.
+	workRefs := g.ResolveWorkRefs(defaultBranch, git.WorkRefs{})
 
 	if branch == defaultBranch || branch == "master" {
 		return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
@@ -229,7 +231,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	// Verify before either an idempotent success or a new MR registration.
 	// Refinery's later branch check is local-ref based, so missing/stale pushes
 	// must fail here instead of producing a delayed refinery rejection.
-	if err := verifyMQSubmitPushedBranch(g, branch, commitSHA); err != nil {
+	if err := verifyMQSubmitPushedBranch(g, workRefs.PublishRemote, branch, commitSHA); err != nil {
 		return err
 	}
 
@@ -337,20 +339,20 @@ func resolveMQSubmitCommitSHA(g *git.Git, branch string) (string, error) {
 	return g.Rev(fmt.Sprintf("refs/heads/%s^{commit}", branch))
 }
 
-func verifyMQSubmitPushedBranch(g *git.Git, branch, commitSHA string) error {
+func verifyMQSubmitPushedBranch(g *git.Git, publishRemote, branch, commitSHA string) error {
 	if commitSHA != "" {
-		if err := g.VerifyPushedCommit("origin", branch, commitSHA); err != nil {
-			return fmt.Errorf("%w\n\nHint: run 'git push origin %s' first (or 'gt done'), then re-run 'gt mq submit'", err, branch)
+		if err := g.VerifyPushedCommit(publishRemote, branch, commitSHA); err != nil {
+			return fmt.Errorf("%w\n\nHint: run 'git push %s %s' first (or 'gt done'), then re-run 'gt mq submit'", err, publishRemote, branch)
 		}
 		return nil
 	}
 
-	exists, err := g.PushRemoteBranchExists("origin", branch)
+	exists, err := g.PushRemoteBranchExists(publishRemote, branch)
 	if err != nil {
-		return fmt.Errorf("verify branch on origin: %w\n\nHint: run 'git push origin %s' first (or 'gt done'), then re-run 'gt mq submit'", err, branch)
+		return fmt.Errorf("verify branch on %s: %w\n\nHint: run 'git push %s %s' first (or 'gt done'), then re-run 'gt mq submit'", publishRemote, err, publishRemote, branch)
 	}
 	if !exists {
-		return fmt.Errorf("branch %q not found on origin\n\nHint: run 'git push origin %s' first (or 'gt done'), then re-run 'gt mq submit'", branch, branch)
+		return fmt.Errorf("branch %q not found on %s\n\nHint: run 'git push %s %s' first (or 'gt done'), then re-run 'gt mq submit'", branch, publishRemote, publishRemote, branch)
 	}
 	return nil
 }
