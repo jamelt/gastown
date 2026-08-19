@@ -2449,7 +2449,10 @@ func commitPreExistingTownConfigDirt(g *git.Git, rigName string) {
 		if !strings.Contains(err.Error(), "nothing to commit") {
 			fmt.Fprintf(os.Stderr, "  Warning: could not commit pre-existing town config files: %v\n", err)
 		}
+		return
 	}
+
+	fmt.Printf("  Committed pre-existing pending changes to %s separately (see git log)\n", strings.Join(preExisting, ", "))
 }
 
 // commitTownConfigChanges commits town-level config files (rigs.json, daemon.json,
