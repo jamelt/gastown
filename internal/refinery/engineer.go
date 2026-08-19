@@ -499,6 +499,27 @@ type ProcessResult struct {
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
 	NoMerge        bool // MR/source is intentionally not merge-eligible, not a build failure
 	NeedsApproval  bool // PR exists but lacks required approving review (merge_strategy=pr)
+	NoOp           bool // Source branch had 0 commits ahead of target — nothing merged (gt-v2zr)
+}
+
+// mrIsNoOpMerge reports whether merging the submitted head into base produces no
+// new commit — i.e. head is already contained in base (0 commits ahead). Such an
+// MR merges nothing: `git merge --no-ff` prints "Already up to date" and creates
+// no commit, so HEAD stays at the unrelated target tip. Recording that tip as the
+// MR's merge commit asserts false provenance (gt-v2zr). The check fails open
+// (returns false) so a git error never blocks a legitimate merge.
+func (e *Engineer) mrIsNoOpMerge(head, base string) bool {
+	head = strings.TrimSpace(head)
+	base = strings.TrimSpace(base)
+	if head == "" || base == "" {
+		return false
+	}
+	contained, err := e.git.IsAncestor(head, base)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: no-op ancestry check failed (%s in %s): %v\n", shortSHA(head), shortSHA(base), err)
+		return false
+	}
+	return contained
 }
 
 // doMerge performs the actual git merge operation.
@@ -549,6 +570,16 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	if err := e.git.Pull("origin", target); err != nil {
 		// Pull might fail if nothing to pull, that's ok
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pull from origin/%s: %v (continuing)\n", target, err)
+	}
+
+	// If the submitted head is already contained in the target, the local merge
+	// below is a no-op that leaves HEAD at the unrelated target tip; record it as a
+	// no-op instead of stamping that tip as this MR's merge commit (gt-v2zr). Scoped
+	// to the local merge path: PR-mode merges go through the VCS provider, which
+	// takes its merge SHA from the provider and will not merge an empty PR.
+	if e.config.MergeStrategy != "pr" && e.mrIsNoOpMerge(mergeRef, "HEAD") {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: source branch %s has no commits ahead of %s — nothing to merge (no-op)\n", mr.ID, branch, target)
+		return ProcessResult{Success: true, NoOp: true}
 	}
 
 	// Step 3: Check for merge conflicts (using local branch)
@@ -1386,9 +1417,15 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		return false
 	}
 
-	// Update and close the MR bead
+	// Update and close the MR bead. A no-op merge (source branch contributed no
+	// commits — already merged or empty) closes with close_reason=no-op and no
+	// merge commit, so the record never claims a merge that did not happen (gt-v2zr).
+	mrCloseReason := string(CloseReasonMerged)
+	if result.NoOp {
+		mrCloseReason = string(CloseReasonNoop)
+	}
 	if mr.ID != "" && !e.isSyntheticMergeMechanicsMR(mr) {
-		if err := e.closeMRWithReason(mr, string(CloseReasonMerged), result.MergeCommit); err != nil {
+		if err := e.closeMRWithReason(mr, mrCloseReason, result.MergeCommit); err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Post-merge cleanup failed for %s: %v\n", mr.ID, err)
 			return false
 		}
@@ -1401,6 +1438,7 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		Target:      mr.Target,
 		SourceIssue: workBeadID,
 		MergeCommit: result.MergeCommit,
+		NoOp:        result.NoOp,
 	})
 
 	// 1.2. Close conflict-resolution tasks that this land has made moot (hq-jnap).
@@ -1459,7 +1497,11 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 	}
 
 	// 5. Log success
-	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
+	if result.NoOp {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ No-op (nothing to merge): %s\n", mr.ID)
+	} else {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
+	}
 	return true
 }
 
@@ -1776,6 +1818,9 @@ func normalizedMRCloseReason(closeReason string) string {
 	}
 	if strings.HasPrefix(lower, "conflict") {
 		return string(CloseReasonConflict)
+	}
+	if strings.HasPrefix(lower, "no-op") || strings.HasPrefix(lower, "noop") {
+		return string(CloseReasonNoop)
 	}
 	return closeReason
 }

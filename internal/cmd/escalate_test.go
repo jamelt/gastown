@@ -178,6 +178,107 @@ func TestEscalationFingerprintLabel(t *testing.T) {
 	}
 }
 
+// TestSuppressDuplicateEscalation_NoMatches verifies that with no fingerprint
+// matches, creation proceeds (no suppression).
+func TestSuppressDuplicateEscalation_NoMatches(t *testing.T) {
+	suppress, existing, _ := suppressDuplicateEscalation(nil, config.SeverityMedium, time.Hour)
+	if suppress || existing != nil {
+		t.Fatalf("expected no suppression with no matches, got suppress=%v existing=%v", suppress, existing)
+	}
+}
+
+// TestSuppressDuplicateEscalation_OpenMatchAlwaysSuppresses verifies that any
+// non-closed match suppresses unconditionally, regardless of severity — the
+// pre-existing behavior for a still-active duplicate.
+func TestSuppressDuplicateEscalation_OpenMatchAlwaysSuppresses(t *testing.T) {
+	matches := []*beads.Issue{{ID: "dc-open1", Status: "open"}}
+	suppress, existing, reason := suppressDuplicateEscalation(matches, config.SeverityCritical, time.Hour)
+	if !suppress || existing == nil || existing.ID != "dc-open1" {
+		t.Fatalf("expected suppression on open match, got suppress=%v existing=%v", suppress, existing)
+	}
+	if reason == "" {
+		t.Fatal("expected a non-empty suppression reason")
+	}
+}
+
+// TestSuppressDuplicateEscalation_ClosedMatch is the core regression test for
+// gt-9bzd: a closed fingerprint match must not silence a still-recurring
+// escalation forever. It suppresses only inside its severity-scaled window
+// and allows recreation once that window elapses.
+func TestSuppressDuplicateEscalation_ClosedMatch(t *testing.T) {
+	staleThreshold := time.Hour
+
+	tests := []struct {
+		name          string
+		severity      string
+		closedAgo     time.Duration
+		priorClosures int // number of closed matches passed in
+		wantSuppress  bool
+	}{
+		{"critical inside same-cycle floor suppresses", config.SeverityCritical, 30 * time.Second, 1, true},
+		{"critical past same-cycle floor recreates", config.SeverityCritical, 5 * time.Minute, 1, false},
+		{"high inside short window suppresses", config.SeverityHigh, 5 * time.Minute, 1, true},
+		{"high past short window recreates", config.SeverityHigh, 30 * time.Minute, 1, false},
+		{"medium inside base window suppresses", config.SeverityMedium, 30 * time.Minute, 1, true},
+		{"medium past base window recreates", config.SeverityMedium, 2 * time.Hour, 1, false},
+		{"medium backs off after repeated closures", config.SeverityMedium, 90 * time.Minute, 3, true},
+		{"low inside base window suppresses", config.SeverityLow, 30 * time.Minute, 1, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var matches []*beads.Issue
+			closedAt := time.Now().Add(-tt.closedAgo).Format(time.RFC3339)
+			for i := 0; i < tt.priorClosures; i++ {
+				matches = append(matches, &beads.Issue{
+					ID:       "dc-closed",
+					Status:   "closed",
+					ClosedAt: closedAt,
+				})
+			}
+			suppress, existing, reason := suppressDuplicateEscalation(matches, tt.severity, staleThreshold)
+			if suppress != tt.wantSuppress {
+				t.Fatalf("suppress = %v, want %v (reason=%q)", suppress, tt.wantSuppress, reason)
+			}
+			if suppress && existing == nil {
+				t.Fatal("expected existing issue to be set when suppressing")
+			}
+			if !suppress && existing != nil {
+				t.Fatal("expected existing issue to be nil when not suppressing")
+			}
+		})
+	}
+}
+
+// TestSuppressDuplicateEscalation_UnparsableClosedAtDoesNotBlockCreation
+// verifies that a closed match with an unparsable/missing ClosedAt (e.g.
+// older data predating the field) doesn't get counted — it doesn't panic,
+// and it doesn't accidentally suppress creation forever.
+func TestSuppressDuplicateEscalation_UnparsableClosedAtDoesNotBlockCreation(t *testing.T) {
+	matches := []*beads.Issue{{ID: "dc-old", Status: "closed", ClosedAt: ""}}
+	suppress, existing, _ := suppressDuplicateEscalation(matches, config.SeverityMedium, time.Hour)
+	if suppress || existing != nil {
+		t.Fatalf("expected no suppression when ClosedAt is unparsable, got suppress=%v existing=%v", suppress, existing)
+	}
+}
+
+func TestFingerprintSuppressionWindow_ShiftIsCapped(t *testing.T) {
+	staleThreshold := time.Hour
+	// A very large prior-closures count must not overflow or panic; the
+	// shift is capped at maxDuplicateBackoffShift.
+	got := fingerprintSuppressionWindow(config.SeverityLow, staleThreshold, 1000)
+	want := staleThreshold * time.Duration(int64(1)<<uint(maxDuplicateBackoffShift))
+	if got != want {
+		t.Fatalf("fingerprintSuppressionWindow with huge priorClosures = %v, want capped %v", got, want)
+	}
+	// Negative priorClosures (shouldn't happen, but defend anyway) must not
+	// produce a negative shift.
+	got = fingerprintSuppressionWindow(config.SeverityLow, staleThreshold, -5)
+	if got != staleThreshold {
+		t.Fatalf("fingerprintSuppressionWindow with negative priorClosures = %v, want %v", got, staleThreshold)
+	}
+}
+
 func TestSeverityEmoji(t *testing.T) {
 	tests := []struct {
 		severity string
@@ -369,54 +470,6 @@ func TestFormatReescalationMailBody(t *testing.T) {
 	}
 }
 
-func TestDetectSenderFallback(t *testing.T) {
-	// Save original env vars
-	origActor := os.Getenv("BD_ACTOR")
-	origRole := os.Getenv("GT_ROLE")
-	defer func() {
-		os.Setenv("BD_ACTOR", origActor)
-		os.Setenv("GT_ROLE", origRole)
-	}()
-
-	tests := []struct {
-		name  string
-		actor string
-		role  string
-		want  string
-	}{
-		{
-			name:  "BD_ACTOR takes priority",
-			actor: "gastown/polecats/alpha",
-			role:  "gastown/witness",
-			want:  "gastown/polecats/alpha",
-		},
-		{
-			name:  "GT_ROLE used when BD_ACTOR empty",
-			actor: "",
-			role:  "gastown/witness",
-			want:  "gastown/witness",
-		},
-		{
-			name:  "empty when both unset",
-			actor: "",
-			role:  "",
-			want:  "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			os.Setenv("BD_ACTOR", tt.actor)
-			os.Setenv("GT_ROLE", tt.role)
-
-			got := detectSenderFallback()
-			if got != tt.want {
-				t.Errorf("detectSenderFallback() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestExecuteExternalActions(t *testing.T) {
 	// executeExternalActions prints warnings/info but doesn't return errors.
 	// We test that it doesn't panic with various configurations.
@@ -578,6 +631,36 @@ func TestRunEscalateValidation(t *testing.T) {
 			t.Fatal("expected error for invalid severity")
 		}
 		if !strings.Contains(err.Error(), "invalid severity") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("empty reason rejected", func(t *testing.T) {
+		// gt-e8r6: an escalation with no reason carries only its title and
+		// cannot be acted on by its recipient.
+		escalateStdin = false
+		escalateReason = ""
+		escalateSeverity = "medium"
+
+		err := runEscalate(escalateCmd, []string{"test escalation"})
+		if err == nil {
+			t.Fatal("expected error when --reason is empty")
+		}
+		if !strings.Contains(err.Error(), "escalation reason is required") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("whitespace-only reason rejected", func(t *testing.T) {
+		escalateStdin = false
+		escalateReason = "   "
+		escalateSeverity = "medium"
+
+		err := runEscalate(escalateCmd, []string{"test escalation"})
+		if err == nil {
+			t.Fatal("expected error when --reason is whitespace-only")
+		}
+		if !strings.Contains(err.Error(), "escalation reason is required") {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})

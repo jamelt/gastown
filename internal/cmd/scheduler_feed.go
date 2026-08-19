@@ -279,6 +279,10 @@ func effectiveIssueForFeed(issue *beads.Issue, labelsByID map[string]beadStatusI
 	effective := *issue
 	if info, ok := labelsByID[issue.ID]; ok {
 		effective.Labels = info.Labels
+		// bd ready --json returns sparse dependency entries (no parent
+		// issue_type), so the molecule-machinery skip below can only see a
+		// step bead's molecule parent via the batch bd-show overlay.
+		effective.Dependencies = info.Dependencies
 	}
 	return &effective
 }
@@ -307,6 +311,14 @@ func feedSkipReason(issue *beads.Issue) (string, bool) {
 	}
 	if isEpicOrConvoyIssue(issue) {
 		return "epic/convoy container, not dispatchable work", true
+	}
+	// gt-6va3: a stale formula-molecule container or one of its materialized
+	// step beads (parent-child edge to a molecule) is scaffolding, not real
+	// work. Skip early for a clean feed decision; scheduleBead/executeSling
+	// also reject it as defense-in-depth. Requires the bd-show dependency
+	// overlay (see effectiveIssueForFeed) for the step-bead case.
+	if beads.IsMoleculeContainerOrStep(issue) {
+		return "formula molecule machinery, not dispatchable work", true
 	}
 	if reason, blocked := requiresHumanDecision(issue); blocked {
 		return reason, true

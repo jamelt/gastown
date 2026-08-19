@@ -294,18 +294,21 @@ log "=== Deacon Health ==="
 
 DEACON_SESSION="hq-deacon"
 DEACON_ISSUE=""
+DEACON_REASON=""
 DEACON_DIVERGENCE=""
 DEACON_PROCESS_ALIVE=0
 
 if ! tmux has-session -t "$DEACON_SESSION" 2>/dev/null; then
   log "  CRASHED: Deacon session is dead"
   DEACON_ISSUE="crashed"
+  DEACON_REASON="Deacon tmux session $DEACON_SESSION is not running"
 else
   DEACON_PID=$(tmux list-panes -t "$DEACON_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
   DEACON_COMM=$(ps -o comm= -p "$DEACON_PID" 2>/dev/null || true)
   if [ -z "$DEACON_COMM" ]; then
     log "  ZOMBIE: Deacon process dead (pid=$DEACON_PID), session alive"
     DEACON_ISSUE="zombie"
+    DEACON_REASON="Deacon process is dead (pid=$DEACON_PID) but tmux session $DEACON_SESSION is still alive"
   else
     log "  Process alive: pid=$DEACON_PID comm=$DEACON_COMM"
     DEACON_PROCESS_ALIVE=1
@@ -336,6 +339,7 @@ else
       else
         log "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >${DEACON_STALE_SECONDS}s threshold), no recent session activity"
         DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
+        DEACON_REASON="Deacon heartbeat is ${HEARTBEAT_AGE}s old (over the ${DEACON_STALE_SECONDS}s threshold) with no recent tmux session activity"
       fi
     else
       log "  OK: Deacon heartbeat ${HEARTBEAT_AGE}s old"
@@ -358,10 +362,20 @@ if [ "$TOTAL_ISSUES" -ge "$MASS_DEATH_THRESHOLD" ]; then
   if [ "$CONFIRMED_TOTAL" -ge "$MASS_DEATH_THRESHOLD" ]; then
     MASS_DEATH=1
     log "MASS DEATH: $CONFIRMED_TOTAL agents down confirmed — escalating instead of restarting"
+    MASS_DEATH_DETAIL=""
+    for ENTRY in ${CRASHED[@]+"${CRASHED[@]}"}; do
+      IFS='|' read -r _ RIG PCAT HOOK <<< "$ENTRY"
+      MASS_DEATH_DETAIL="${MASS_DEATH_DETAIL}crashed: $RIG/$PCAT (hook=$HOOK)\n"
+    done
+    for ENTRY in ${STUCK[@]+"${STUCK[@]}"}; do
+      IFS='|' read -r _ RIG PCAT HOOK REASON <<< "$ENTRY"
+      MASS_DEATH_DETAIL="${MASS_DEATH_DETAIL}stuck: $RIG/$PCAT (hook=$HOOK, reason=$REASON)\n"
+    done
     gt escalate "Mass agent death: $CONFIRMED_TOTAL agents down" \
       -s CRITICAL \
       --source "plugin:stuck-agent-dog" \
-      --fingerprint "stuck-agent-dog:mass-death" 2>/dev/null || true
+      --fingerprint "stuck-agent-dog:mass-death" \
+      --reason "$(printf '%b' "$MASS_DEATH_DETAIL")" 2>/dev/null || true
   else
     log "NOTICE: mass-death candidates dropped to $CONFIRMED_TOTAL after live re-check; no CRITICAL escalation"
   fi
@@ -414,7 +428,8 @@ if [ -n "$DEACON_ISSUE" ]; then
 	gt escalate "Deacon $DEACON_ISSUE detected by stuck-agent-dog" \
 		-s "$DEACON_SEVERITY" \
 		--source "plugin:stuck-agent-dog" \
-		--fingerprint "$DEACON_FINGERPRINT" 2>/dev/null || true
+		--fingerprint "$DEACON_FINGERPRINT" \
+		--reason "${DEACON_REASON:-Deacon issue: $DEACON_ISSUE}" 2>/dev/null || true
 fi
 
 # --- Report -------------------------------------------------------------------

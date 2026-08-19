@@ -23,16 +23,18 @@ setup_bins() {
   INSTALL_DIR="$TMPDIR/home/.local/bin"
   BREW_DIR="$TMPDIR/usr/local/bin"
   OTHER_DIR="$TMPDIR/usr/bin"
-  mkdir -p "$INSTALL_DIR" "$BREW_DIR" "$OTHER_DIR"
+  GASTOWN_BIN_DIR="$TMPDIR/home/.local/gastown/bin"
+  mkdir -p "$INSTALL_DIR" "$BREW_DIR" "$OTHER_DIR" "$GASTOWN_BIN_DIR"
   printf '#!/usr/bin/env sh\nexit 0\n' > "$INSTALL_DIR/gt"
   printf '#!/usr/bin/env sh\nexit 0\n' > "$BREW_DIR/gt"
-  chmod +x "$INSTALL_DIR/gt" "$BREW_DIR/gt"
+  printf '#!/usr/bin/env sh\nexit 0\n' > "$GASTOWN_BIN_DIR/gt"
+  chmod +x "$INSTALL_DIR/gt" "$BREW_DIR/gt" "$GASTOWN_BIN_DIR/gt"
 }
 
 run_check() {
   local path_value="$1"
   env PATH="$path_value" "$MAKE_BIN" --no-print-directory -C "$REPO_ROOT" \
-    check-install-path INSTALL_DIR="$INSTALL_DIR" 2>&1
+    check-install-path INSTALL_DIR="$INSTALL_DIR" GASTOWN_BIN_DIR="$GASTOWN_BIN_DIR" 2>&1
 }
 
 assert_empty() {
@@ -97,6 +99,11 @@ cleanup
 setup_bins
 output="$(run_check "$BREW_DIR:$INSTALL_DIR:$OTHER_DIR:$SYSTEM_PATH")"
 assert_warns "warns when earlier Homebrew-style gt shadows install" "$output" "$BREW_DIR/gt"
+cleanup
+
+setup_bins
+output="$(run_check "$GASTOWN_BIN_DIR:$INSTALL_DIR:$OTHER_DIR:$SYSTEM_PATH")"
+assert_empty "no warning when the maintained gastown-bin symlink wins PATH" "$output"
 cleanup
 
 echo "=== warn-if-install-symlink tests ==="

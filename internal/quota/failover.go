@@ -34,17 +34,22 @@ type AgentFailoverAssignment struct {
 
 // AgentFailoverPlan is a deterministic, reviewable cross-provider plan.
 type AgentFailoverPlan struct {
-	LimitedSessions  []ScanResult                       `json:"limited_sessions"`
-	Assignments      map[string]AgentFailoverAssignment `json:"assignments"`
-	Skipped          map[string]string                  `json:"skipped,omitempty"`
-	ProviderCooldown string                             `json:"provider_cooldown"`
-	MaxPerSession    int                                `json:"max_per_session"`
+	LimitedSessions   []ScanResult                       `json:"limited_sessions"`
+	NearLimitSessions []ScanResult                       `json:"near_limit_sessions,omitempty"`
+	Assignments       map[string]AgentFailoverAssignment `json:"assignments"`
+	Skipped           map[string]string                  `json:"skipped,omitempty"`
+	ProviderCooldown  string                             `json:"provider_cooldown"`
+	MaxPerSession     int                                `json:"max_per_session"`
 }
 
 // PlanAgentFailover plans strictly-forward transitions for hard-limited
-// sessions. It never plans from near-limit warnings or ordinary task failures.
-// Providers observed as hard-limited anywhere in the scan are excluded as
-// candidates for the entire plan.
+// sessions and, when settings.IncludeNearLimit is set, for sessions
+// approaching their limit as well — so a session can move off a dying
+// provider before it takes the hard 429 instead of always reacting to one.
+// It never plans from ordinary task failures. Providers observed as
+// hard-limited anywhere in the scan are excluded as candidates for the
+// entire plan; a near-limit session does not exclude its own provider,
+// since the limit has not actually been confirmed there.
 func PlanAgentFailover(
 	results []ScanResult,
 	state *config.QuotaState,
@@ -91,10 +96,14 @@ func PlanAgentFailover(
 	limitedProviders := make(map[string]bool)
 
 	for _, result := range results {
-		if !result.RateLimited {
+		switch {
+		case result.RateLimited:
+			plan.LimitedSessions = append(plan.LimitedSessions, result)
+		case settings.IncludeNearLimit && result.NearLimit:
+			plan.NearLimitSessions = append(plan.NearLimitSessions, result)
+		default:
 			continue
 		}
-		plan.LimitedSessions = append(plan.LimitedSessions, result)
 
 		route, err := routeResolver(result)
 		if err != nil {
@@ -118,7 +127,9 @@ func PlanAgentFailover(
 			}
 			continue
 		}
-		limitedProviders[currentProvider] = true
+		if result.RateLimited {
+			limitedProviders[currentProvider] = true
+		}
 		sessions = append(sessions, resolvedSession{
 			result:          result,
 			route:           route,

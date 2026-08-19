@@ -70,7 +70,19 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	// lands) falls through to the real predicate checks below instead of
 	// bailing out here — otherwise a merged/clean polecat gets NEEDS_RECOVERY
 	// with no blockers, disagreeing with git-state for no reason (gt-check-recovery-bug).
-	if in.State != StateIdle && in.State != StateDone {
+	//
+	// StateStuck falls through for the identical reason (hq-f2n8c). `gt done
+	// --status DEFERRED` and `--status ESCALATED` both map to agent_state=stuck,
+	// and DEFERRED is the sanctioned way to report "this work turned out
+	// unnecessary". Bailing out here classified every such polecat
+	// NEEDS_RECOVERY unconditionally — at any level of worktree cleanliness —
+	// because every predicate that could clear it is defined below this return.
+	// The slot could then only be freed by an external actor mutating
+	// agent_state, which is how a whole rig reaches reusable=0 and stops
+	// dispatching. Falling through classifies a stuck polecat on its merits;
+	// genuinely dirty ones are still held by the predicates below, which
+	// already encode the fail-closed behaviour.
+	if in.State != StateIdle && in.State != StateDone && in.State != StateStuck {
 		verdict := WorkstateVerdictNeedsRecovery
 		needsRecovery := true
 		if in.State == StateWorking {
@@ -85,6 +97,11 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 		}
 		if in.ActiveWorkBlocker != "" {
 			d.Blockers = append(d.Blockers, in.ActiveWorkBlocker)
+		} else if needsRecovery {
+			// Every NEEDS_RECOVERY verdict must name the predicate that produced
+			// it. Leaving Blockers empty here renders as an unnameable "unknown
+			// recovery predicate" refusal that cannot be escalated (gt-7j22).
+			d.Blockers = append(d.Blockers, "state="+string(in.State))
 		}
 		return d
 	}
@@ -114,23 +131,38 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 		block("active-work", in.ActiveWorkBlocker, in.ActiveWorkCountsTowardCapacity)
 	}
 	if !in.IgnoreCleanupStatus && !in.CleanupStatus.IsSafe() {
-		reason := "cleanup-" + string(in.CleanupStatus)
-		blocker := "cleanup_status=" + string(in.CleanupStatus)
-		countsTowardCapacity := true
-		if in.CleanupStatus == "" {
-			reason = "cleanup-unknown"
-			blocker = "cleanup_status=<missing>"
-			// cleanup_status was optional before the integrated lifecycle
-			// classifier. Preserve the fail-closed recovery verdict, but do not
-			// let absent historical metadata alone reserve scheduler capacity.
-			// Direct uncertainty or worktree risk is represented by the git,
-			// hook, work, and MR predicates below and still consumes capacity.
-			countsTowardCapacity = false
-		} else if in.CleanupStatus == CleanupUnknown {
-			reason = "cleanup-unknown"
-			countsTowardCapacity = false
+		// "" (never recorded) and CleanupUnknown (recorded as undetermined) both
+		// mean the same thing: nobody ever computed this value. That is an
+		// absence of evidence, not evidence of risk — and it is unrecoverable on
+		// its own, because the only route to a real cleanup_status is a repair
+		// path that this very predicate refuses to run. A rig whose polecats all
+		// carry it reaches reusable=0 and stops dispatching, and every bead the
+		// scheduler then tries burns its respawn attempts and latches (hq-f2n8c;
+		// trader-z67n, trader-lxfo, trader-nlta).
+		//
+		// The real evidence is git, and the predicates below already read it:
+		// GitCheckFailed, GitDirty, StashCount and UnpushedCommits each block on
+		// their own and are individually fail-closed. When the git check
+		// succeeded we defer to them rather than veto on missing metadata —
+		// which also settles the standing disagreement where git-state reports
+		// CLEAN and check-recovery reports NEEDS_RECOVERY for the same polecat
+		// (hq-vv0q). When the git check did NOT succeed we have no evidence at
+		// all, so we keep blocking.
+		unknownCleanup := in.CleanupStatus == "" || in.CleanupStatus == CleanupUnknown
+		if !unknownCleanup || in.GitCheckFailed {
+			reason := "cleanup-" + string(in.CleanupStatus)
+			blocker := "cleanup_status=" + string(in.CleanupStatus)
+			countsTowardCapacity := true
+			if in.CleanupStatus == "" {
+				reason = "cleanup-unknown"
+				blocker = "cleanup_status=<missing>"
+				countsTowardCapacity = false
+			} else if in.CleanupStatus == CleanupUnknown {
+				reason = "cleanup-unknown"
+				countsTowardCapacity = false
+			}
+			block(reason, blocker, countsTowardCapacity)
 		}
-		block(reason, blocker, countsTowardCapacity)
 	}
 	if in.GitCheckFailed {
 		blocker := in.GitCheckFailedReason

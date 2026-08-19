@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func setupSlingTestRegistry(t *testing.T) {
@@ -119,6 +121,10 @@ func TestNudgeWitnessDoesNotEmitEvent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
 
+	prevEscalate := escalateNudgeFailure
+	t.Cleanup(func() { escalateNudgeFailure = prevEscalate })
+	escalateNudgeFailure = func(string, string, error) {}
+
 	nudgeWitness("gastown", "POLECAT_DONE: test")
 
 	paths, err := filepath.Glob(filepath.Join(townRoot, "events", "witness", "*.event"))
@@ -127,6 +133,61 @@ func TestNudgeWitnessDoesNotEmitEvent(t *testing.T) {
 	}
 	if len(paths) != 0 {
 		t.Fatalf("witness event files = %v, want none", paths)
+	}
+}
+
+// TestQueueFallbackNudgeIgnoresOtherErrors verifies that a nudge failure
+// unrelated to a stranded composer (e.g. dead session) is returned unchanged
+// instead of being queued — queueing only makes sense when the text is known
+// to have made it into the composer (gt-ax7a).
+func TestQueueFallbackNudgeIgnoresOtherErrors(t *testing.T) {
+	townRoot := t.TempDir()
+	original := fmt.Errorf("nudge to session %q: session not found", "gt-witness")
+
+	got := queueFallbackNudge(townRoot, "gt-witness", "hello", original)
+
+	if got != original {
+		t.Fatalf("queueFallbackNudge() = %v, want unchanged %v", got, original)
+	}
+	if n, _ := nudge.Pending(townRoot, "gt-witness"); n != 0 {
+		t.Fatalf("queueFallbackNudge() queued %d nudges for a non-stranded error, want 0", n)
+	}
+}
+
+// TestQueueFallbackNudgeWithoutTownRootReturnsOriginal verifies that without
+// a resolvable town root (queueing is impossible: nowhere to write the queue
+// file), the original stranded-composer error is surfaced rather than
+// silently swallowed.
+func TestQueueFallbackNudgeWithoutTownRootReturnsOriginal(t *testing.T) {
+	original := fmt.Errorf("nudge to session %q: %w", "gt-witness", tmux.ErrSubmitNotVerified)
+
+	got := queueFallbackNudge("", "gt-witness", "hello", original)
+
+	if got != original {
+		t.Fatalf("queueFallbackNudge() = %v, want unchanged %v", got, original)
+	}
+}
+
+// TestQueueFallbackNudgeOnStrandedComposerQueuesMessage verifies the actual
+// fix for gt-ax7a: when a nudge fails with ErrSubmitNotVerified (text was
+// typed into the composer but a pre-existing draft blocked submission), the
+// message is queued for durable delivery instead of being dropped with a
+// warning.
+func TestQueueFallbackNudgeOnStrandedComposerQueuesMessage(t *testing.T) {
+	townRoot := t.TempDir()
+	stranded := fmt.Errorf("nudge to session %q: %w", "gt-witness", tmux.ErrSubmitNotVerified)
+
+	got := queueFallbackNudge(townRoot, "gt-witness", "Polecat dispatched - check for work", stranded)
+
+	if got != nil {
+		t.Fatalf("queueFallbackNudge() = %v, want nil (queued successfully)", got)
+	}
+	queued, err := nudge.Drain(townRoot, "gt-witness")
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(queued) != 1 || queued[0].Message != "Polecat dispatched - check for work" {
+		t.Fatalf("queued nudges = %+v, want one entry with the stranded message", queued)
 	}
 }
 
@@ -186,6 +247,53 @@ func TestIsDeferredBead(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isDeferredBead(tt.info); got != tt.want {
 				t.Errorf("isDeferredBead(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMoleculeScaffoldRejectReason covers the guard scheduleBead and
+// executeSling apply to keep formula-molecule scaffolding out of dispatch
+// (gt-6va3). getBeadInfo populates IssueType and Dependencies from bd show, so
+// the choke points always see the parent's molecule type.
+func TestMoleculeScaffoldRejectReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		info       *beadInfo
+		wantReject bool
+	}{
+		{"nil info", nil, false},
+		{"ordinary task dispatches", &beadInfo{Status: "open", IssueType: "task"}, false},
+		{"molecule container rejected", &beadInfo{Status: "open", IssueType: "molecule"}, true},
+		{
+			name: "molecule step bead rejected via parent-child dependency",
+			info: &beadInfo{
+				Status:    "open",
+				IssueType: "task",
+				Dependencies: []beads.IssueDep{
+					{ID: "gt-vf2u", Type: "molecule", DependencyType: "parent-child"},
+				},
+			},
+			wantReject: true,
+		},
+		{
+			name: "task child of an epic dispatches",
+			info: &beadInfo{
+				Status:    "open",
+				IssueType: "task",
+				Dependencies: []beads.IssueDep{
+					{ID: "gt-epic", Type: "epic", DependencyType: "parent-child"},
+				},
+			},
+			wantReject: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := moleculeScaffoldRejectReason(tt.info)
+			if (reason != "") != tt.wantReject {
+				t.Errorf("moleculeScaffoldRejectReason(%+v) = %q, wantReject=%v", tt.info, reason, tt.wantReject)
 			}
 		})
 	}

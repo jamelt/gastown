@@ -20,14 +20,14 @@ import (
 
 func TestWitnessHasSubmittableWorkUsesBranchTargetStatus(t *testing.T) {
 	repo := setupWitnessSquashPreservedRepo(t)
-	if got := witnessHasSubmittableWork(repo, []string{"integration/test"}); got {
+	if got := witnessHasSubmittableWork(repo, "origin", []string{"integration/test"}); got {
 		t.Fatal("squash-preserved branch should not require MQ submission through witness helper")
 	}
 
 	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\nthree\n")
 	runWitnessGit(t, repo, "add", "feature.txt")
 	runWitnessGit(t, repo, "commit", "-m", "extra local work")
-	if got := witnessHasSubmittableWork(repo, []string{"integration/test"}); !got {
+	if got := witnessHasSubmittableWork(repo, "origin", []string{"integration/test"}); !got {
 		t.Fatal("new local work after squash preservation should still require MQ submission")
 	}
 }
@@ -2644,6 +2644,69 @@ func TestZombieNeverHeartbeated_Classification(t *testing.T) {
 	if !shouldNotFlag {
 		t.Errorf("expected no flag for session age=%v, threshold=%v",
 			time.Since(newSession).Round(time.Second), config.DefaultWitnessHeartbeatStartupGrace)
+	}
+}
+
+func TestZombieIdleAtPromptWorking_Classification(t *testing.T) {
+	t.Parallel()
+	if ZombieIdleAtPromptWorking != "idle-at-prompt-working" {
+		t.Errorf("ZombieIdleAtPromptWorking = %q, want %q", ZombieIdleAtPromptWorking, "idle-at-prompt-working")
+	}
+	// Reported state says "working" — implies active work, same as the other
+	// working-state classifications.
+	if !ZombieIdleAtPromptWorking.ImpliesActiveWork() {
+		t.Error("ZombieIdleAtPromptWorking should imply active work")
+	}
+}
+
+// TestIsIdleAtPromptWorkingAnomaly exercises the gt-xwdn invariant check
+// directly: agent_state="working" reported alongside a session that a
+// point-in-time tmux read shows sitting idle at its input prompt is an
+// anomaly regardless of which code path produced the stale "working" state
+// (see gt-k2ab, the specific bug this generalizes defense against).
+func TestIsIdleAtPromptWorkingAnomaly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		agentState  string
+		sessionIdle bool
+		want        bool
+	}{
+		{"working + idle at prompt → anomaly", "working", true, true},
+		{"working + busy → healthy", "working", false, false},
+		{"idle + idle at prompt → healthy (expected)", "idle", true, false},
+		{"idle + busy → healthy", "idle", false, false},
+		{"running + idle at prompt → not this invariant", "running", true, false},
+		{"empty state + idle at prompt → not this invariant", "", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isIdleAtPromptWorkingAnomaly(tt.agentState, tt.sessionIdle)
+			if got != tt.want {
+				t.Errorf("isIdleAtPromptWorkingAnomaly(%q, %v) = %v, want %v",
+					tt.agentState, tt.sessionIdle, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewIdleAtPromptWorkingZombie(t *testing.T) {
+	t.Parallel()
+	z := newIdleAtPromptWorkingZombie("alpha", "working", "gt-hook-1", "test reason")
+
+	if z.Classification != ZombieIdleAtPromptWorking {
+		t.Errorf("Classification = %q, want %q", z.Classification, ZombieIdleAtPromptWorking)
+	}
+	if !z.WasActive {
+		t.Error("WasActive = false, want true (agent_state=working is evidence of active work)")
+	}
+	if z.PolecatName != "alpha" || z.AgentState != "working" || z.HookBead != "gt-hook-1" {
+		t.Errorf("unexpected zombie fields: %+v", z)
+	}
+	if z.Action != "flagged-for-review (test reason)" {
+		t.Errorf("Action = %q, want flag-only action with reason", z.Action)
 	}
 }
 

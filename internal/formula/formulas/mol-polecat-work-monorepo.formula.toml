@@ -365,8 +365,16 @@ git log origin/{{base_branch}}..HEAD --oneline
 This MUST show at least 1 commit. If it shows NOTHING:
 - You have NOT completed your implementation. Do NOT close this step.
 - Go back to the implement step and do the work.
-- If the task genuinely requires no code changes (already fixed upstream, etc.),
-  run `gt done --status DEFERRED` and skip remaining steps.
+- If the task genuinely requires no code changes and your finding is terminal
+  (already fixed upstream, can't reproduce, not applicable — nothing will
+  change on a re-run): `bd close {{issue}} --reason="no-changes: <brief
+  explanation>"` then `gt done --cleanup-status clean` and skip remaining
+  steps. Do NOT use `--status DEFERRED` here — a DEFERRED bead is left
+  open/reassignable, so the witness zombie patrol redispatches it to a new
+  polecat, which reaches the same terminal finding and defers again, forever
+  (gt-624k).
+- If the task is genuinely paused and more work will happen later, `gt done
+  --status DEFERRED` is correct and skips remaining steps.
 - Do NOT proceed to cleanup or submit with zero commits.
 
 **5. VERIFY clean working tree:**

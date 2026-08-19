@@ -286,6 +286,27 @@ func TestEngineerCloseMRWithReasonNormalizesSuperseded(t *testing.T) {
 	assertMRCloseReason(t, b, mrIssue.ID, string(CloseReasonSuperseded))
 }
 
+// TestEngineerCloseMRWithReasonRecordsNoOp covers gt-v2zr: closing an MR as a
+// no-op records close_reason=no-op and stamps no merge commit.
+func TestEngineerCloseMRWithReasonRecordsNoOp(t *testing.T) {
+	e, b, mrIssue, agentIssue, _ := setupEngineerTerminalCloseTest(t, "gt-wisp-old")
+
+	if err := e.closeMRWithReason(&MRInfo{ID: mrIssue.ID, AgentBead: agentIssue.ID}, string(CloseReasonNoop)); err != nil {
+		t.Fatalf("closeMRWithReason: %v", err)
+	}
+
+	assertIssueStatus(t, b, mrIssue.ID, string(beads.StatusClosed))
+	assertAgentActiveMR(t, b, agentIssue.ID, "")
+	assertMRCloseReason(t, b, mrIssue.ID, string(CloseReasonNoop))
+	issue, err := b.Show(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("show MR %s: %v", mrIssue.ID, err)
+	}
+	if fields := beads.ParseMRFields(issue); strings.TrimSpace(fields.MergeCommit) != "" {
+		t.Fatalf("no-op MR recorded merge_commit %q, want empty", fields.MergeCommit)
+	}
+}
+
 func setupEngineerTerminalCloseTest(t *testing.T, activeMR string) (*Engineer, *beads.Beads, *beads.Issue, *beads.Issue, *beads.Issue) {
 	t.Helper()
 	rigPath := t.TempDir()
@@ -1159,6 +1180,42 @@ func TestDoMergeDirectRejectsAdvancedSourceBranch(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "changed from submitted head") {
 		t.Fatalf("doMerge error = %q, want submitted-head drift", result.Error)
+	}
+}
+
+// TestDoMergeDirectNoOpBranchRecordsNoMergeCommit covers gt-v2zr: a branch with
+// zero commits ahead of target merges nothing, so doMerge must flag it as a no-op
+// and record no merge commit rather than stamping the unrelated target tip.
+func TestDoMergeDirectNoOpBranchRecordsNoMergeCommit(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	installNoPRGH(t)
+
+	// Branch that points at main's tip: 0 commits ahead, so the merge is a no-op.
+	branch := "polecat/test/noop"
+	run(t, workDir, "git", "branch", branch, "main")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+	mainBefore := run(t, workDir, "git", "rev-parse", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	result := e.doMerge(context.Background(), &MRInfo{
+		ID:        "mr-noop",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: commit,
+	})
+	if !result.Success {
+		t.Fatalf("doMerge failed for no-op branch: %s", result.Error)
+	}
+	if !result.NoOp {
+		t.Fatal("doMerge did not flag NoOp for a 0-commits-ahead branch")
+	}
+	if strings.TrimSpace(result.MergeCommit) != "" {
+		t.Fatalf("no-op merge recorded merge commit %q, want empty (no false provenance)", result.MergeCommit)
+	}
+	if mainAfter := run(t, workDir, "git", "rev-parse", "main"); mainAfter != mainBefore {
+		t.Fatalf("no-op merge advanced main from %s to %s", mainBefore, mainAfter)
 	}
 }
 

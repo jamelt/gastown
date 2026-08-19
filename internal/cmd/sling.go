@@ -131,6 +131,10 @@ var (
 	slingNoBoot        bool   // --no-boot: skip wakeRigAgents (avoid witness/refinery boot and lock contention)
 	slingMaxConcurrent int    // --max-concurrent: throttle spawn rate in batch mode (spawns N, pauses, spawns N more)
 	slingBaseBranch    string // --base-branch: override base branch for polecat worktree
+	slingBaseRef       string // --base-ref: override the ref work is based/rebased/diffed against
+	slingPublishRemote string // --publish-remote: override the remote branches are pushed to
+	slingPublishRef    string // --publish-ref: override the remote branch name work publishes under
+	slingPRTargetRef   string // --pr-target-ref: override "<remote>/<branch>" a PR/MR merges into
 	slingResumeBranch  string // --branch: resume an existing branch instead of creating a fresh one
 	slingResumePR      int    // --pr: resume the head branch of an existing PR (resolves via gh)
 	slingRalph         bool   // --ralph: enable Ralph Wiggum loop mode for multi-step workflows
@@ -168,6 +172,10 @@ func init() {
 	slingCmd.Flags().BoolVar(&slingNoBoot, "no-boot", false, "Skip rig boot after polecat spawn (avoids witness/refinery lock contention)")
 	slingCmd.Flags().IntVar(&slingMaxConcurrent, "max-concurrent", 0, "Throttle spawn rate: spawn N polecats, pause, then spawn N more (0 = no throttle). Does not limit total concurrent polecats")
 	slingCmd.Flags().StringVar(&slingBaseBranch, "base-branch", "", "Override base branch for polecat worktree (e.g., 'develop', 'release/v2')")
+	slingCmd.Flags().StringVar(&slingBaseRef, "base-ref", "", "Override the ref work is based/rebased/diffed against (e.g., 'upstream/main')")
+	slingCmd.Flags().StringVar(&slingPublishRemote, "publish-remote", "", "Override the remote to push branches to (default: 'origin')")
+	slingCmd.Flags().StringVar(&slingPublishRef, "publish-ref", "", "Override the remote branch name work publishes under (default: local branch name)")
+	slingCmd.Flags().StringVar(&slingPRTargetRef, "pr-target-ref", "", "Override '<remote>/<branch>' a PR/MR merges into (e.g., 'upstream/main')")
 	slingCmd.Flags().StringVar(&slingResumeBranch, "branch", "", "Resume work on an existing branch instead of creating a fresh polecat branch (use to fix an existing PR)")
 	slingCmd.Flags().IntVar(&slingResumePR, "pr", 0, "Resume work on the head branch of an existing PR (resolved via 'gh pr view'). Mutually exclusive with --branch.")
 	slingCmd.Flags().BoolVar(&slingRalph, "ralph", false, "Enable Ralph Wiggum loop mode (fresh context per step, for multi-step workflows)")
@@ -250,8 +258,8 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if slingResumeBranch != "" && slingResumePR != 0 {
 		return fmt.Errorf("--branch and --pr are mutually exclusive")
 	}
-	if (slingResumeBranch != "" || slingResumePR != 0) && slingBaseBranch != "" {
-		return fmt.Errorf("--base-branch cannot be combined with --branch or --pr (resume implies starting on the existing branch)")
+	if (slingResumeBranch != "" || slingResumePR != 0) && (slingBaseBranch != "" || slingBaseRef != "") {
+		return fmt.Errorf("--base-branch/--base-ref cannot be combined with --branch or --pr (resume implies starting on the existing branch)")
 	}
 
 	// Disable Dolt auto-commit for all bd commands run during sling (gt-u6n6a).
@@ -403,6 +411,10 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				Vars:                 slingVars,
 				Merge:                slingMerge,
 				BaseBranch:           slingBaseBranch,
+				BaseRef:              slingBaseRef,
+				PublishRemote:        slingPublishRemote,
+				PublishRef:           slingPublishRef,
+				PRTargetRef:          slingPRTargetRef,
 				ResumeBranch:         slingResumeBranch,
 				TargetAgent:          target.Agent,
 				NoConvoy:             slingNoConvoy,
@@ -447,6 +459,10 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			Vars:                 slingVars,
 			Merge:                slingMerge,
 			BaseBranch:           slingBaseBranch,
+			BaseRef:              slingBaseRef,
+			PublishRemote:        slingPublishRemote,
+			PublishRef:           slingPublishRef,
+			PRTargetRef:          slingPRTargetRef,
 			ResumeBranch:         slingResumeBranch,
 			NoConvoy:             slingNoConvoy,
 			Owned:                slingOwned,
@@ -498,6 +514,10 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				Vars:                 slingVars,
 				Merge:                slingMerge,
 				BaseBranch:           slingBaseBranch,
+				BaseRef:              slingBaseRef,
+				PublishRemote:        slingPublishRemote,
+				PublishRef:           slingPublishRef,
+				PRTargetRef:          slingPRTargetRef,
 				ResumeBranch:         slingResumeBranch,
 				TargetAgent:          target.Agent,
 				NoConvoy:             slingNoConvoy,
@@ -654,6 +674,14 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Not bypassed by --force — if you need to re-dispatch, reopen the bead first.
 	if info.Status == "closed" || info.Status == "tombstone" {
 		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
+	}
+
+	// Molecule-machinery guard (gt-6va3): a formula-molecule container or one of
+	// its materialized step beads is scaffolding, never real work. Mirrors the
+	// closed/tombstone guard above and the same check in scheduleBead and
+	// executeSling — no override, since no dispatch of it is ever legitimate.
+	if reason := moleculeScaffoldRejectReason(info); reason != "" {
+		return fmt.Errorf("bead %s is %s", beadID, reason)
 	}
 
 	// Guard against slinging deferred beads (gt-1326mw).
@@ -905,7 +933,12 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			existingConvoy := isTrackedByConvoy(beadID)
 			if existingConvoy == "" {
 				var err error
-				convoyID, err = createAutoConvoy(beadID, info.Title, slingOwned, slingMerge, slingBaseBranch)
+				convoyID, err = createAutoConvoy(beadID, info.Title, slingOwned, slingMerge, slingBaseBranch, git.WorkRefs{
+					BaseRef:       slingBaseRef,
+					PublishRemote: slingPublishRemote,
+					PublishRef:    slingPublishRef,
+					PRTargetRef:   slingPRTargetRef,
+				})
 				if err != nil {
 					// Log warning but don't fail - convoy is optional
 					fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)

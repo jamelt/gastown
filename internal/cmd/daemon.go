@@ -59,6 +59,16 @@ Examples:
 	RunE: runDaemonStop,
 }
 
+var daemonRestartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the daemon",
+	Long: `Restart the Gas Town daemon.
+
+Stops the running daemon (if any) and starts a fresh one. Equivalent to
+'gt daemon stop && gt daemon start' but tolerates a not-running daemon.`,
+	RunE: runDaemonRestart,
+}
+
 var daemonStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show daemon status",
@@ -158,6 +168,7 @@ var (
 func init() {
 	daemonCmd.AddCommand(daemonStartCmd)
 	daemonCmd.AddCommand(daemonStopCmd)
+	daemonCmd.AddCommand(daemonRestartCmd)
 	daemonCmd.AddCommand(daemonStatusCmd)
 	daemonCmd.AddCommand(daemonLogsCmd)
 	daemonCmd.AddCommand(daemonRunCmd)
@@ -188,11 +199,30 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("daemon already running (PID %d)", pid)
 	}
 
-	// Start daemon in background
-	// We use 'gt daemon run' as the actual daemon process
+	pid, startedByUs, err := startDaemonProcess(townRoot)
+	if err != nil {
+		return err
+	}
+	if !startedByUs {
+		// Another concurrent start won the lock race - that's fine, report it.
+		fmt.Printf("%s Daemon already running (PID %d)\n", style.Bold.Render("●"), pid)
+		return nil
+	}
+
+	fmt.Printf("%s Daemon started (PID %d)\n", style.Bold.Render("✓"), pid)
+	return nil
+}
+
+// startDaemonProcess spawns a detached `gt daemon run`, waits up to 3s for it to
+// acquire the daemon lock, and resolves the start/PID race. Callers must have
+// already ensured no daemon is running (start) or stopped the old one (restart).
+// Returns the running PID and whether the process we spawned is the one that won
+// the lock (false means a concurrent start beat us to it).
+func startDaemonProcess(townRoot string) (pid int, startedByUs bool, err error) {
+	// We use 'gt daemon run' as the actual daemon process.
 	gtPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("finding executable: %w", err)
+		return 0, false, fmt.Errorf("finding executable: %w", err)
 	}
 
 	daemonCmd := exec.Command(gtPath, "daemon", "run")
@@ -205,40 +235,33 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 	util.SetDetachedProcessGroup(daemonCmd)
 
 	if err := daemonCmd.Start(); err != nil {
-		return fmt.Errorf("starting daemon: %w", err)
+		return 0, false, fmt.Errorf("starting daemon: %w", err)
 	}
 
 	// Poll for daemon to initialize and acquire the lock (up to 3s)
 	var started bool
 	for range 30 {
 		time.Sleep(100 * time.Millisecond)
-		running, pid, err = daemon.IsRunning(townRoot)
+		running, p, err := daemon.IsRunning(townRoot)
 		if err != nil {
-			return fmt.Errorf("checking daemon status: %w", err)
+			return 0, false, fmt.Errorf("checking daemon status: %w", err)
 		}
 		if running {
+			pid = p
 			started = true
 			break
 		}
 	}
 	if !started {
 		if msg := readDaemonStartupFailure(townRoot, daemonCmd.Process.Pid); msg != "" {
-			return fmt.Errorf("daemon failed to start: %s", msg)
+			return 0, false, fmt.Errorf("daemon failed to start: %s", msg)
 		}
-		return fmt.Errorf("daemon failed to start (check logs with 'gt daemon logs')")
+		return 0, false, fmt.Errorf("daemon failed to start (check logs with 'gt daemon logs')")
 	}
 
-	// Check if our spawned process is the one that won the race.
 	// If another concurrent start won, our process would have exited after
 	// failing to acquire the lock, and the PID file would have a different PID.
-	if pid != daemonCmd.Process.Pid {
-		// Another daemon won the race - that's fine, report it
-		fmt.Printf("%s Daemon already running (PID %d)\n", style.Bold.Render("●"), pid)
-		return nil
-	}
-
-	fmt.Printf("%s Daemon started (PID %d)\n", style.Bold.Render("✓"), pid)
-	return nil
+	return pid, pid == daemonCmd.Process.Pid, nil
 }
 
 func runDaemonStop(cmd *cobra.Command, args []string) error {
@@ -260,6 +283,37 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s Daemon stopped (was PID %d)\n", style.Bold.Render("✓"), pid)
+	return nil
+}
+
+func runDaemonRestart(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// Stop the running daemon first (if any). StopDaemon errors when nothing is
+	// running, so gate on IsRunning and just start fresh otherwise.
+	running, _, err := daemon.IsRunning(townRoot)
+	if err != nil {
+		return fmt.Errorf("checking daemon status: %w", err)
+	}
+	if running {
+		if err := daemon.StopDaemon(townRoot); err != nil {
+			return fmt.Errorf("stopping daemon: %w", err)
+		}
+	}
+
+	pid, startedByUs, err := startDaemonProcess(townRoot)
+	if err != nil {
+		return err
+	}
+	if !startedByUs {
+		fmt.Printf("%s Daemon already running (PID %d)\n", style.Bold.Render("●"), pid)
+		return nil
+	}
+
+	fmt.Printf("%s Daemon restarted (PID %d)\n", style.Bold.Render("✓"), pid)
 	return nil
 }
 

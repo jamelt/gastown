@@ -1223,7 +1223,6 @@ func computePolecatRecoveryStatus(mgr *polecat.Manager, r *rig.Rig, rigName, pol
 		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
 	}
 
-	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
 	if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" {
 		sessionDormant := false
@@ -1250,6 +1249,7 @@ func computePolecatRecoveryStatus(mgr *polecat.Manager, r *rig.Rig, rigName, pol
 			status.Diagnostics = append(status.Diagnostics, "legacy_cleanup_status=<missing> evidence="+legacyCleanupReadOnlyProvenance)
 		}
 	}
+	status.CleanupStatus = displayedCleanupStatus(input)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
@@ -1329,7 +1329,12 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 				}
 			}
 		} else {
-			fmt.Printf("  %s Cleanup refused by an unknown recovery predicate.\n", style.Warning.Render("⚠"))
+			// DecideWorkstate is expected to name a predicate on every
+			// NEEDS_RECOVERY verdict; reaching here means it did not (a bug in
+			// the classifier, not a real absence of a cause). Dump the status
+			// fields evaluated so the escalation is actionable (gt-7j22).
+			fmt.Printf("  %s Cleanup refused with no named predicate (classifier bug) — reason=%q cleanup_status=%q diagnostics=%q\n",
+				style.Warning.Render("⚠"), status.Reason, status.CleanupStatus, strings.Join(status.Diagnostics, "; "))
 		}
 		fmt.Println("  Escalate to Mayor for recovery before cleanup.")
 	default:
@@ -1428,6 +1433,18 @@ func cleanupStatusBlocker(status polecat.CleanupStatus) string {
 	default:
 		return fmt.Sprintf("cleanup_status=%s", status)
 	}
+}
+
+// displayedCleanupStatus is the cleanup status check-recovery prints. It must
+// match the value the verdict was actually decided on: when IgnoreCleanupStatus
+// is set, DecideWorkstate already treated the raw stored value as stale and
+// superseded by live evidence, so a raw/stale display (e.g. "unknown") next
+// to a verdict like SAFE_TO_NUKE would contradict the verdict it sits beside.
+func displayedCleanupStatus(input polecat.WorkstateInput) polecat.CleanupStatus {
+	if input.IgnoreCleanupStatus {
+		return polecat.CleanupClean
+	}
+	return input.CleanupStatus
 }
 
 func cleanupStatusBlockerForRecovery(status polecat.CleanupStatus, partialSpawnWithoutHook bool) string {
