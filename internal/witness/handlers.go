@@ -617,30 +617,44 @@ func createSwarmWisp(bd *BdCli, workDir string, payload *SwarmStartPayload) (str
 	return created.ID, nil
 }
 
-// findCleanupWisp finds an existing cleanup wisp for a polecat.
-func findCleanupWisp(bd *BdCli, workDir, polecatName string) (string, error) {
+// listWispIDsByLabel bulk-lists open wisp IDs matching the given label
+// selector (e.g. "polecat:nux,state:merge-requested" or
+// "state:merge-requested"). Shared by findCleanupWisp, findAllCleanupWisps,
+// and ReconcileMergeRequestedWisps so the bd list/--status open/--json
+// query and JSON-unmarshal-into-IDs logic exists in exactly one place.
+func listWispIDsByLabel(bd *BdCli, workDir, labelSelector string) ([]string, error) {
 	output, err := bd.Exec(workDir, "list",
-		"--label", fmt.Sprintf("polecat:%s,state:merge-requested", polecatName),
+		"--label", labelSelector,
 		"--status", "open",
 		"--json",
 	)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	// Parse JSON to get the wisp ID
 	if output == "" || output == "[]" || output == "null" {
-		return "", nil
+		return nil, nil
 	}
-
 	var items []struct {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(output), &items); err != nil {
-		return "", fmt.Errorf("parsing cleanup wisp response: %w", err)
+		return nil, fmt.Errorf("parsing wisp list: %w", err)
 	}
-	if len(items) > 0 {
-		return items[0].ID, nil
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids, nil
+}
+
+// findCleanupWisp finds an existing cleanup wisp for a polecat.
+func findCleanupWisp(bd *BdCli, workDir, polecatName string) (string, error) {
+	ids, err := listWispIDsByLabel(bd, workDir, fmt.Sprintf("polecat:%s,state:merge-requested", polecatName))
+	if err != nil {
+		return "", err
+	}
+	if len(ids) > 0 {
+		return ids[0], nil
 	}
 	return "", nil
 }
@@ -3361,26 +3375,9 @@ func findAnyCleanupWisp(bd *BdCli, workDir, polecatName string) string {
 // Used for dedup after wisp creation to detect races between concurrent patrol
 // cycles (gt-7vs1). If the query fails, returns nil (caller treats as no race).
 func findAllCleanupWisps(bd *BdCli, workDir, polecatName string) []string {
-	output, err := bd.Exec(workDir, "list",
-		"--label", fmt.Sprintf("cleanup,polecat:%s", polecatName),
-		"--status", "open",
-		"--json",
-	)
+	ids, err := listWispIDsByLabel(bd, workDir, fmt.Sprintf("cleanup,polecat:%s", polecatName))
 	if err != nil {
 		return nil
-	}
-	if output == "" || output == "[]" || output == "null" {
-		return nil
-	}
-	var items []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal([]byte(output), &items); err != nil || len(items) == 0 {
-		return nil
-	}
-	ids := make([]string, len(items))
-	for i, item := range items {
-		ids[i] = item.ID
 	}
 	return ids
 }

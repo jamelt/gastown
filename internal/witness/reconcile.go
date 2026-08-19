@@ -103,31 +103,11 @@ func reconcileWispAction(mr *beads.Issue) reconcileAction {
 }
 
 // listOpenMergeRequestedWisps bulk-lists open cleanup wisps across the rig
-// in state:merge-requested, mirroring findCleanupWisp's query (handlers.go)
-// without the per-polecat label constraint.
+// in state:merge-requested, using the same label-list query as
+// findCleanupWisp/findAllCleanupWisps (handlers.go) without the per-polecat
+// constraint.
 func listOpenMergeRequestedWisps(bd *BdCli, workDir string) ([]string, error) {
-	output, err := bd.Exec(workDir, "list",
-		"--label", "state:merge-requested",
-		"--status", "open",
-		"--json",
-	)
-	if err != nil {
-		return nil, err
-	}
-	if output == "" || output == "[]" || output == "null" {
-		return nil, nil
-	}
-	var items []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal([]byte(output), &items); err != nil {
-		return nil, fmt.Errorf("parsing wisp list: %w", err)
-	}
-	ids := make([]string, 0, len(items))
-	for _, it := range items {
-		ids = append(ids, it.ID)
-	}
-	return ids, nil
+	return listWispIDsByLabel(bd, workDir, "state:merge-requested")
 }
 
 // wispBranchLine fetches a wisp's full description via bd show and extracts

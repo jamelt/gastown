@@ -190,6 +190,42 @@ func TestReconcileMergeRequestedWisps_NoCorrelatedMRNeedsAuditNotClosed(t *testi
 	}
 }
 
+func TestReconcileMergeRequestedWisps_NoBranchLineNeedsAuditNotClosed(t *testing.T) {
+	t.Parallel()
+	// A wisp with no recorded "Branch:" line at all (the bd-record analogue
+	// of a missing branch ref) can't be correlated to any MR and must be
+	// surfaced for audit, never destructively closed — same requirement as
+	// the "no correlated MR" case above, but exercised through the actual
+	// branch-missing short-circuit in ReconcileMergeRequestedWisps rather
+	// than through the mrFinder.
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			switch {
+			case len(args) > 0 && args[0] == "list":
+				return `[{"id":"gt-wisp-nobranch"}]`, nil
+			case len(args) > 0 && args[0] == "show":
+				return `[{"id":"gt-wisp-nobranch","description":"Verify and cleanup polecat nux"}]`, nil
+			}
+			return "{}", nil
+		},
+		func(args []string) error { return nil },
+	)
+	finder := &fakeMRFinder{byBranch: map[string]*beads.Issue{}}
+
+	result := ReconcileMergeRequestedWisps(bd, finder, t.TempDir())
+
+	if len(result.Closed) != 0 {
+		t.Fatalf("Closed = %v, want none for a wisp with no Branch: line", result.Closed)
+	}
+	if len(result.NeedsAudit) != 1 || result.NeedsAudit[0] != "gt-wisp-nobranch" {
+		t.Fatalf("NeedsAudit = %v, want [gt-wisp-nobranch]", result.NeedsAudit)
+	}
+	calls := strings.Join(mock.calls, "\n")
+	if strings.Contains(calls, "close") {
+		t.Errorf("expected no close call for a branchless wisp, got calls: %s", calls)
+	}
+}
+
 func TestReconcileMergeRequestedWisps_IdempotentOnRerun(t *testing.T) {
 	t.Parallel()
 	// First sweep: one merge-requested wisp, proven merged, gets closed.
