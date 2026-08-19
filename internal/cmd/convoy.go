@@ -1262,11 +1262,6 @@ func convoyMailArgs(addr, subject, body, convoyID string) []string {
 	return []string{"mail", "send", addr, "-s", subject, "-m", body, "--from", convoyNotifyFrom(convoyID), "--no-notify"}
 }
 
-func convoyNudgeEnv(convoyID string) []string {
-	env := filterEnvKey(os.Environ(), "GT_ROLE")
-	return append(env, "GT_ROLE="+convoyNotifyFrom(convoyID))
-}
-
 // sendCloseNotification sends a notification about convoy closure.
 func sendCloseNotification(addr, convoyID, title, reason string) {
 	subject := fmt.Sprintf("🚚 Convoy closed: %s", title)
@@ -1826,116 +1821,23 @@ func persistAndNotifyConvoyCompletion(townBeads, convoyID, title string) error {
 	return nil
 }
 
-// notifyConvoyCompletion sends notifications to owner, any notify addresses, and mayor/.
+// notifyConvoyCompletion claims and sends the convoy-complete notification
+// set (owner/notify mail, nudge-watchers, mayor/, Mayor-session push) via the
+// single authoritative claim+notify path shared with the refinery
+// (internal/convoy.ClaimCompletionNotification / NotifyCompletion). The
+// claim is atomic (per-convoy flock) so concurrent callers — this CLI path,
+// deacon's periodic sweep, and the refinery's post-merge check — cannot both
+// observe "not yet notified" and both send.
 func notifyConvoyCompletion(townBeads, convoyID, title string) {
-	stdout, err := runBdJSON(townBeads, "show", convoyID, "--json")
+	claimed, fields, err := convoyops.ClaimCompletionNotification(townBeads, convoyID)
 	if err != nil {
+		style.PrintWarning("could not claim convoy completion notification for %s: %v", convoyID, err)
 		return
 	}
-
-	var convoys []struct {
-		Description string `json:"description"`
-		CreatedAt   string `json:"created_at"`
-	}
-	if err := json.Unmarshal(stdout, &convoys); err != nil || len(convoys) == 0 {
+	if !claimed {
 		return
 	}
-
-	// ZFC: Use typed accessor instead of parsing description text
-	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoys[0].Description})
-	if fields == nil {
-		fields = &beads.ConvoyFields{}
-	}
-	if fields.CompletionNotifiedAt != "" {
-		return
-	}
-
-	// Compute duration since convoy was created.
-	var durationStr string
-	if t, err := time.Parse(time.RFC3339, convoys[0].CreatedAt); err == nil {
-		d := time.Since(t).Round(time.Minute)
-		durationStr = formatWorkerAge(d)
-	}
-
-	// Count tracked issues (best-effort; 0 on error is fine for display).
-	trackedIDs, _ := bdDepListRawIDs(townBeads, convoyID, "down", "tracks")
-	issueCount := len(trackedIDs)
-
-	// Build enriched body for mayor notification.
-	mayorBody := fmt.Sprintf("Convoy %s has completed. All tracked issues are now closed.", convoyID)
-	if issueCount > 0 || durationStr != "" {
-		mayorBody += "\n"
-		if issueCount > 0 {
-			mayorBody += fmt.Sprintf("\nIssues: %d", issueCount)
-		}
-		if durationStr != "" {
-			mayorBody += fmt.Sprintf("\nDuration: %s", durationStr)
-		}
-	}
-
-	// Track notified addresses to avoid duplicate mayor/ notification.
-	notifiedAddrs := make(map[string]bool)
-
-	for _, addr := range fields.NotificationAddresses() {
-		notifiedAddrs[addr] = true
-		mailArgs := convoyMailArgs(addr,
-			fmt.Sprintf("🚚 Convoy landed: %s", title),
-			fmt.Sprintf("Convoy %s has completed.\n\nAll tracked issues are now closed.", convoyID),
-			convoyID)
-		mailCmd := exec.Command("gt", mailArgs...)
-		if err := mailCmd.Run(); err != nil {
-			style.PrintWarning("could not notify %s: %v", addr, err)
-		}
-	}
-
-	// Send nudge notifications to nudge watchers.
-	for _, addr := range fields.NudgeNotificationAddresses() {
-		nudgeMsg := fmt.Sprintf("🚚 Convoy landed: %s — Convoy %s has completed. All tracked issues are now closed.", title, convoyID)
-		nudgeCmd := exec.Command("gt", "nudge", addr, "-m", nudgeMsg)
-		nudgeCmd.Env = convoyNudgeEnv(convoyID)
-		if err := nudgeCmd.Run(); err != nil {
-			style.PrintWarning("could not nudge %s: %v", addr, err)
-		}
-	}
-
-	// Always notify mayor/ for strategic visibility, unless already notified above.
-	if !notifiedAddrs["mayor/"] {
-		mailArgs := convoyMailArgs("mayor/", fmt.Sprintf("Convoy complete: %s", title), mayorBody, convoyID)
-		mailCmd := exec.Command("gt", mailArgs...)
-		if err := mailCmd.Run(); err != nil {
-			style.PrintWarning("could not notify mayor/ of convoy completion: %v", err)
-		}
-	}
-
-	// Push notification to active Mayor session if configured.
-	notifyMayorSession(townBeads, convoyID, title)
-
-	fields.CompletionNotifiedAt = time.Now().UTC().Format(time.RFC3339)
-	newDesc := beads.SetConvoyFields(&beads.Issue{Description: convoys[0].Description}, fields)
-	if err := runTownMutationAndExport(townBeads, "update", convoyID, "--description="+newDesc); err != nil {
-		style.PrintWarning("could not record convoy completion notification state for %s: %v", convoyID, err)
-		return
-	}
-}
-
-// notifyMayorSession pushes a convoy completion notification into the active
-// Mayor session via nudge, if convoy.notify_on_complete is enabled.
-func notifyMayorSession(townBeads, convoyID, title string) {
-	settingsPath := config.TownSettingsPath(townBeads)
-	settings, err := config.LoadOrCreateTownSettings(settingsPath)
-	if err != nil {
-		return
-	}
-	if settings.Convoy == nil || !settings.Convoy.NotifyOnComplete {
-		return
-	}
-
-	nudgeMsg := fmt.Sprintf("🚚 Convoy landed: %s — Convoy %s has completed. All tracked issues are now closed.", title, convoyID)
-	nudgeCmd := exec.Command("gt", "nudge", "mayor", "-m", nudgeMsg)
-	nudgeCmd.Env = convoyNudgeEnv(convoyID)
-	if err := nudgeCmd.Run(); err != nil {
-		style.PrintWarning("could not nudge Mayor session: %v", err)
-	}
+	convoyops.NotifyCompletion(townBeads, convoyID, title, "", fields, style.PrintWarning)
 }
 
 func runConvoyStatus(cmd *cobra.Command, args []string) error {
