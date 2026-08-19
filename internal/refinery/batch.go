@@ -403,6 +403,16 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 		return result
 	}
 
+	// Capture the pre-push target tip so we can tell, per MR, whether it actually
+	// contributed commits. An MR whose submitted head is already contained in the
+	// target merged nothing; recording it as merged at the batch tip would stamp an
+	// unrelated commit as its merge commit (gt-v2zr).
+	preMergeBase, baseErr := e.git.Rev("origin/" + target)
+	if baseErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Batch] Warning: could not resolve origin/%s for no-op detection: %v\n", target, baseErr)
+		preMergeBase = ""
+	}
+
 	// Acquire merge slot for default branch pushes
 	var pushHolder string
 	if target == e.rig.DefaultBranch() {
@@ -471,6 +481,10 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 	cleaned := make([]*MRInfo, 0, len(stacked))
 	for _, mr := range stacked {
 		mergeResult := ProcessResult{Success: true, MergeCommit: tipSHA}
+		if e.mrIsNoOpMerge(mr.CommitSHA, preMergeBase) {
+			mergeResult.NoOp = true
+			mergeResult.MergeCommit = ""
+		}
 		if e.HandleMRInfoSuccess(mr, mergeResult) {
 			cleaned = append(cleaned, mr)
 		} else if result.Error == nil {

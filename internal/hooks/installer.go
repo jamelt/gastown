@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/hookutil"
+	"github.com/steveyegge/gastown/internal/testguard"
 )
 
 //go:embed templates/*
@@ -51,6 +52,13 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile st
 	}
 
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
+
+	// Fail closed before a test binary can write real hook files into a
+	// non-isolated (i.e. live) settings/work directory. See gt-8ik.
+	if err := testguard.RequireIsolated("hooks.InstallForRole write "+targetPath, targetPath); err != nil {
+		return err
+	}
+
 	if provider == "claude" && role == "boot" && isSettingsFile(hooksFile) {
 		_, err := SyncManagedClaudeSettings(Target{
 			Path:     targetPath,

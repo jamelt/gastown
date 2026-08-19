@@ -7,6 +7,18 @@ import (
 	"testing"
 )
 
+func TestDaemonRestartCommandRegistered(t *testing.T) {
+	for _, c := range daemonCmd.Commands() {
+		if c.Name() == "restart" {
+			if c.RunE == nil {
+				t.Fatal("gt daemon restart is missing RunE")
+			}
+			return
+		}
+	}
+	t.Fatal("gt daemon restart is not registered")
+}
+
 func TestDaemonStatusJSONCompatibility(t *testing.T) {
 	if daemonStatusCmd.Flags().Lookup("json") == nil {
 		t.Fatal("gt daemon status is missing --json")

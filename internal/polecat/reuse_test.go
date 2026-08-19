@@ -16,7 +16,15 @@ func TestDecideSlotReuse(t *testing.T) {
 		{name: "mr failed", mutate: func(in *SlotReuseInput) { in.MRFailed = true }, want: "mr-failed"},
 		{name: "cleanup dirty", mutate: func(in *SlotReuseInput) { in.CleanupStatus = CleanupUnpushed }, want: "cleanup-has_unpushed"},
 		{name: "stale cleanup safe", mutate: func(in *SlotReuseInput) { in.CleanupStatus = CleanupStash; in.IgnoreCleanupStatus = true }, want: "reusable"},
-		{name: "cleanup unknown", mutate: func(in *SlotReuseInput) { in.CleanupStatus = CleanupUnknown }, want: "cleanup-unknown"},
+		// hq-f2n8c: an undetermined cleanup_status no longer vetoes on its own —
+		// it is an absence of evidence, and the git predicates below carry the
+		// safety argument. The "cleanup unknown + git failed" case keeps the
+		// fail-closed guarantee for when there is no evidence at all.
+		{name: "cleanup unknown", mutate: func(in *SlotReuseInput) { in.CleanupStatus = CleanupUnknown }, want: "reusable"},
+		{name: "cleanup unknown + git failed", mutate: func(in *SlotReuseInput) {
+			in.CleanupStatus = CleanupUnknown
+			in.GitCheckFailed = true
+		}, want: "cleanup-unknown"},
 		{name: "git dirty", mutate: func(in *SlotReuseInput) { in.GitDirty = true }, want: "git-dirty"},
 		{name: "stash", mutate: func(in *SlotReuseInput) { in.StashCount = 1 }, want: "git-stash"},
 		{name: "unpushed", mutate: func(in *SlotReuseInput) { in.UnpushedCommits = 1 }, want: "git-unpushed"},

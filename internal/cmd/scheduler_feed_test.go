@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -120,6 +121,30 @@ func TestFeedSkipReason(t *testing.T) {
 			},
 			skip: false,
 		},
+		// gt-6va3: stale formula-molecule scaffolding must never be fed.
+		{
+			name:  "molecule container is skipped",
+			issue: &beads.Issue{ID: "gt-vf2u", Title: "mol-polecat-work", Status: "open", Type: "molecule"},
+			want:  "formula molecule machinery, not dispatchable work",
+			skip:  true,
+		},
+		{
+			// The offending shape: a step bead (type=task) whose parent-child
+			// dependency points at a molecule root, as the bd-show overlay
+			// renders it in the feeder (see effectiveIssueForFeed).
+			name: "molecule step bead is skipped via overlaid dependencies",
+			issue: &beads.Issue{
+				ID:     "gt-nhyl",
+				Title:  "Load context and verify assignment",
+				Status: "open",
+				Type:   "task",
+				Dependencies: []beads.IssueDep{
+					{ID: "gt-vf2u", Type: "molecule", DependencyType: "parent-child"},
+				},
+			},
+			want: "formula molecule machinery, not dispatchable work",
+			skip: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -172,6 +197,130 @@ func TestEffectiveIssueForFeedAppliesBatchLabels(t *testing.T) {
 	if fallback.ID != readyIssue.ID {
 		t.Fatalf("effectiveIssueForFeed with no batch entry = %+v, want unchanged issue", fallback)
 	}
+}
+
+// TestEffectiveIssueForFeedAppliesBatchDependencies guards gt-6va3: a stale
+// molecule step bead is only distinguishable from real work by its parent-child
+// edge to a molecule parent, and bd ready --json returns sparse dependencies
+// (no parent issue_type). Without the bd-show dependency overlay the
+// molecule-machinery skip is a silent no-op and the step bead gets dispatched.
+func TestEffectiveIssueForFeedAppliesBatchDependencies(t *testing.T) {
+	// What bd ready --json returns for a molecule step bead: the parent-child
+	// edge is present but sparse (no parent issue_type), so nothing skips it.
+	readyIssue := &beads.Issue{
+		ID:     "gt-nhyl",
+		Title:  "Load context and verify assignment",
+		Status: "open",
+		Type:   "task",
+		Dependencies: []beads.IssueDep{
+			{DependencyType: "parent-child"},
+		},
+	}
+	if reason, skip := feedSkipReason(readyIssue); skip {
+		t.Fatalf("expected the un-overlaid ready issue (sparse deps, as bd ready returns) to be fed, got skip=true reason=%q", reason)
+	}
+
+	// The bd-show batch fetch fills in the parent's issue_type=molecule.
+	depsByID := map[string]beadStatusInfo{
+		"gt-nhyl": {Dependencies: []beads.IssueDep{{ID: "gt-vf2u", Type: "molecule", DependencyType: "parent-child"}}},
+	}
+	effective := effectiveIssueForFeed(readyIssue, depsByID)
+	if len(effective.Dependencies) == 0 || effective.Dependencies[0].Type != "molecule" {
+		t.Fatal("effectiveIssueForFeed did not apply the batch-fetched dependencies")
+	}
+	if reason, skip := feedSkipReason(effective); !skip {
+		t.Fatalf("expected the dependency-overlaid molecule step bead to be skipped, got fed (reason=%q)", reason)
+	}
+}
+
+// TestCheckHardProhibition covers the gate gt-b2qi adds to every manual
+// dispatch entry point (scheduleBead, runSling's direct path, executeSling),
+// reusing requiresHumanDecision/platformIncompatible unchanged.
+func TestCheckHardProhibition(t *testing.T) {
+	tests := []struct {
+		name        string
+		title       string
+		description string
+		labels      []string
+		confirmed   bool
+		wantErr     bool
+		wantSubstr  string
+	}{
+		{
+			name:  "ordinary bead dispatches with no confirmation",
+			title: "Fix the widget",
+		},
+		{
+			name:       "human label blocks without confirmation",
+			title:      "Put deploy-only pager secrets in the normal recoverable secret store",
+			labels:     []string{"area:security", "human"},
+			wantErr:    true,
+			wantSubstr: "fresh human approval",
+		},
+		{
+			name:      "human label dispatches once confirmed",
+			title:     "Put deploy-only pager secrets in the normal recoverable secret store",
+			labels:    []string{"area:security", "human"},
+			confirmed: true,
+		},
+		{
+			name:       "risk:money label blocks without confirmation",
+			title:      "Rebalance trader allocations",
+			labels:     []string{"risk:money"},
+			wantErr:    true,
+			wantSubstr: "fresh human approval",
+		},
+		{
+			name:      "risk:money label dispatches once confirmed",
+			title:     "Rebalance trader allocations",
+			labels:    []string{"risk:money"},
+			confirmed: true,
+		},
+		{
+			name:        "human-decision description phrase blocks without confirmation",
+			title:       "Route selection",
+			description: "This requires human approval before proceeding.",
+			wantErr:     true,
+			wantSubstr:  "fresh human approval",
+		},
+		{
+			name:       "mismatched platform label blocks even when confirmed",
+			title:      "macOS gate capture",
+			labels:     []string{"gt:platform:" + oppositeGOOS()},
+			confirmed:  true,
+			wantErr:    true,
+			wantSubstr: "cannot dispatch",
+		},
+		{
+			name:   "alarming title but genuinely safe bead dispatches",
+			title:  "Repair legacy production acknowledgement migration cleanup",
+			labels: []string{"area:testing", "area:ui"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkHardProhibition(tc.title, tc.description, tc.labels, tc.confirmed)
+			if tc.wantErr && err == nil {
+				t.Fatalf("checkHardProhibition(%q, confirmed=%v) = nil, want error", tc.title, tc.confirmed)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("checkHardProhibition(%q, confirmed=%v) = %v, want nil", tc.title, tc.confirmed, err)
+			}
+			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+				t.Fatalf("checkHardProhibition(%q, confirmed=%v) error = %v, want substring %q", tc.title, tc.confirmed, err, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+// oppositeGOOS returns a platform label value guaranteed to mismatch
+// runtime.GOOS, so platformIncompatible's check is exercised deterministically.
+func oppositeGOOS() string {
+	if runtime.GOOS == "windows" {
+		return "linux"
+	}
+	return "windows"
 }
 
 func TestPlatformIncompatibleNoOpWithoutLabel(t *testing.T) {

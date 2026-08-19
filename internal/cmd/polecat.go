@@ -1056,27 +1056,53 @@ type RecoveryStatus struct {
 	Issue                string                `json:"issue,omitempty"`
 	MQStatus             string                `json:"mq_status,omitempty"` // "submitted", "not_submitted", "not_required", "unknown"
 	ActiveMR             string                `json:"active_mr,omitempty"`
+	HookBead             string                `json:"hook_bead,omitempty"`
+	HookStale            bool                  `json:"hook_stale,omitempty"`
 	Blockers             []string              `json:"blockers,omitempty"`
 	Diagnostics          []string              `json:"diagnostics,omitempty"`
 	RecoveryActions      []string              `json:"recovery_actions,omitempty"`
 	Reconciled           bool                  `json:"reconciled,omitempty"`
 }
 
-func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
-	rigName, polecatName, err := parseAddress(args[0])
-	if err != nil {
-		return err
-	}
+// recoveryStatusOptions controls how computePolecatRecoveryStatus evaluates a
+// polecat's disposition for different callers.
+type recoveryStatusOptions struct {
+	// Reconcile persists a stale cleanup_status when the disposition proves it
+	// safe to do so (only meaningful for the interactive check-recovery command).
+	Reconcile bool
+	// TreatStateAsIdle makes the disposition state-agnostic: it evaluates only
+	// the destroy-safety predicates (hook bead, git dirty/stash/unpushed, MQ
+	// submit, active/open MR) and skips DecideWorkstate's "not idle" bailout.
+	// Nuke needs this — nuking a stuck StateWorking/StateStalled polecat with
+	// no work at risk is a documented, intended workflow (docs/concepts/
+	// polecat-lifecycle.md), and that workflow must not regress just because
+	// nuke's gate now shares the reuse/list classifier.
+	TreatStateAsIdle bool
+	// SharedCtx, when non-nil, resolves the agent-bead lookup from a
+	// batch-fetched rig context instead of a live bd call — see
+	// safetyCheckContext / buildSafetyCheckContexts (gt-j2lu). This is what
+	// makes `gt polecat nuke <rig> --all --dry-run` bounded on
+	// large/recovery-heavy rigs.
+	SharedCtx *safetyCheckContext
+}
 
-	mgr, r, err := getPolecatManager(rigName)
-	if err != nil {
-		return err
-	}
-
+// computePolecatRecoveryStatus gathers the same lifecycle, git, and
+// merge-queue facts used by `gt polecat check-recovery` and classifies them
+// through the canonical polecat.DecideWorkstate policy. It is the single
+// source of truth for "is this polecat's work safe to lose" — check-recovery,
+// list/inventory, reuse selection, and nuke's safety gate all agree with it,
+// closing the drift where nuke's own hand-rolled checks (gt-it1) missed
+// verdicts like NEEDS_MQ_SUBMIT that check-recovery already caught.
+func computePolecatRecoveryStatus(mgr *polecat.Manager, r *rig.Rig, rigName, polecatName string, opts recoveryStatusOptions) (RecoveryStatus, error) {
 	// Verify polecat exists and get info
 	p, err := mgr.Get(polecatName)
 	if err != nil {
-		return fmt.Errorf("polecat '%s' not found in rig '%s'", polecatName, rigName)
+		return RecoveryStatus{}, fmt.Errorf("polecat '%s' not found in rig '%s'", polecatName, rigName)
+	}
+
+	state := p.State
+	if opts.TreatStateAsIdle {
+		state = polecat.StateIdle
 	}
 
 	// Get cleanup_status from agent bead
@@ -1084,7 +1110,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	rigPath := r.Path
 	bd := beads.New(rigPath)
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
-	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
+	agentIssue, fields, err := lookupAgentBead(bd, opts.SharedCtx, agentBeadID)
 
 	status := RecoveryStatus{
 		Rig:     rigName,
@@ -1095,7 +1121,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	beadTerminal := isAssignedBeadTerminal(bd, status.Issue)
 	workTerminal := beadTerminal
 	targetRefs, targetRefLookupFailed := recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
-	input := polecat.WorkstateInput{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch}
+	input := polecat.WorkstateInput{State: state, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch}
 	legacyHookSafe := false
 	legacyActiveMRSafe := false
 	var gitState *GitState
@@ -1135,7 +1161,9 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		status.ActiveMR = fields.ActiveMR
 		input.ActiveMR = fields.ActiveMR
 		hookBead := agentHookBead(agentIssue, fields)
+		status.HookBead = hookBead
 		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
+		status.HookStale = hookBead != "" && hookTerminal
 		legacyHookSafe = hookSafe
 		workTerminal = workReferenceTerminal(beadTerminal, status.Issue != "", hookTerminal, hookBead != "")
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
@@ -1195,7 +1223,6 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
 	}
 
-	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
 	if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" {
 		sessionDormant := false
@@ -1222,11 +1249,33 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 			status.Diagnostics = append(status.Diagnostics, "legacy_cleanup_status=<missing> evidence="+legacyCleanupReadOnlyProvenance)
 		}
 	}
+	status.CleanupStatus = displayedCleanupStatus(input)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
-	if polecatCheckRecoveryReconcileCleanup {
+	if opts.Reconcile {
 		reconcileCleanupStatusIfSafe(&status, bd, agentBeadID, p, fields)
+	}
+
+	return status, nil
+}
+
+func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
+	rigName, polecatName, err := parseAddress(args[0])
+	if err != nil {
+		return err
+	}
+
+	mgr, r, err := getPolecatManager(rigName)
+	if err != nil {
+		return err
+	}
+
+	status, err := computePolecatRecoveryStatus(mgr, r, rigName, polecatName, recoveryStatusOptions{
+		Reconcile: polecatCheckRecoveryReconcileCleanup,
+	})
+	if err != nil {
+		return err
 	}
 
 	// JSON output
@@ -1280,7 +1329,12 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 				}
 			}
 		} else {
-			fmt.Printf("  %s Cleanup refused by an unknown recovery predicate.\n", style.Warning.Render("⚠"))
+			// DecideWorkstate is expected to name a predicate on every
+			// NEEDS_RECOVERY verdict; reaching here means it did not (a bug in
+			// the classifier, not a real absence of a cause). Dump the status
+			// fields evaluated so the escalation is actionable (gt-7j22).
+			fmt.Printf("  %s Cleanup refused with no named predicate (classifier bug) — reason=%q cleanup_status=%q diagnostics=%q\n",
+				style.Warning.Render("⚠"), status.Reason, status.CleanupStatus, strings.Join(status.Diagnostics, "; "))
 		}
 		fmt.Println("  Escalate to Mayor for recovery before cleanup.")
 	default:
@@ -1304,6 +1358,10 @@ func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath s
 	if gitState == nil || gitState.Clean {
 		return
 	}
+	if gitState.DetachedHead {
+		input.GitDirty = true
+		input.GitDirtyReason = "detached HEAD has no branch custody target"
+	}
 	if gitState.UnpushedCommits > 0 {
 		input.UnpushedCommits = gitState.UnpushedCommits
 	}
@@ -1313,6 +1371,13 @@ func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath s
 	if len(gitState.UncommittedFiles) > 0 {
 		input.GitDirty = true
 		input.GitDirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(gitState.UncommittedFiles))
+	}
+	if !input.GitDirty && input.StashCount == 0 && input.UnpushedCommits == 0 {
+		// gitState.Clean is false but none of the specific predicates explain why.
+		// Fail closed rather than silently treating unrecognized live git risk as
+		// safe to destroy (gt-d5c8).
+		input.GitDirty = true
+		input.GitDirtyReason = "live git state reports work at risk"
 	}
 }
 
@@ -1368,6 +1433,18 @@ func cleanupStatusBlocker(status polecat.CleanupStatus) string {
 	default:
 		return fmt.Sprintf("cleanup_status=%s", status)
 	}
+}
+
+// displayedCleanupStatus is the cleanup status check-recovery prints. It must
+// match the value the verdict was actually decided on: when IgnoreCleanupStatus
+// is set, DecideWorkstate already treated the raw stored value as stale and
+// superseded by live evidence, so a raw/stale display (e.g. "unknown") next
+// to a verdict like SAFE_TO_NUKE would contradict the verdict it sits beside.
+func displayedCleanupStatus(input polecat.WorkstateInput) polecat.CleanupStatus {
+	if input.IgnoreCleanupStatus {
+		return polecat.CleanupClean
+	}
+	return input.CleanupStatus
 }
 
 func cleanupStatusBlockerForRecovery(status polecat.CleanupStatus, partialSpawnWithoutHook bool) string {
@@ -1473,9 +1550,6 @@ func cleanupStatusReconcileCandidate(status *RecoveryStatus, p *polecat.Polecat,
 	}
 	previous := polecat.CleanupStatus(fields.CleanupStatus)
 	if previous == polecat.CleanupClean {
-		return previous, false
-	}
-	if previous == "" && status.CleanupProvenance != legacyCleanupReadOnlyProvenance {
 		return previous, false
 	}
 	if !legacyCleanupLifecycleDormant(p.State, beads.AgentState(fields.AgentState)) {

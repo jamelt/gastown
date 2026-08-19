@@ -153,6 +153,15 @@ var (
 	hookDryRun  bool
 	hookForce   bool
 	hookClear   bool
+
+	// hookConfirmHumanApproved confirms a human has freshly reviewed and
+	// approved THIS dispatch of an hq-1s4w hard-prohibition-labeled bead
+	// (gt-cpdg, mirroring gt-b2qi's --confirm-human-approved on gt sling).
+	// gt hook is documented as "just attach, no action", but an already-
+	// running agent picks up hooked work on its next gt prime with no
+	// further nudge — the same practical dispatch outcome as gt sling for a
+	// live target, so it needs the same gate.
+	hookConfirmHumanApproved bool
 )
 
 func init() {
@@ -162,6 +171,7 @@ func init() {
 	hookCmd.Flags().BoolVarP(&hookDryRun, "dry-run", "n", false, "Show what would be done")
 	hookCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Replace existing incomplete hooked bead")
 	hookCmd.Flags().BoolVar(&hookClear, "clear", false, "Clear your hook (alias for 'gt unhook')")
+	hookCmd.Flags().BoolVar(&hookConfirmHumanApproved, "confirm-human-approved", false, "Confirm fresh human approval to dispatch an hq-1s4w hard-prohibition-labeled bead (required per-dispatch, not inherited from a prior approval)")
 
 	// --json flag for status output (used when no args, i.e., gt hook --json)
 	hookCmd.Flags().BoolVar(&moleculeJSON, "json", false, "Output as JSON (for status)")
@@ -170,6 +180,7 @@ func init() {
 
 	// Flags for attach subcommand
 	hookAttachCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Replace existing incomplete hooked bead")
+	hookAttachCmd.Flags().BoolVar(&hookConfirmHumanApproved, "confirm-human-approved", false, "Confirm fresh human approval to dispatch an hq-1s4w hard-prohibition-labeled bead (required per-dispatch, not inherited from a prior approval)")
 
 	// Flags for detach subcommand (mirror unsling flags)
 	hookDetachCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Detach even if work is incomplete")
@@ -241,14 +252,26 @@ func runHook(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("polecats cannot hook work (use gt done for handoff)")
 	}
 
-	// Verify the bead exists
-	if err := verifyBeadExists(beadID); err != nil {
+	// Verify the bead exists and fetch its details for the hard-prohibition
+	// check below.
+	info, err := getBeadInfo(beadID)
+	if err != nil {
 		return err
+	}
+
+	// hq-1s4w hard-prohibition guard (gt-cpdg, following the gt-b2qi
+	// pattern). gt hook attaches beads to a live agent's hook with no gate,
+	// even though an idle agent picks up hooked work on its next gt prime
+	// with no further nudge needed — the same practical dispatch outcome as
+	// gt sling. Unconditional: not gated by --force, which is a routine
+	// stale-hook escape hatch and must never silently double as approval to
+	// dispatch credentials/production/money-policy/human-decision work.
+	if err := checkHardProhibition(info.Title, info.Description, info.Labels, hookConfirmHumanApproved); err != nil {
+		return fmt.Errorf("%w\nTo hook: re-run with --confirm-human-approved", err)
 	}
 
 	// Determine agent identity (target or self)
 	var agentID string
-	var err error
 	if targetAgent != "" {
 		agentID, _, _, err = resolveTargetAgent(targetAgent)
 		if err != nil {

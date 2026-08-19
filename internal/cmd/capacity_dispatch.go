@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,19 +13,40 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // crossRigEscalationDebounce is the minimum interval between cross-rig prefix
 // escalations for the same (rig, prefix) pair. Prevents alert spam when a
 // stuck context keeps re-appearing on every dispatch tick.
 const crossRigEscalationDebounce = time.Hour
+
+// schedulerDispatchLockTTL is a backstop that lets AcquireTTL reclaim
+// scheduler-dispatch.lock even if its recorded PID still resolves to a live
+// process — covering PID reuse or a lock left by a process on a different
+// host, where PID-liveness alone can't be trusted (gt-jpib). The primary
+// reclaim path is dead-PID detection (unbounded by this TTL): a killed
+// dispatch's lock is reclaimed on the very next attempt. This TTL is
+// intentionally large — far past any realistic single dispatch cycle — so it
+// essentially never fires against a dispatch that is still genuinely
+// running; a live holder having its lock reclaimed out from under it would
+// let two dispatch cycles run concurrently, which is worse than the stuck
+// lock this fix addresses.
+const schedulerDispatchLockTTL = time.Hour
+
+// schedulerDispatchLockPath returns the path to the scheduler dispatch lock
+// file, shared by dispatchScheduledWork (which holds it) and
+// runSchedulerStatus (which reports on it) so the two can't drift apart.
+func schedulerDispatchLockPath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "scheduler-dispatch.lock")
+}
 
 // crossRigEscalationState tracks last-escalation timestamps per (rig, prefix).
 // Process-local — debounce resets on daemon restart, which is fine: a new
@@ -62,10 +84,22 @@ func resetCrossRigEscalationStateForTest() {
 
 // fireCrossRigEscalation invokes `gt escalate` with a MEDIUM severity. Best
 // effort — escalation failure is logged but does not block the dispatch path.
+// Bounded (gt-vyik): `gt escalate` can itself block on an unbounded SMTP/HTTP
+// notification call, and this runs from Validate, before Execute — an
+// unbounded escalation subprocess here would wedge the whole dispatch cycle,
+// not just this one bead's notification.
 var fireCrossRigEscalation = func(rig, prefix, beadID string) {
 	msg := fmt.Sprintf("cross-rig dispatch refused: rig=%s prefix=%s bead=%s — see gt-el4", rig, prefix, beadID)
-	cmd := exec.Command("gt", "escalate", "--severity", "medium", "--reason", "cross-rig-prefix", msg)
+	timeout := resolveBdCmdTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", "escalate", "--severity", "medium", "--reason", "cross-rig-prefix", msg)
+	util.SetProcessGroup(cmd)
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr, "%s cross-rig escalation timed out after %v\n", style.Warning.Render("⚠"), timeout)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "%s cross-rig escalation failed: %v\n", style.Warning.Render("⚠"), err)
 	}
 }
@@ -224,22 +258,22 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		return 0, nil
 	}
 
-	// Acquire exclusive lock to prevent concurrent dispatch
-	runtimeDir := filepath.Join(townRoot, ".runtime")
-	_ = os.MkdirAll(runtimeDir, 0755)
-	lockFile := filepath.Join(runtimeDir, "scheduler-dispatch.lock")
-	fileLock := flock.New(lockFile)
-	locked, err := fileLock.TryLock()
-	if err != nil {
+	// Acquire exclusive lock to prevent concurrent dispatch. The lock records
+	// owner PID/hostname/acquired-at and reclaims automatically once that PID
+	// is no longer alive, instead of wedging forever on a crashed holder
+	// (gt-jpib).
+	lockFile := schedulerDispatchLockPath(townRoot)
+	dispatchLock := lock.New(lockFile)
+	if err := dispatchLock.AcquireTTL(actor, schedulerDispatchLockTTL); err != nil {
+		if errors.Is(err, lock.ErrLocked) {
+			if isDaemonDispatch() {
+				return 0, nil
+			}
+			return 0, fmt.Errorf("scheduler dispatch already in progress (lock held: %s): %w", lockFile, err)
+		}
 		return 0, fmt.Errorf("acquiring dispatch lock: %w", err)
 	}
-	if !locked {
-		if isDaemonDispatch() {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("scheduler dispatch already in progress (lock held: %s)", lockFile)
-	}
-	defer func() { _ = fileLock.Unlock() }()
+	defer func() { _ = dispatchLock.Release() }()
 
 	dispatchPlan, err := buildSchedulerDispatchPlan(townRoot, batchOverride, true)
 	if err != nil {
@@ -553,9 +587,10 @@ func cleanupStaleContexts(townRoot string) error {
 
 // beadStatusInfo holds batch-fetched bead status, title, and labels.
 type beadStatusInfo struct {
-	Status string
-	Title  string
-	Labels []string
+	Status       string
+	Title        string
+	Labels       []string
+	Dependencies []beads.IssueDep
 }
 
 func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
@@ -563,9 +598,10 @@ func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
 		return beadStatusInfo{}
 	}
 	return beadStatusInfo{
-		Status: info.Status,
-		Title:  info.Title,
-		Labels: info.Labels,
+		Status:       info.Status,
+		Title:        info.Title,
+		Labels:       info.Labels,
+		Dependencies: info.Dependencies,
 	}
 }
 
@@ -593,19 +629,21 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			continue
 		}
 		var items []struct {
-			ID     string   `json:"id"`
-			Status string   `json:"status"`
-			Title  string   `json:"title"`
-			Labels []string `json:"labels"`
+			ID           string           `json:"id"`
+			Status       string           `json:"status"`
+			Title        string           `json:"title"`
+			Labels       []string         `json:"labels"`
+			Dependencies []beads.IssueDep `json:"dependencies"`
 		}
 		if err := json.Unmarshal(out, &items); err != nil {
 			continue
 		}
 		for _, item := range items {
 			result[item.ID] = beadStatusInfo{
-				Status: item.Status,
-				Title:  item.Title,
-				Labels: item.Labels,
+				Status:       item.Status,
+				Title:        item.Title,
+				Labels:       item.Labels,
+				Dependencies: item.Dependencies,
 			}
 		}
 	}
@@ -783,6 +821,10 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, actor string) (*SlingR
 		Vars:             dp.Vars,
 		Merge:            dp.Merge,
 		BaseBranch:       dp.BaseBranch,
+		BaseRef:          dp.BaseRef,
+		PublishRemote:    dp.PublishRemote,
+		PublishRef:       dp.PublishRef,
+		PRTargetRef:      dp.PRTargetRef,
 		ResumeBranch:     dp.ResumeBranch,
 		NoMerge:          dp.NoMerge,
 		ReviewOnly:       dp.ReviewOnly,

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -4724,6 +4725,7 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 		resumeBranch string
 		resumePR     int
 		baseBranch   string
+		baseRef      string
 		wantError    string
 	}{
 		{
@@ -4736,13 +4738,25 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 			name:         "branch with base-branch is rejected",
 			resumeBranch: "feature/foo",
 			baseBranch:   "develop",
-			wantError:    "--base-branch cannot be combined with --branch or --pr",
+			wantError:    "--base-branch/--base-ref cannot be combined with --branch or --pr",
 		},
 		{
 			name:       "pr with base-branch is rejected",
 			resumePR:   42,
 			baseBranch: "develop",
-			wantError:  "--base-branch cannot be combined with --branch or --pr",
+			wantError:  "--base-branch/--base-ref cannot be combined with --branch or --pr",
+		},
+		{
+			name:         "branch with base-ref is rejected",
+			resumeBranch: "feature/foo",
+			baseRef:      "upstream/main",
+			wantError:    "--base-branch/--base-ref cannot be combined with --branch or --pr",
+		},
+		{
+			name:      "pr with base-ref is rejected",
+			resumePR:  42,
+			baseRef:   "upstream/main",
+			wantError: "--base-branch/--base-ref cannot be combined with --branch or --pr",
 		},
 	}
 
@@ -4752,10 +4766,12 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 	prevResumeBranch := slingResumeBranch
 	prevResumePR := slingResumePR
 	prevBaseBranch := slingBaseBranch
+	prevBaseRef := slingBaseRef
 	t.Cleanup(func() {
 		slingResumeBranch = prevResumeBranch
 		slingResumePR = prevResumePR
 		slingBaseBranch = prevBaseBranch
+		slingBaseRef = prevBaseRef
 	})
 
 	for _, tt := range tests {
@@ -4763,6 +4779,7 @@ func TestRunSlingResumeFlagValidation(t *testing.T) {
 			slingResumeBranch = tt.resumeBranch
 			slingResumePR = tt.resumePR
 			slingBaseBranch = tt.baseBranch
+			slingBaseRef = tt.baseRef
 
 			err := runSling(nil, []string{"gt-test"})
 			if err == nil {
@@ -4847,6 +4864,122 @@ func TestSlingExplicitPolecatInDeferredModePreservesReservation(t *testing.T) {
 	}
 	if gotOpts.TargetAgent != "gastown/polecats/toast" || gotOpts.ResumeBranch != "preserved-branch" {
 		t.Fatalf("scheduled options = %#v, want exact target and preserved branch", gotOpts)
+	}
+}
+
+// TestSlingOnFormAndFormulaFlagFormAgreeOnScheduleOptions is a regression test for
+// gt-4rts: "gt sling <formula> --on <bead> <rig>" (formula-as-positional-arg) and
+// "gt sling <bead> <rig> --formula <formula>" (--formula flag) must persist formula,
+// agent, review_only, no_merge, and vars identically into the deferred sling context.
+// A prior incident saw the --on form silently drop these fields, converting a
+// recommend-only review dispatch into an unrestricted implementation dispatch.
+func TestSlingOnFormAndFormulaFlagFormAgreeOnScheduleOptions(t *testing.T) {
+	townRoot, _, _ := setupMutableBDRawSlingTest(t, "Original description.")
+	settingsDir := filepath.Dir(config.TownSettingsPath(townRoot))
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	if err := os.WriteFile(config.TownSettingsPath(townRoot), []byte(`{"version":1,"scheduler":{"max_polecats":2,"batch_size":1}}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	workDir := filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown")
+	prevResolve := resolveTargetAgentFn
+	prevVerifyWorktree := verifyDeferredTargetWorktreeFn
+	prevBranch := deferredTargetBranchFn
+	prevAssignment := deferredTargetAssignmentFn
+	prevSchedule := scheduleBeadForSling
+	prevOnTarget := slingOnTarget
+	prevFormula := slingFormula
+	prevAgent := slingAgent
+	prevReviewOnly := slingReviewOnly
+	prevNoMerge := slingNoMerge
+	prevVars := slingVars
+	t.Cleanup(func() {
+		resolveTargetAgentFn = prevResolve
+		verifyDeferredTargetWorktreeFn = prevVerifyWorktree
+		deferredTargetBranchFn = prevBranch
+		deferredTargetAssignmentFn = prevAssignment
+		scheduleBeadForSling = prevSchedule
+		slingOnTarget = prevOnTarget
+		slingFormula = prevFormula
+		slingAgent = prevAgent
+		slingReviewOnly = prevReviewOnly
+		slingNoMerge = prevNoMerge
+		slingVars = prevVars
+	})
+
+	resolveTargetAgentFn = func(target string) (string, string, string, error) {
+		if target != "gastown/toast" {
+			t.Fatalf("resolved target = %q, want gastown/toast", target)
+		}
+		return "gastown/polecats/toast", "%42", workDir, nil
+	}
+	verifyDeferredTargetWorktreeFn = func(got string) error {
+		if got != workDir {
+			t.Fatalf("verified worktree = %q, want %q", got, workDir)
+		}
+		return nil
+	}
+	deferredTargetBranchFn = func(string) (string, error) { return "", nil }
+	deferredTargetAssignmentFn = func(*beads.Beads, string) (*beads.Issue, error) { return nil, nil }
+
+	runForm := func(args []string) ScheduleOptions {
+		var got ScheduleOptions
+		scheduleBeadForSling = func(beadID, rigName string, opts ScheduleOptions) error {
+			if beadID != "gt-rawrollback" {
+				t.Fatalf("scheduled bead = %q, want gt-rawrollback", beadID)
+			}
+			if rigName != "gastown" {
+				t.Fatalf("scheduled rig = %q, want gastown", rigName)
+			}
+			got = opts
+			return nil
+		}
+		if err := runSling(nil, args); err != nil {
+			t.Fatalf("runSling %v: %v", args, err)
+		}
+		return got
+	}
+
+	// Form A: formula-as-first-arg with --on (slingOnTarget is the --on flag's value).
+	slingOnTarget = "gt-rawrollback"
+	slingFormula = ""
+	slingAgent = "claude-opus-5"
+	slingReviewOnly = true
+	slingNoMerge = true
+	slingVars = []string{"work_id=gt-nasl"}
+	onFormOpts := runForm([]string{"mol-expeditor-review", "gastown/toast"})
+
+	// Form B: bead-first with --formula flag.
+	slingOnTarget = ""
+	slingFormula = "mol-expeditor-review"
+	slingAgent = "claude-opus-5"
+	slingReviewOnly = true
+	slingNoMerge = true
+	slingVars = []string{"work_id=gt-nasl"}
+	formulaFlagOpts := runForm([]string{"gt-rawrollback", "gastown/toast"})
+
+	if onFormOpts.Formula != formulaFlagOpts.Formula {
+		t.Fatalf("Formula diverged: --on form=%q, --formula form=%q", onFormOpts.Formula, formulaFlagOpts.Formula)
+	}
+	if onFormOpts.Agent != formulaFlagOpts.Agent {
+		t.Fatalf("Agent diverged: --on form=%q, --formula form=%q", onFormOpts.Agent, formulaFlagOpts.Agent)
+	}
+	if onFormOpts.ReviewOnly != formulaFlagOpts.ReviewOnly {
+		t.Fatalf("ReviewOnly diverged: --on form=%v, --formula form=%v", onFormOpts.ReviewOnly, formulaFlagOpts.ReviewOnly)
+	}
+	if onFormOpts.NoMerge != formulaFlagOpts.NoMerge {
+		t.Fatalf("NoMerge diverged: --on form=%v, --formula form=%v", onFormOpts.NoMerge, formulaFlagOpts.NoMerge)
+	}
+	if !reflect.DeepEqual(onFormOpts.Vars, formulaFlagOpts.Vars) {
+		t.Fatalf("Vars diverged: --on form=%v, --formula form=%v", onFormOpts.Vars, formulaFlagOpts.Vars)
+	}
+	if onFormOpts.Formula != "mol-expeditor-review" {
+		t.Fatalf("Formula = %q, want mol-expeditor-review (must not silently substitute the default formula)", onFormOpts.Formula)
+	}
+	if !onFormOpts.ReviewOnly || !onFormOpts.NoMerge {
+		t.Fatalf("review_only/no_merge must never be silently dropped: got ReviewOnly=%v NoMerge=%v", onFormOpts.ReviewOnly, onFormOpts.NoMerge)
 	}
 }
 

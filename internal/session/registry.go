@@ -2,8 +2,6 @@
 package session
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/testguard"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -120,6 +119,14 @@ func SetDefaultRegistry(r *PrefixRegistry) {
 // Should be called early in the process lifecycle.
 // Safe to call multiple times; later calls replace earlier data.
 func InitRegistry(townRoot string) error {
+	// Fail closed before a test binary can install the live town's derived
+	// tmux socket as its default. A stale worktree's test binary that never
+	// overrode GT_ROOT would otherwise wire itself up to the live socket
+	// here. See gt-8ik.
+	if err := testguard.RequireIsolated("session.InitRegistry", townRoot); err != nil {
+		return err
+	}
+
 	var errs []error
 
 	// Determine the tmux socket name from GT_TMUX_SOCKET env var:
@@ -157,21 +164,13 @@ var sanitizeRe = regexp.MustCompile(`[^a-z0-9-]+`)
 // Uses the directory basename plus a short hash of the canonical path to ensure
 // uniqueness even when two towns share the same basename (e.g., ~/gt and ~/work/gt).
 // Format: "basename-hash6" (e.g., "gt-a1b2c3").
+//
+// Delegates to testguard.LiveSocketName, the canonical implementation. It
+// lives in internal/testguard (a dependency-free leaf) rather than here
+// because internal/tmux also needs to recognize this derivation and cannot
+// import internal/session (which itself imports internal/tmux).
 func townSocketName(townRoot string) string {
-	base := sanitizeTownName(filepath.Base(townRoot))
-
-	// Resolve symlinks and get absolute path for a canonical representation.
-	canonical, err := filepath.EvalSymlinks(townRoot)
-	if err != nil {
-		canonical, err = filepath.Abs(townRoot)
-		if err != nil {
-			canonical = townRoot
-		}
-	}
-
-	h := sha256.Sum256([]byte(canonical))
-	suffix := hex.EncodeToString(h[:3]) // 6 hex chars = 3 bytes
-	return base + "-" + suffix
+	return testguard.LiveSocketName(townRoot)
 }
 
 // LegacySocketName returns the old-format socket name (basename only, no hash)

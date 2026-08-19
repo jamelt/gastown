@@ -652,6 +652,50 @@ func TestRemoveKindByThread(t *testing.T) {
 	}
 }
 
+// TestRemoveKindByThreadClaimedFile simulates the race where a reply arrives
+// and calls RemoveKindByThread while a matching reminder has already been
+// claimed by an in-flight Drain (renamed to .claimed.<suffix>) but not yet
+// delivered. RemoveKindByThread must find and remove the claimed file too,
+// not just plain .json files, so the stale reminder isn't delivered anyway.
+func TestRemoveKindByThreadClaimedFile(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-claimed-race"
+
+	dir := filepath.Join(townRoot, ".runtime", "nudge_queue", session)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A matching reminder claimed by an in-flight Drain (not yet delivered).
+	claimedPath := filepath.Join(dir, "100.json.claimed.deadbeef")
+	claimedBody := `{"sender":"system","message":"remove-me","kind":"reply-reminder","thread_id":"thread-1"}`
+	if err := os.WriteFile(claimedPath, []byte(claimedBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unrelated claimed file (different thread) that must survive.
+	otherClaimedPath := filepath.Join(dir, "200.json.claimed.cafebabe")
+	otherClaimedBody := `{"sender":"system","message":"keep-me","kind":"reply-reminder","thread_id":"thread-2"}`
+	if err := os.WriteFile(otherClaimedPath, []byte(otherClaimedBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := RemoveKindByThread(townRoot, session, "reply-reminder", "thread-1")
+	if err != nil {
+		t.Fatalf("RemoveKindByThread: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	if _, err := os.Stat(claimedPath); !os.IsNotExist(err) {
+		t.Error("matching claimed file should have been removed")
+	}
+	if _, err := os.Stat(otherClaimedPath); os.IsNotExist(err) {
+		t.Error("unrelated claimed file should NOT have been removed")
+	}
+}
+
 func TestEnqueueUniqueByKindThreadConcurrent(t *testing.T) {
 	townRoot := t.TempDir()
 	session := "gt-test-unique-reminder"

@@ -51,8 +51,14 @@ skipped, and why — is logged.
 
 Feed only acts when the scheduler is in deferred-dispatch mode
 (scheduler.max_polecats > 0); in direct-dispatch mode there is no queue to
-feed. Feed does not survey town-level (hq-*) beads: scheduleBead only
-targets rigs, so town-level ready work is out of scope for now.
+feed. Feed surveys only rig databases, never the town-level (hq-*) store —
+not as a temporary gap but by construction: dispatch ends in spawning a
+rig-scoped polecat, and town beads have no owning rig or polecat pool, so a
+fed town context could never be dispatched (it would just fail every cycle
+until it circuit-breaks). Genuine engineering work misfiled in the town
+database is surfaced instead by 'gt doctor' (the town-unfed-work check),
+whose remedy is to route each bead to its owning rig with 'gt bead move' or
+close it if it is coordination-only.
 
   gt scheduler feed              # Feed eligible ready beads
   gt scheduler feed --dry-run    # Preview without scheduling
@@ -273,6 +279,10 @@ func effectiveIssueForFeed(issue *beads.Issue, labelsByID map[string]beadStatusI
 	effective := *issue
 	if info, ok := labelsByID[issue.ID]; ok {
 		effective.Labels = info.Labels
+		// bd ready --json returns sparse dependency entries (no parent
+		// issue_type), so the molecule-machinery skip below can only see a
+		// step bead's molecule parent via the batch bd-show overlay.
+		effective.Dependencies = info.Dependencies
 	}
 	return &effective
 }
@@ -301,6 +311,14 @@ func feedSkipReason(issue *beads.Issue) (string, bool) {
 	}
 	if isEpicOrConvoyIssue(issue) {
 		return "epic/convoy container, not dispatchable work", true
+	}
+	// gt-6va3: a stale formula-molecule container or one of its materialized
+	// step beads (parent-child edge to a molecule) is scaffolding, not real
+	// work. Skip early for a clean feed decision; scheduleBead/executeSling
+	// also reject it as defense-in-depth. Requires the bd-show dependency
+	// overlay (see effectiveIssueForFeed) for the step-bead case.
+	if beads.IsMoleculeContainerOrStep(issue) {
+		return "formula molecule machinery, not dispatchable work", true
 	}
 	if reason, blocked := requiresHumanDecision(issue); blocked {
 		return reason, true
@@ -403,4 +421,32 @@ func platformIncompatible(issue *beads.Issue) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// checkHardProhibition is the hq-1s4w gate for every dispatch entry point
+// that hooks a bead to an agent, not just the feeder. requiresHumanDecision
+// was originally consulted only by feedSkipReason (gt-j3xq), which the
+// feeder calls before scheduleBead — a gap its own doc comment named
+// explicitly: "gt sling itself does not consult it". gt-b2qi: a human or
+// automation running gt sling (or anything that reaches scheduleBead,
+// runSling's direct-dispatch path, or executeSling) could dispatch a
+// credentials/production/money-policy/human-decision bead with no gate at
+// all. confirmed must come from an explicit, single-bead
+// --confirm-human-approved flag — never honored for batch/convoy/epic/queue
+// dispatch (executeSling always passes false), because hq-1s4w requires
+// fresh, per-dispatch approval and a bulk operation cannot attest that for
+// each bead it touches. platformIncompatible is never overridable: the work
+// cannot run on this host regardless of approval.
+func checkHardProhibition(title, description string, labels []string, confirmed bool) error {
+	issue := &beads.Issue{Title: title, Description: description, Labels: labels}
+	if reason, incompatible := platformIncompatible(issue); incompatible {
+		return fmt.Errorf("cannot dispatch: %s", reason)
+	}
+	if confirmed {
+		return nil
+	}
+	if reason, blocked := requiresHumanDecision(issue); blocked {
+		return fmt.Errorf("bead requires fresh human approval before dispatch (%s); a human must review this exact bead and re-run with --confirm-human-approved", reason)
+	}
+	return nil
 }

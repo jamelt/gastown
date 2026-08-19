@@ -11,6 +11,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
@@ -206,8 +207,8 @@ func (d *Daemon) runCompactorDog() {
 			}
 			// Force-push to DoltHub remote after compaction. Flatten rewrites
 			// the commit graph, so standard push always fails with non-fast-forward.
-			// Safe because compactorFetchAndVerify confirmed local ≥ remote
-			// before compaction, and compactDatabase verified integrity.
+			// compactorForcePush re-verifies lineage immediately before pushing
+			// (compactDatabase already verified row-count integrity).
 			if err := d.compactorForcePush(dbName); err != nil {
 				d.logger.Printf("compactor_dog: %s: force-push failed: %v", dbName, err)
 			}
@@ -700,10 +701,25 @@ func (d *Daemon) compactorRunGC(dbName string) error {
 	return nil
 }
 
-// compactorFetchAndVerify fetches from the remote and checks that the local
-// history contains the remote HEAD. Returns (diverged=true, nil) if the remote
-// has commits not in local history — compaction must be skipped to avoid data
-// loss on force-push. Returns (false, nil) if local ≥ remote or no remote.
+// compactorPushSafe reports whether it is safe to force-push, using the same
+// predicate the sync path gates on (doltserver.LineageReport.SafeToPush(),
+// see internal/doltserver/sync.go:480,586) rather than a parallel divergence
+// check. Fails closed: an error inspecting lineage, or a diverged/unverified
+// remote, is NOT safe. Returns a human-readable reason when unsafe.
+func compactorPushSafe(lineage doltserver.LineageReport, lineageErr error) (safe bool, reason string) {
+	if lineageErr != nil {
+		return false, lineageErr.Error()
+	}
+	if !lineage.SafeToPush() {
+		return false, lineage.Diagnostic()
+	}
+	return true, ""
+}
+
+// compactorFetchAndVerify fetches from the remote and checks that it is safe
+// to force-push over it. Returns (diverged=true, nil) if it is not safe to
+// push — compaction must be skipped to avoid data loss on force-push later.
+// Returns (false, nil) if local ≥ remote or no remote.
 // Mirrors the shell script's pre-flight check (run.sh lines 263-300).
 func (d *Daemon) compactorFetchAndVerify(dbName string) (diverged bool, err error) {
 	db, err := d.compactorOpenDB(dbName)
@@ -721,37 +737,23 @@ func (d *Daemon) compactorFetchAndVerify(dbName string) (diverged bool, err erro
 		return false, nil // No remote — nothing to verify
 	}
 
-	// Fetch from remote.
+	// Fetch from remote so the lineage check below sees current state.
 	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), compactorPushTimeout)
 	defer fetchCancel()
 	if _, err := db.ExecContext(fetchCtx, "CALL DOLT_FETCH(?)", remoteName); err != nil {
 		return false, fmt.Errorf("DOLT_FETCH %s: %w", remoteName, err)
 	}
 
-	// Get remote HEAD.
-	var remoteHead string
-	remoteRef := remoteName + "/main"
-	err = db.QueryRowContext(ctx,
-		"SELECT commit_hash FROM dolt_remote_branches WHERE name = ?", remoteRef,
-	).Scan(&remoteHead)
+	lineage, err := doltserver.InspectLineageSQL(d.config.TownRoot, dbName)
 	if err != nil {
-		return false, nil // Remote ref not found — skip check
+		return false, fmt.Errorf("inspecting lineage: %w", err)
+	}
+	if safe, reason := compactorPushSafe(lineage, nil); !safe {
+		d.logger.Printf("compactor_dog: fetch: %s: not safe to push — %s", dbName, reason)
+		return true, nil
 	}
 
-	// Check if remote HEAD is an ancestor of local history.
-	var isAncestor int
-	err = db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM dolt_log WHERE commit_hash = ?", remoteHead,
-	).Scan(&isAncestor)
-	if err != nil {
-		return false, fmt.Errorf("ancestor check: %w", err)
-	}
-
-	if isAncestor == 0 {
-		return true, nil // Diverged — remote has commits we don't have
-	}
-
-	d.logger.Printf("compactor_dog: fetch: %s: local ≥ %s (verified)", dbName, remoteName)
+	d.logger.Printf("compactor_dog: fetch: %s: local safe to push (%s)", dbName, lineage.State)
 	return false, nil
 }
 
@@ -776,6 +778,15 @@ func (d *Daemon) compactorForcePush(dbName string) error {
 	err = db.QueryRowContext(ctx, "SELECT name FROM dolt_remotes LIMIT 1").Scan(&remoteName)
 	if err != nil || remoteName == "" {
 		return nil // No remote configured — skip silently
+	}
+
+	// Re-verify immediately before the force-push, using the same predicate
+	// the sync path gates on (doltserver.LineageReport.SafeToPush()) — not a
+	// parallel check. Compaction and gc can take time; this catches a remote
+	// that diverged in the interim.
+	lineage, lineageErr := doltserver.InspectLineageSQL(d.config.TownRoot, dbName)
+	if safe, reason := compactorPushSafe(lineage, lineageErr); !safe {
+		return fmt.Errorf("refusing force-push: %s", reason)
 	}
 
 	// Force-push to remote.

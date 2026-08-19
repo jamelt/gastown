@@ -293,6 +293,36 @@ func TestCleanupStatusBlockerForRecovery_PartialSpawnWithoutHook(t *testing.T) {
 	}
 }
 
+func TestDisplayedCleanupStatusMatchesWhatTheVerdictDecidedOn(t *testing.T) {
+	// Regression test for gt-ve9o: check-recovery must never print a raw
+	// stale/unknown cleanup status next to a verdict (e.g. SAFE_TO_NUKE) that
+	// was only reached because that same raw value was ignored in favor of
+	// live evidence.
+	tests := []struct {
+		name                string
+		status              polecat.CleanupStatus
+		ignoreCleanupStatus bool
+		want                polecat.CleanupStatus
+	}{
+		{name: "not ignored reports raw clean", status: polecat.CleanupClean, ignoreCleanupStatus: false, want: polecat.CleanupClean},
+		{name: "not ignored reports raw unknown", status: polecat.CleanupUnknown, ignoreCleanupStatus: false, want: polecat.CleanupUnknown},
+		{name: "not ignored reports raw dirty status", status: polecat.CleanupUnpushed, ignoreCleanupStatus: false, want: polecat.CleanupUnpushed},
+		{name: "ignored unknown displays as clean, not unknown", status: polecat.CleanupUnknown, ignoreCleanupStatus: true, want: polecat.CleanupClean},
+		{name: "ignored stale dirty status displays as clean", status: polecat.CleanupUnpushed, ignoreCleanupStatus: true, want: polecat.CleanupClean},
+		{name: "ignored missing status displays as clean", status: "", ignoreCleanupStatus: true, want: polecat.CleanupClean},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := polecat.WorkstateInput{CleanupStatus: tt.status, IgnoreCleanupStatus: tt.ignoreCleanupStatus}
+			got := displayedCleanupStatus(input)
+			if got != tt.want {
+				t.Errorf("displayedCleanupStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -366,9 +396,37 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 			wantCanSkip:  true,
 		},
 		{
-			name:         "unknown cleanup still blocks",
+			// gt-daff: a missing/unknown cleanup_status is the case
+			// --reconcile-cleanup exists to backfill. Refusing to ever skip it
+			// made the flag a no-op in exactly that case, since the field it
+			// needed to repair was also the predicate refusing the repair.
+			name:         "closed source with clean git ignores stale unknown cleanup",
 			status:       polecat.CleanupUnknown,
 			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "unknown cleanup still blocks when git is not provably safe",
+			status:       polecat.CleanupUnknown,
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+		},
+		{
+			name:         "closed source with clean git ignores missing cleanup",
+			status:       "",
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "missing cleanup still blocks when work is not terminal",
+			status:       "",
 			hookSafe:     true,
 			activeMRSafe: true,
 			gitSafe:      true,
@@ -437,8 +495,16 @@ func TestFullyIdlePolecatWithProvablyCleanGitCanIgnoreStaleCleanupStatus(t *test
 }
 
 func TestReconcileCleanupStatusIfSafe(t *testing.T) {
-	for _, previous := range []polecat.CleanupStatus{polecat.CleanupUnpushed, polecat.CleanupStash, polecat.CleanupUncommitted} {
-		t.Run(string(previous), func(t *testing.T) {
+	// gt-daff: unknown and missing ("") must reconcile too, without requiring
+	// CleanupProvenance to be pre-populated by the narrower legacy-evidence
+	// path — status.Verdict == SAFE_TO_NUKE is already the authoritative
+	// live-safety signal once DecideWorkstate accounts for them.
+	for _, previous := range []polecat.CleanupStatus{polecat.CleanupUnpushed, polecat.CleanupStash, polecat.CleanupUncommitted, polecat.CleanupUnknown, ""} {
+		name := string(previous)
+		if name == "" {
+			name = "missing"
+		}
+		t.Run(name, func(t *testing.T) {
 			status := &RecoveryStatus{
 				CleanupStatus: previous,
 				Verdict:       "SAFE_TO_NUKE",
@@ -725,6 +791,110 @@ func TestActiveMRBlocker(t *testing.T) {
 	}
 }
 
+// TestSafetyResultFromRecoveryStatus_BlocksOnEveryVerdict verifies gt-it1:
+// checkPolecatSafety's non-force nuke gate now shares polecat.DecideWorkstate
+// with `gt polecat check-recovery`, so it must block on every verdict
+// check-recovery treats as unsafe — not just the narrower hand-rolled
+// predicates the old checkPolecatSafety happened to check itself. This is
+// the exact wiring that closes the reported incident: a polecat check-recovery
+// reports NEEDS_MQ_SUBMIT must now also be refused by plain `gt polecat nuke`.
+func TestSafetyResultFromRecoveryStatus_BlocksOnEveryVerdict(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     RecoveryStatus
+		wantBlock  bool
+		wantReason string
+	}{
+		{
+			name:      "SAFE_TO_NUKE is not blocked",
+			status:    RecoveryStatus{Verdict: "SAFE_TO_NUKE", MQStatus: "not_required"},
+			wantBlock: false,
+		},
+		{
+			name:       "NEEDS_MQ_SUBMIT blocks (gt-it1 incident)",
+			status:     RecoveryStatus{Verdict: "NEEDS_MQ_SUBMIT", MQStatus: "not_submitted", Blockers: []string{"mq_status=not_submitted"}},
+			wantBlock:  true,
+			wantReason: "mq_status=not_submitted",
+		},
+		{
+			name:       "NEEDS_RECOVERY from dirty git blocks",
+			status:     RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{"git_state=has_uncommitted uncommitted_files=1"}},
+			wantBlock:  true,
+			wantReason: "git_state=has_uncommitted uncommitted_files=1",
+		},
+		{
+			name:       "NEEDS_RECOVERY from unpushed commits blocks",
+			status:     RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{"git_state=has_unpushed unpushed_commits=2"}},
+			wantBlock:  true,
+			wantReason: "git_state=has_unpushed unpushed_commits=2",
+		},
+		{
+			name:       "NEEDS_RECOVERY from a stash blocks",
+			status:     RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{"git_state=has_stash stash_count=1"}},
+			wantBlock:  true,
+			wantReason: "git_state=has_stash stash_count=1",
+		},
+		{
+			name:       "NEEDS_RECOVERY from an active hook blocks and surfaces HookBead",
+			status:     RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{"has work on hook (gt-abc123)"}},
+			wantBlock:  true,
+			wantReason: "has work on hook (gt-abc123)",
+		},
+		{
+			name:       "PENDING_MR (open MR) blocks",
+			status:     RecoveryStatus{Verdict: "PENDING_MR", Blockers: []string{"active_mr=hq-wisp-1 status=open"}},
+			wantBlock:  true,
+			wantReason: "active_mr=hq-wisp-1 status=open",
+		},
+		{
+			name: "multiple simultaneous blockers all surface",
+			status: RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{
+				"git_state=has_uncommitted uncommitted_files=1",
+				"git_state=has_stash stash_count=1",
+			}},
+			wantBlock: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := safetyResultFromRecoveryStatus("gastown/toast", tt.status)
+			if result.Blocked != tt.wantBlock {
+				t.Errorf("Blocked = %v, want %v (reasons: %v)", result.Blocked, tt.wantBlock, result.Reasons)
+			}
+			if tt.wantReason != "" {
+				found := false
+				for _, r := range result.Reasons {
+					if r == tt.wantReason {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Reasons %v missing %q", result.Reasons, tt.wantReason)
+				}
+			}
+			if len(tt.status.Blockers) != len(result.Reasons) {
+				t.Errorf("Reasons = %v, want exactly the disposition's Blockers %v", result.Reasons, tt.status.Blockers)
+			}
+		})
+	}
+}
+
+// TestSafetyResultFromRecoveryStatus_CarriesHookBead verifies the hook_bead
+// id computePolecatRecoveryStatus records on RecoveryStatus.HookBead is
+// carried through to SafetyCheckResult.HookBead for display.
+func TestSafetyResultFromRecoveryStatus_CarriesHookBead(t *testing.T) {
+	result := safetyResultFromRecoveryStatus("gastown/toast", RecoveryStatus{
+		Verdict:  "NEEDS_RECOVERY",
+		HookBead: "gt-xyz789",
+		Blockers: []string{"has work on hook (gt-xyz789)"},
+	})
+	if result.HookBead != "gt-xyz789" {
+		t.Errorf("HookBead = %q, want %q", result.HookBead, "gt-xyz789")
+	}
+}
+
 func TestFormatSafetyCheckBlockers(t *testing.T) {
 	blocked := []*SafetyCheckResult{
 		{Polecat: "gastown/fury", Reasons: []string{"cleanup_status=unknown", "active_mr=hq-wisp-1 status=open"}},
@@ -841,11 +1011,8 @@ func TestLookupOpenMRForBranchUsesSharedContext(t *testing.T) {
 
 func TestDisplayDryRunSafetyCheckMissingCleanupStatus(t *testing.T) {
 	result := &SafetyCheckResult{
-		HasAgentBead:   true,
-		HasPolecatInfo: true,
-		HasBranchInfo:  true,
-		CleanupStatus:  "",
-		HookBead:       "",
+		CleanupStatus: "",
+		HookBead:      "",
 	}
 
 	out := captureStdout(t, func() {
@@ -854,8 +1021,8 @@ func TestDisplayDryRunSafetyCheckMissingCleanupStatus(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(out, "<missing>") {
-		t.Errorf("displayDryRunSafetyCheck() output missing '<missing>' cleanup status marker: %q", out)
+	if !strings.Contains(out, "unknown (no agent bead)") {
+		t.Errorf("displayDryRunSafetyCheck() output missing unknown cleanup status marker: %q", out)
 	}
 	if !strings.Contains(out, "Hook") || !strings.Contains(out, "empty") {
 		t.Errorf("displayDryRunSafetyCheck() output missing empty hook line: %q", out)
@@ -864,13 +1031,10 @@ func TestDisplayDryRunSafetyCheckMissingCleanupStatus(t *testing.T) {
 
 func TestDisplayDryRunSafetyCheckActiveHook(t *testing.T) {
 	result := &SafetyCheckResult{
-		Blocked:        true,
-		HasAgentBead:   true,
-		HasPolecatInfo: true,
-		HasBranchInfo:  true,
-		CleanupStatus:  polecat.CleanupClean,
-		HookBead:       "gt-abc123",
-		HookStale:      false,
+		Blocked:       true,
+		CleanupStatus: polecat.CleanupClean,
+		HookBead:      "gt-abc123",
+		HookStale:     false,
 	}
 
 	out := captureStdout(t, func() {
@@ -886,12 +1050,9 @@ func TestDisplayDryRunSafetyCheckActiveHook(t *testing.T) {
 
 func TestDisplayDryRunSafetyCheckStaleHookNotBlocking(t *testing.T) {
 	result := &SafetyCheckResult{
-		HasAgentBead:   true,
-		HasPolecatInfo: true,
-		HasBranchInfo:  true,
-		CleanupStatus:  polecat.CleanupClean,
-		HookBead:       "gt-closed",
-		HookStale:      true,
+		CleanupStatus: polecat.CleanupClean,
+		HookBead:      "gt-closed",
+		HookStale:     true,
 	}
 
 	out := captureStdout(t, func() {

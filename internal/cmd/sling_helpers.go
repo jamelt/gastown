@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -21,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/formula"
+	"github.com/steveyegge/gastown/internal/nudge"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -163,6 +165,24 @@ func isDeferredBead(info *beadInfo) bool {
 		return true
 	}
 	return false
+}
+
+// moleculeScaffoldRejectReason returns a non-empty reason when info is
+// formula-molecule machinery (a molecule container or a materialized step
+// bead), which must never be dispatched as real work (gt-6va3). It mirrors the
+// closed/tombstone and hard-prohibition guards that scheduleBead, executeSling,
+// and runSling each re-validate independently rather than trusting an upstream
+// caller: every automatic dispatch path funnels through scheduleBead (enqueue)
+// or executeSling (dispatch), so guarding both stops stale molecule step beads
+// regardless of which scanner surfaced them.
+func moleculeScaffoldRejectReason(info *beadInfo) string {
+	if info == nil {
+		return ""
+	}
+	if beads.IsMoleculeContainerOrStep(&beads.Issue{Type: info.IssueType, Dependencies: info.Dependencies}) {
+		return "formula molecule machinery (container or materialized step), not dispatchable work"
+	}
+	return ""
 }
 
 func applyWorkflowStepTargetOverride(args []string) ([]string, error) {
@@ -922,11 +942,43 @@ func detectCloneRoot() (string, error) {
 
 // detectActor returns the current agent's actor string for event logging.
 func detectActor() string {
-	roleInfo, err := GetRole()
-	if err != nil {
-		return "unknown"
+	if roleInfo, err := GetRole(); err == nil && roleInfo.Role != RoleUnknown {
+		return roleInfo.ActorString()
 	}
-	return roleInfo.ActorString()
+	// Role could not be resolved from the cwd — either a neutral location like
+	// the town root (detectRole() returns RoleUnknown there by design) or a
+	// daemon process with no role-home directory. ActorString() would render
+	// RoleUnknown as the bare, uninformative literal "unknown" (gt-kins).
+	// Prefer the explicitly-declared beads actor: BD_ACTOR is "daemon" for the
+	// scheduler daemon's feed/dispatch cycles and "gastown/witness" for a
+	// witness-triggered dispatch — the same provenance gt escalate trusts.
+	if actor := strings.TrimSpace(os.Getenv("BD_ACTOR")); actor != "" {
+		return actor
+	}
+	return fallbackActor()
+}
+
+// osHostname is a seam over os.Hostname so tests can exercise the
+// hostname-lookup-failure branch of fallbackActor without depending on OS
+// behavior.
+var osHostname = os.Hostname
+
+// fallbackActor builds an actor string from OS-level identity when Gas Town
+// role detection fails (e.g. a human at a raw terminal with no GT_ROLE set --
+// the same unattributed-actor ambiguity behind gt-h0ie's motivating
+// incident). This is not authentication -- $USER and hostname are as
+// forgeable as GT_ROLE -- but unlike the bare literal "unknown" it leaves
+// something inspectable instead of recording nothing at all (gt-h0ie).
+func fallbackActor() string {
+	user := os.Getenv("USER")
+	if user == "" {
+		user = "?"
+	}
+	host, err := osHostname()
+	if err != nil || host == "" {
+		host = "?"
+	}
+	return fmt.Sprintf("unknown(%s@%s)", user, host)
 }
 
 // agentIDToBeadID converts an agent ID to its corresponding agent bead ID.
@@ -982,6 +1034,59 @@ func updateAgentHookBead(agentID, beadID, workDir, townBeadsDir string) {
 	// Agent bead hook_bead slot is no longer maintained.
 }
 
+// deliverDurableNudge sends an immediate tmux nudge and, when the composer
+// was holding other text so the send could not be verified
+// (tmux.ErrSubmitNotVerified), falls back to the cooperative nudge queue
+// instead of dropping the message. This is the same fallback `gt nudge
+// --mode=wait-idle` already uses for the identical failure (nudge.go):
+// enqueue, then ensure a poller is running so an idle recipient still drains
+// it — a queued nudge with nobody polling would otherwise sit forever
+// (gt-ax7a). Other errors (dead session, lock timeout) are not stranded-text
+// failures and are not retryable this way; they're returned unchanged.
+func deliverDurableNudge(t *tmux.Tmux, townRoot, targetSession, message string) error {
+	err := t.NudgeSession(targetSession, message)
+	if err == nil {
+		return nil
+	}
+	return queueFallbackNudge(townRoot, targetSession, message, err)
+}
+
+// queueFallbackNudge decides, given a failed immediate-delivery error, whether
+// to fall back to the cooperative nudge queue — and does so. Split out from
+// deliverDurableNudge so the fallback decision (the actual new behavior) is
+// unit-testable without a live tmux session in a stranded-composer state.
+func queueFallbackNudge(townRoot, targetSession, message string, err error) error {
+	if !errors.Is(err, tmux.ErrSubmitNotVerified) || townRoot == "" {
+		return err
+	}
+	if qErr := nudge.Enqueue(townRoot, targetSession, nudge.QueuedNudge{
+		Sender:  "dispatch",
+		Message: message,
+	}); qErr != nil {
+		return fmt.Errorf("queue fallback after unverified submit failed: %v (original: %w)", qErr, err)
+	}
+	if _, pollerErr := nudge.StartPoller(townRoot, targetSession); pollerErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not start nudge poller for %s: %v\n", targetSession, pollerErr)
+	}
+	return nil
+}
+
+// escalateNudgeFailure raises a HIGH severity escalation when a nudge to a
+// monitoring role (witness, deacon) is lost with no durable fallback able to
+// save it. A witness that never learns it was nudged is a monitoring gap
+// that hides other failures instead of merely delaying one message
+// (gt-ax7a) — that silence must not be reported as a mere warning.
+// Best effort: escalation failure is logged, not propagated.
+// A package var (mirroring fireCapacityStarvationEscalation) so tests can
+// stub it out instead of shelling out to a real `gt escalate`.
+var escalateNudgeFailure = func(role, targetSession string, cause error) {
+	msg := fmt.Sprintf("nudge to %s %s failed and could not be queued: %v", role, targetSession, cause)
+	cmd := exec.Command("gt", "escalate", "--severity", "high", "--reason", "nudge-delivery-failed", msg)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: nudge-delivery-failed escalation failed: %v\n", err)
+	}
+}
+
 // wakeRigAgents wakes the witness for a rig after polecat dispatch.
 // This ensures the witness is ready to monitor. The refinery is nudged
 // separately when an MR is actually created (by nudgeRefinery).
@@ -1000,14 +1105,16 @@ func wakeRigAgents(rigName string) {
 		}
 	}
 
-	// Immediate delivery to witness: send directly to tmux pane.
-	// No cooperative queue — idle agents never call Drain(), so queued
-	// nudges would be stuck forever. Direct delivery is safe: if the
-	// agent is busy, text buffers in tmux and is processed at next prompt.
+	// Immediate delivery to witness: send directly to tmux pane. If the
+	// composer already held other text and delivery can't be verified,
+	// deliverDurableNudge falls back to the cooperative queue instead of
+	// dropping the message (gt-ax7a); if even that isn't possible, escalate
+	// rather than warn-and-continue, since witness is a monitoring role.
 	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
 	t := tmux.NewTmux()
-	if err := t.NudgeSession(witnessSession, "Polecat dispatched - check for work"); err != nil {
+	if err := deliverDurableNudge(t, townRoot, witnessSession, "Polecat dispatched - check for work"); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge witness %s: %v\n", witnessSession, err)
+		escalateNudgeFailure("witness", witnessSession, err)
 	}
 }
 
@@ -1028,17 +1135,19 @@ func nudgeWitness(rigName, message string) {
 		return // Don't actually nudge tmux in tests
 	}
 
+	townRoot, _ := workspace.FindFromCwd()
 	t := tmux.NewTmux()
-	if err := t.NudgeSession(witnessSession, message); err != nil {
+	if err := deliverDurableNudge(t, townRoot, witnessSession, message); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge witness %s: %v\n", witnessSession, err)
+		escalateNudgeFailure("witness", witnessSession, err)
 	}
 }
 
 // nudgeRefinery wakes the refinery after an MR is created.
-// Uses immediate delivery: sends directly to the tmux pane.
-// No cooperative queue — idle agents never call Drain(), so queued
-// nudges would be stuck forever. Direct delivery is safe: if the
-// agent is busy, text buffers in tmux and is processed at next prompt.
+// Uses immediate delivery: sends directly to the tmux pane. If the composer
+// held other text and delivery can't be verified, deliverDurableNudge falls
+// back to the cooperative nudge queue (and starts a poller to drain it)
+// instead of dropping the message (gt-ax7a).
 func nudgeRefinery(rigName, message string) {
 	refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
 
@@ -1064,7 +1173,7 @@ func nudgeRefinery(rigName, message string) {
 	}
 
 	t := tmux.NewTmux()
-	if err := t.NudgeSession(refinerySession, message); err != nil {
+	if err := deliverDurableNudge(t, townRoot, refinerySession, message); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to nudge refinery %s: %v\n", refinerySession, err)
 	}
 }

@@ -192,8 +192,12 @@ func isRoleCommand(cmd *cobra.Command) bool {
 }
 
 func isDoneCommand(cmd *cobra.Command) bool {
+	// Match the top-level `gt done` command specifically, not any command
+	// merely named "done" — e.g. `gt dog done`, `gt mol step done`, and
+	// `gt wl done` are unrelated commands that happen to share the name and
+	// must not be subjected to gt done's polecat-only identity checks.
 	for c := cmd; c != nil; c = c.Parent() {
-		if c.Name() == "done" {
+		if c == doneCmd {
 			return true
 		}
 	}

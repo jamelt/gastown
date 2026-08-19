@@ -40,12 +40,12 @@ func runForget(cmd *cobra.Command, args []string) error {
 		memType := key[:slashIdx]
 		shortKey := key[slashIdx+1:]
 		if _, ok := validMemoryTypes[memType]; ok {
-			fullKey := memoryKeyPrefix + memType + "." + shortKey
-			existing, err := bdKvGet(fullKey)
+			memKey := memBeadKey(memType, shortKey)
+			existing, err := bdKvGet(memoryKeyPrefix + memKey)
 			if err != nil || existing == "" {
 				return fmt.Errorf("memory %q not found", key)
 			}
-			if err := bdKvClear(fullKey); err != nil {
+			if err := bdForget(memKey); err != nil {
 				return fmt.Errorf("removing memory: %w", err)
 			}
 			fmt.Printf("%s Forgot memory: %s\n", style.Success.Render("✓"), style.Bold.Render(key))
@@ -55,10 +55,10 @@ func runForget(cmd *cobra.Command, args []string) error {
 
 	// Try typed key first (memory.<type>.<key> for each known type)
 	for _, t := range memoryTypeOrder {
-		fullKey := memoryKeyPrefix + t + "." + key
-		existing, _ := bdKvGet(fullKey)
+		memKey := memBeadKey(t, key)
+		existing, _ := bdKvGet(memoryKeyPrefix + memKey)
 		if existing != "" {
-			if err := bdKvClear(fullKey); err != nil {
+			if err := bdForget(memKey); err != nil {
 				return fmt.Errorf("removing memory: %w", err)
 			}
 			displayKey := key
@@ -71,13 +71,12 @@ func runForget(cmd *cobra.Command, args []string) error {
 	}
 
 	// Try legacy untyped key (memory.<key>)
-	fullKey := memoryKeyPrefix + key
-	existing, err := bdKvGet(fullKey)
+	existing, err := bdKvGet(memoryKeyPrefix + key)
 	if err != nil || existing == "" {
 		return fmt.Errorf("memory %q not found", key)
 	}
 
-	if err := bdKvClear(fullKey); err != nil {
+	if err := bdForget(key); err != nil {
 		return fmt.Errorf("removing memory: %w", err)
 	}
 

@@ -526,6 +526,10 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	g := git.NewGit(townRoot)
 	mgr := rig.NewManager(townRoot, rigsConfig, g)
 
+	// Commit any unrelated pre-existing dirt on town config files now, before
+	// this operation's own edits land — see commitPreExistingTownConfigDirt.
+	commitPreExistingTownConfigDirt(g, name)
+
 	fmt.Printf("Creating rig %s...\n", style.Bold.Render(name))
 	fmt.Printf("  Repository: %s\n", gitURL)
 	if rigAddLocalRepo != "" {
@@ -1083,6 +1087,10 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 	// Create rig manager
 	g := git.NewGit(townRoot)
 	mgr := rig.NewManager(townRoot, rigsConfig, g)
+
+	// Commit any unrelated pre-existing dirt on town config files now, before
+	// this operation's own edits land — see commitPreExistingTownConfigDirt.
+	commitPreExistingTownConfigDirt(g, name)
 
 	fmt.Printf("Adopting existing rig %s...\n", style.Bold.Render(name))
 
@@ -2384,22 +2392,78 @@ func findRigSessions(t *tmux.Tmux, rigName string) ([]string, error) {
 	return matches, nil
 }
 
+// townConfigFiles are the town-level files that rig add/adopt modify and that
+// commitTownConfigChanges / commitPreExistingTownConfigDirt operate on.
+var townConfigFiles = []string{
+	filepath.Join("mayor", "rigs.json"),
+	filepath.Join("mayor", "daemon.json"),
+	filepath.Join(".beads", "routes.jsonl"),
+}
+
+// commitPreExistingTownConfigDirt commits any uncommitted changes already
+// sitting on townConfigFiles BEFORE this rig operation makes its own edits.
+//
+// Call this immediately after constructing g, before any of this command's
+// own mutations (AddRig/RegisterRig, AddRigToDaemonPatrols, etc.) touch these
+// files. Without it, commitTownConfigChanges — called later, after those
+// mutations — would stage and commit the files' full current on-disk content,
+// silently folding any unrelated pre-existing edit into a "register rig X"
+// commit. That misattributes the edit and buries it from git history: this is
+// exactly how patrols.wisp_reaper.enabled was flipped false in mayor/daemon.json
+// and stayed disabled town-wide for days, unnoticed, because the flip rode
+// along inside an unrelated "chore: register rig gastown_src" commit (gt-2xrj).
+func commitPreExistingTownConfigDirt(g *git.Git, rigName string) {
+	status, err := g.Status()
+	if err != nil || status == nil || status.Clean {
+		return
+	}
+
+	dirty := make(map[string]bool, len(status.Modified)+len(status.Added)+len(status.Untracked))
+	for _, f := range status.Modified {
+		dirty[f] = true
+	}
+	for _, f := range status.Added {
+		dirty[f] = true
+	}
+	for _, f := range status.Untracked {
+		dirty[f] = true
+	}
+
+	var preExisting []string
+	for _, f := range townConfigFiles {
+		if dirty[f] {
+			preExisting = append(preExisting, f)
+		}
+	}
+	if len(preExisting) == 0 {
+		return
+	}
+
+	if err := g.Add(preExisting...); err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: could not stage pre-existing town config changes: %v\n", err)
+		return
+	}
+
+	msg := fmt.Sprintf("chore: commit pending %s changes found before registering rig %s", strings.Join(preExisting, ", "), rigName)
+	if err := g.Commit(msg); err != nil {
+		if !strings.Contains(err.Error(), "nothing to commit") {
+			fmt.Fprintf(os.Stderr, "  Warning: could not commit pre-existing town config files: %v\n", err)
+		}
+		return
+	}
+
+	fmt.Printf("  Committed pre-existing pending changes to %s separately (see git log)\n", strings.Join(preExisting, ", "))
+}
+
 // commitTownConfigChanges commits town-level config files (rigs.json, daemon.json,
 // routes.jsonl) to the town repo after rig add/adopt. Without this commit, changes
 // are silently reverted by any process that does a git restore/checkout.
 func commitTownConfigChanges(townRoot, rigName string) {
 	g := git.NewGit(townRoot)
 
-	// Collect the town-level files that rig add/adopt modifies.
-	files := []string{
-		filepath.Join("mayor", "rigs.json"),
-		filepath.Join("mayor", "daemon.json"),
-		filepath.Join(".beads", "routes.jsonl"),
-	}
-
 	// Only stage files that actually exist (adopt may not touch all of them).
 	var toAdd []string
-	for _, f := range files {
+	for _, f := range townConfigFiles {
 		if _, err := os.Stat(filepath.Join(townRoot, f)); err == nil {
 			toAdd = append(toAdd, f)
 		}

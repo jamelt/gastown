@@ -298,7 +298,7 @@ func TestResolveEpicBranch_LegacyFallback(t *testing.T) {
 					remoteBranches: tt.remoteBranches,
 				}
 			}
-			got := resolveEpicBranch(tt.epic, "", checker)
+			got := resolveEpicBranch(tt.epic, "", "origin", checker)
 			if got != tt.want {
 				t.Errorf("resolveEpicBranch() = %q, want %q", got, tt.want)
 			}

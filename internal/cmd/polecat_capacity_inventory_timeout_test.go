@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -8,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // writeHangOnAgentQueryBDStub writes a fake bd that hangs (via exec, so
@@ -172,14 +173,8 @@ func TestDispatchScheduledWorkReleasesLockAfterInventoryTimeout(t *testing.T) {
 		t.Fatalf("dispatchScheduledWork took %v, want bounded by the ~1s inventory timeout", elapsed)
 	}
 
-	lockFile := filepath.Join(townRoot, ".runtime", "scheduler-dispatch.lock")
-	lock := flock.New(lockFile)
-	locked, lockErr := lock.TryLock()
-	if lockErr != nil {
-		t.Fatalf("TryLock after timeout: %v", lockErr)
+	lockFile := schedulerDispatchLockPath(townRoot)
+	if _, err := lock.New(lockFile).Read(); !errors.Is(err, lock.ErrNotLocked) {
+		t.Fatalf("scheduler-dispatch.lock Read() after timeout = %v, want ErrNotLocked (lock released)", err)
 	}
-	if !locked {
-		t.Fatal("scheduler-dispatch.lock still held after dispatchScheduledWork returned — timeout did not release it")
-	}
-	_ = lock.Unlock()
 }
