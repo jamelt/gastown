@@ -109,6 +109,59 @@ func TestPlanAgentFailoverIgnoresNonHardFailures(t *testing.T) {
 	}
 }
 
+func TestPlanAgentFailoverIncludeNearLimitPlansBeforeHardLimit(t *testing.T) {
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	results := []ScanResult{{Session: "hq-mayor", Agent: "claude-opus-5", NearLimit: true, MatchedLine: "98% of session limit used"}}
+	routes := map[string][]string{"hq-mayor": {"claude-opus-5", "codex-sol-high", "openrouter-qwen38-max"}}
+	providers := map[string]string{"claude-opus-5": "anthropic", "codex-sol-high": "openai", "openrouter-qwen38-max": "openrouter"}
+	routeResolver, providerResolver := routeAndProvider(routes, providers)
+
+	plan, err := PlanAgentFailover(results, &config.QuotaState{}, &config.AgentFailoverConfig{Enabled: true, IncludeNearLimit: true}, now, routeResolver, providerResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.LimitedSessions) != 0 {
+		t.Fatalf("expected no hard-limited sessions, got %+v", plan.LimitedSessions)
+	}
+	if len(plan.NearLimitSessions) != 1 {
+		t.Fatalf("expected 1 near-limit session, got %+v", plan.NearLimitSessions)
+	}
+	assignment := plan.Assignments["hq-mayor"]
+	if assignment.NextAgent != "codex-sol-high" || assignment.NextProvider != "openai" {
+		t.Fatalf("assignment = %+v", assignment)
+	}
+}
+
+func TestPlanAgentFailoverNearLimitDoesNotExcludeOwnProvider(t *testing.T) {
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	results := []ScanResult{
+		{Session: "hq-mayor", Agent: "claude-opus-5", NearLimit: true, MatchedLine: "98% of session limit used"},
+		{Session: "gt-polecat", Agent: "codex-terra", RateLimited: true},
+	}
+	routes := map[string][]string{
+		"hq-mayor":   {"claude-opus-5", "codex-sol-high"},
+		"gt-polecat": {"codex-terra", "claude-opus-5"},
+	}
+	providers := map[string]string{
+		"claude-opus-5": "anthropic", "codex-sol-high": "openai", "codex-terra": "openai",
+	}
+	routeResolver, providerResolver := routeAndProvider(routes, providers)
+
+	plan, err := PlanAgentFailover(results, &config.QuotaState{}, &config.AgentFailoverConfig{Enabled: true, IncludeNearLimit: true}, now, routeResolver, providerResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// gt-polecat's hard-limited provider (openai) must still exclude codex-sol-high
+	// as a candidate for hq-mayor, but hq-mayor's own near-limit provider
+	// (anthropic) must not exclude itself as a candidate for gt-polecat.
+	if got := plan.Assignments["gt-polecat"].NextAgent; got != "claude-opus-5" {
+		t.Fatalf("polecat next = %q, want claude-opus-5 (near-limit must not self-exclude)", got)
+	}
+	if _, assigned := plan.Assignments["hq-mayor"]; assigned {
+		t.Fatalf("mayor should have no eligible backup (only candidate's provider is hard-limited): %+v", plan.Assignments["hq-mayor"])
+	}
+}
+
 func TestRecordAgentFailoverPersistsProviderAndSessionState(t *testing.T) {
 	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
 	state := &config.QuotaState{}

@@ -41,9 +41,10 @@ func quotaDogInterval(config *DaemonPatrolConfig) time.Duration {
 }
 
 // runQuotaDog executes same-provider account rotation first, then cross-provider
-// agent failover for any hard-limited sessions that remain. Rotation errors are
-// non-fatal because a town may intentionally have no second Claude account;
-// provider fallback must still get its chance.
+// agent failover for any hard-limited (and, if agent_failover.include_near_limit
+// is set, near-limit) sessions that remain. Rotation errors are non-fatal
+// because a town may intentionally have no second Claude account; provider
+// fallback must still get its chance.
 //
 // This follows the daemon's "dumb scheduler" principle: the daemon schedules,
 // existing commands do the work. No LLM or molecule needed — pure mechanical rotation.
