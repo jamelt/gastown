@@ -1983,16 +1983,6 @@ func dryRunNukeSummary(total, blocked int) string {
 	return fmt.Sprintf("Would nuke %d polecat(s).", total)
 }
 
-// nukePolecatFull performs the complete cleanup sequence for a single polecat:
-// 1. Kill tmux session
-// 2. Delete worktree (via RemoveWithOptions with nuclear=true)
-// 3. Delete git branch
-// 4. Close agent bead
-// This is the canonical cleanup path used by both `polecat nuke` and `polecat stale --cleanup`.
-func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig) error {
-	return nukePolecatFullWithOptions(polecatName, rigName, mgr, r, nukePolecatOptions{PurgeClosedEphemerals: true})
-}
-
 type nukePolecatOptions struct {
 	Force                 bool
 	PurgeClosedEphemerals bool
