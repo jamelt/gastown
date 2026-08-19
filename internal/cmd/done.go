@@ -2694,9 +2694,23 @@ func releaseHookedBeadOwnership(hookBd *beads.Beads, hookedBeadID string, hooked
 // checkpoints, and active_mr writes don't silently fail (hq-xu4p). Only
 // rig-level agents are handled — town agents (mayor/deacon) are owned by
 // gt doctor. Best-effort: failures are warned, never fatal.
+//
+// Witness and Refinery are singleton identities that must live in the rig's
+// own database (see beads.Beads.ForLocalBeads) so patrol/resolver commands
+// can find them; the caller-supplied bd is town-pinned (correct for
+// polecats), so those two roles re-pin to the rig database here instead of
+// silently recreating a duplicate identity in town state (gt-n99t).
 func ensureAgentBeadExists(bd *beads.Beads, id string, ctx RoleContext) {
 	if id == "" {
 		return
+	}
+	if ctx.Role == RoleWitness || ctx.Role == RoleRefinery {
+		rigBD, err := rigLocalAgentBeads(ctx.WorkDir, ctx.Rig)
+		if err != nil {
+			style.PrintWarning("agent bead %s: cannot resolve rig-local beads for %s: %v", id, ctx.Rig, err)
+			return
+		}
+		bd = rigBD
 	}
 	if issue, err := bd.Show(id); err == nil && issue != nil && issue.Status != string(beads.StatusClosed) {
 		return // exists and is active
@@ -2723,6 +2737,17 @@ func ensureAgentBeadExists(bd *beads.Beads, id string, ctx RoleContext) {
 	} else {
 		fmt.Printf("%s Recreated/reopened missing agent bead: %s\n", style.Bold.Render("✓"), id)
 	}
+}
+
+// rigLocalAgentBeads returns a Beads wrapper pinned to rigName's own
+// database, bypassing town routing. Witness and Refinery singleton
+// identities must be durable rig-local records (beads.Beads.ForLocalBeads).
+func rigLocalAgentBeads(workDir, rigName string) (*beads.Beads, error) {
+	rigBeadsDir, err := resolveAgentsPrimaryBeadsDir(workDir, "", rigName)
+	if err != nil {
+		return nil, err
+	}
+	return beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForLocalBeads(), nil
 }
 
 // isStaleBranchIssue reports whether a branch-derived issue id should be
