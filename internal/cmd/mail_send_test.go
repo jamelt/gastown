@@ -76,6 +76,7 @@ func TestResolveSender(t *testing.T) {
 		{"redundant self-override is a no-op", "gastown/polecats/toast", "gastown/polecats/toast", "gastown/polecats/toast", ""},
 		{"convoy override allowed", "convoy/gt-1234", "gastown/refinery", "convoy/gt-1234", ""},
 		{"bare convoy prefix allowed", "convoy/", "gastown/refinery", "convoy/", ""},
+		{"prefix-of-detected-not-exact-match rejected", "gastown/polecats/toast-evil", "gastown/polecats/toast", "", "not permitted"},
 		{"impersonating overseer rejected", "overseer", "gastown/polecats/toast", "", "not permitted"},
 		{"impersonating mayor rejected", "mayor/", "gastown/polecats/toast", "", "not permitted"},
 		{"case-sensitive prefix rejected", "Convoy/gt-1234", "gastown/refinery", "", "not permitted"},
