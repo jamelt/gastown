@@ -368,8 +368,10 @@ func QueueLen(townRoot, session string) int {
 // satisfies a reminder can still cancel it after Drain has claimed but not
 // yet delivered it. This narrows, but cannot fully close, the claim/deliver
 // race: once Drain has read a claimed file's bytes into memory it delivers
-// the nudge regardless of what happens to the file afterward. A concurrent
-// Drain removing or renaming a matched file first is expected, not an error.
+// the nudge regardless of what happens to the file afterward, and a
+// concurrent Drain call may rename or remove a matched file out from under
+// this scan (e.g. its own orphan sweep, or normal delivery) before this
+// function gets to it. Both are expected races, not errors.
 func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 	if kind == "" || threadID == "" {
 		return 0, nil
