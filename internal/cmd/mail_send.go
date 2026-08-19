@@ -71,10 +71,14 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// Determine sender (--from overrides auto-detection, for relay/bridge use)
-	from := mailFrom
-	if from == "" {
-		from = detectSender()
+	// Determine sender. --from can override auto-detection only for the
+	// convoy notification subsystem's synthetic actor (convoy/<id>) — the
+	// sole legitimate caller of this flag in the codebase. Any other value
+	// would let a caller impersonate a real agent or the human overseer with
+	// zero verification (gt-p7gu).
+	from, err := resolveSender(mailFrom, detectSender())
+	if err != nil {
+		return err
 	}
 
 	// If subject looks like a reply ("Re: ...") but the user didn't pass
@@ -248,6 +252,22 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// resolveSender determines the message sender, restricting --from overrides
+// to the convoy notification subsystem's synthetic actor (convoy/<id>) — the
+// only legitimate use of --from in the codebase. A redundant override that
+// matches the detected identity is allowed as a no-op. Any other override is
+// rejected: without this, --from let any caller claim to be an arbitrary
+// sender (e.g. "overseer") with zero verification (gt-p7gu).
+func resolveSender(mailFrom, detected string) (string, error) {
+	if mailFrom == "" || mailFrom == detected {
+		return detected, nil
+	}
+	if !strings.HasPrefix(mailFrom, "convoy/") {
+		return "", fmt.Errorf("--from %q not permitted: sender overrides are restricted to convoy/<id> (relay/bridge use); detected identity is %q", mailFrom, detected)
+	}
+	return mailFrom, nil
 }
 
 // generateThreadID creates a random thread ID for new message threads.

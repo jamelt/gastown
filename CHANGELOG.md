@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`gt mail send --from` no longer permits sender impersonation** — `--from`
+  is now restricted to `convoy/<id>` overrides (the convoy notification
+  subsystem's synthetic actor, the only legitimate use in the codebase); any
+  other value is rejected with an error naming the detected identity instead
+  of silently forging the message's `From` (and, transitively, the `bd
+  --actor` audit attribution routed through it) (gt-p7gu).
+
 ## [1.2.1] - 2026-06-06
 
 ### Fixed
