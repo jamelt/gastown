@@ -372,6 +372,12 @@ func runEscalateAck(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("acknowledging escalation: %w", err)
 	}
 
+	// Stop the escalation from re-prompting its recipients: an ack is not a mail
+	// reply, so the reply-path nudge cleanup never runs. Clear the thread's
+	// queued escalation/reply nudges so a still-pending (but acknowledged)
+	// escalation no longer keeps asking the recipient to resolve it.
+	clearEscalationThreadNudges(townRoot, escalationID)
+
 	// Log to activity feed
 	_ = events.LogFeed(events.TypeEscalationAcked, ackedBy, map[string]interface{}{
 		"escalation_id": escalationID,
@@ -401,6 +407,11 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("closing escalation: %w", err)
 	}
 
+	// Clear any queued escalation/reply nudges for this thread so the resolved
+	// escalation stops re-requesting resolution from its recipients (the loop in
+	// gt-2lmt). A close is not a mail reply, so the reply-path cleanup never runs.
+	clearEscalationThreadNudges(townRoot, escalationID)
+
 	// Log to activity feed
 	_ = events.LogFeed(events.TypeEscalationClosed, closedBy, map[string]interface{}{
 		"escalation_id": escalationID,
@@ -411,6 +422,33 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Escalation closed: %s\n", style.Bold.Render("✓"), escalationID)
 	fmt.Printf("  Reason: %s\n", escalateCloseReason)
 	return nil
+}
+
+// clearEscalationThreadNudges removes any queued escalation/reply nudges for an
+// escalation's thread across the recipients it was routed to. Escalation nudges
+// and reply reminders are threaded on the escalation ID and are otherwise only
+// cleared by a mail reply — never by ack/close — so without this a resolved
+// escalation keeps re-prompting its recipients to resolve it. Best-effort: the
+// escalation is already acked/closed regardless of nudge-cleanup outcome.
+func clearEscalationThreadNudges(townRoot, escalationID string) {
+	if townRoot == "" || escalationID == "" {
+		return
+	}
+	cfg, err := config.LoadOrCreateEscalationConfig(config.EscalationConfigPath(townRoot))
+	if err != nil {
+		return
+	}
+	router := mail.NewRouter(townRoot)
+	seen := make(map[string]bool)
+	for _, severity := range []string{config.SeverityLow, config.SeverityMedium, config.SeverityHigh, config.SeverityCritical} {
+		for _, target := range extractMailTargetsFromActions(cfg.GetRouteForSeverity(severity)) {
+			if seen[target] {
+				continue
+			}
+			seen[target] = true
+			_ = router.ClearThreadNudges(target, escalationID)
+		}
+	}
 }
 
 func runEscalateStale(cmd *cobra.Command, args []string) error {
@@ -503,7 +541,12 @@ func runEscalateStale(cmd *cobra.Command, args []string) error {
 					To:      target,
 					Subject: fmt.Sprintf("[%s→%s] Re-escalated: %s", strings.ToUpper(result.OldSeverity), strings.ToUpper(result.NewSeverity), result.Title),
 					Body:    formatReescalationMailBody(result, reescalatedBy),
-					Type:    mail.TypeTask,
+					Type:    mail.TypeEscalation,
+					// Thread the re-escalation on the escalation itself so its queued
+					// nudges are cleared by clearEscalationThreadNudges when the
+					// escalation is acked/closed. Without a ThreadID they would carry
+					// an empty thread and keep nudging a resolved escalation (gt-2lmt).
+					ThreadID: result.ID,
 				}
 
 				// Set priority based on new severity

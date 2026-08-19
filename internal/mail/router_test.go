@@ -2420,3 +2420,48 @@ func TestEnqueueReplyReminder_DisabledByConfig(t *testing.T) {
 		t.Errorf("reply_reminder_delay=0s should disable reminders, got %d pending", pending)
 	}
 }
+
+// TestClearThreadNudges_RemovesEscalationAndReplyReminder verifies that
+// ClearThreadNudges removes both the escalation wakeup nudge and the reply
+// reminder queued on an escalation's thread, while leaving nudges for other
+// threads intact. This underpins the gt-2lmt fix: ack/close clear a resolved
+// escalation's queued prompts even though neither is a mail reply.
+func TestClearThreadNudges_RemovesEscalationAndReplyReminder(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := session.MayorSessionName()
+
+	enqueue := func(kind, threadID string) {
+		if err := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
+			Sender:   "system",
+			Message:  "x",
+			Priority: nudge.PriorityNormal,
+			Kind:     kind,
+			ThreadID: threadID,
+		}); err != nil {
+			t.Fatalf("Enqueue(%s): %v", kind, err)
+		}
+	}
+	enqueue("escalation", "hq-esc1")
+	enqueue("reply-reminder", "hq-esc1")
+	enqueue("reply-reminder", "hq-other") // unrelated thread — must survive
+
+	if got := nudge.QueueLen(townRoot, sessionName); got != 3 {
+		t.Fatalf("expected 3 queued nudges, got %d", got)
+	}
+
+	r := NewRouterWithTownRoot(townRoot, townRoot)
+	if err := r.ClearThreadNudges(constants.RoleMayor, "hq-esc1"); err != nil {
+		t.Fatalf("ClearThreadNudges: %v", err)
+	}
+
+	if got := nudge.QueueLen(townRoot, sessionName); got != 1 {
+		t.Fatalf("expected 1 remaining nudge after clearing thread hq-esc1, got %d", got)
+	}
+	remaining, err := nudge.Drain(townRoot, sessionName)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ThreadID != "hq-other" {
+		t.Errorf("expected only the unrelated hq-other nudge to survive, got %+v", remaining)
+	}
+}

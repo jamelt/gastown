@@ -437,6 +437,22 @@ func (b *Beads) ReescalateEscalation(id, reescalatedBy string, maxReescalations 
 		OldSeverity: fields.Severity,
 	}
 
+	// Defense-in-depth: never re-escalate (and re-mail) an escalation that is no
+	// longer open. Callers select candidates from a prior open+un-acked snapshot
+	// (ListStaleEscalations), but an escalation can be acknowledged or closed
+	// between that snapshot and this call — re-mailing it then re-requests
+	// resolution of an already-resolved escalation. Skip instead of re-sending.
+	if issue.Status != "" && issue.Status != "open" {
+		result.Skipped = true
+		result.SkipReason = fmt.Sprintf("no longer open (status=%s)", issue.Status)
+		return result, nil
+	}
+	if HasLabel(issue, "resolved") || HasLabel(issue, "acked") {
+		result.Skipped = true
+		result.SkipReason = "already acknowledged or resolved"
+		return result, nil
+	}
+
 	// Check if already at max reescalations
 	if maxReescalations > 0 && fields.ReescalationCount >= maxReescalations {
 		result.Skipped = true

@@ -504,3 +504,53 @@ exit 1
 		t.Errorf("expected --force in bd close args, got:\n%s", args)
 	}
 }
+
+// TestReescalateEscalation_SkipsResolvedEscalation verifies that an escalation
+// which was closed/resolved between candidate selection and re-escalation is
+// skipped rather than re-escalated and re-mailed. Without this guard, the stale
+// re-escalation path re-requests resolution of an already-resolved escalation
+// (gt-2lmt).
+func TestReescalateEscalation_SkipsResolvedEscalation(t *testing.T) {
+	stubDir := t.TempDir()
+	updateMarker := filepath.Join(stubDir, "update_called.txt")
+
+	// Stub bd: `show` reports the escalation as already CLOSED; if `update` is
+	// ever invoked the escalation was (wrongly) re-escalated, recorded via marker.
+	stubScript := `#!/bin/sh
+case " $* " in
+  *" version "*)
+    echo "unknown flag: --allow-stale"
+    exit 1
+    ;;
+  *" show "*)
+    echo '[{"id":"hq-test1","title":"Test escalation","status":"closed","priority":2,"type":"task","labels":["gt:escalation","resolved"],"description":"severity: high"}]'
+    exit 0
+    ;;
+  *" update "*)
+    echo called > "` + updateMarker + `"
+    cat > /dev/null
+    exit 0
+    ;;
+esac
+exit 1
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ResetBdAllowStaleCacheForTest()
+
+	b := New(t.TempDir())
+	result, err := b.ReescalateEscalation("hq-test1", "deacon/", 2)
+	if err != nil {
+		t.Fatalf("ReescalateEscalation: %v", err)
+	}
+	if !result.Skipped {
+		t.Fatalf("expected Skipped=true for an already-closed escalation, got %+v", result)
+	}
+	if _, statErr := os.Stat(updateMarker); statErr == nil {
+		t.Errorf("bd update was called — a resolved escalation must not be re-escalated or re-mailed")
+	}
+}
