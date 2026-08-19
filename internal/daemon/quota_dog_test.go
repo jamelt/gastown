@@ -83,3 +83,10 @@ func TestQuotaDogDefaultConstants(t *testing.T) {
 		t.Errorf("expected timeout 2m, got %v", quotaDogTimeout)
 	}
 }
+
+func TestQuotaDogRunsAccountRotationBeforeProviderFailover(t *testing.T) {
+	actions := quotaDogActions()
+	if len(actions) != 2 || actions[0] != "rotate" || actions[1] != "failover" {
+		t.Fatalf("quota dog actions = %v, want [rotate failover]", actions)
+	}
+}

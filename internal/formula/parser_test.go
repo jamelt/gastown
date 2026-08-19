@@ -79,6 +79,7 @@ description = "Second leg"
 title = "Synthesis"
 description = "Combine results"
 depends_on = ["leg1", "leg2"]
+agent = "claude-opus-5"
 `)
 
 	f, err := Parse(data)
@@ -100,6 +101,9 @@ depends_on = ["leg1", "leg2"]
 	}
 	if len(f.Synthesis.DependsOn) != 2 {
 		t.Errorf("len(Synthesis.DependsOn) = %d, want 2", len(f.Synthesis.DependsOn))
+	}
+	if f.Synthesis.Agent != "claude-opus-5" {
+		t.Errorf("Synthesis.Agent = %q, want claude-opus-5", f.Synthesis.Agent)
 	}
 }
 

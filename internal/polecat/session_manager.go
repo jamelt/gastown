@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/quota"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -383,7 +384,22 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		}
 		runtimeConfig = rc
 	} else {
-		runtimeConfig = config.ResolveRoleAgentConfig("polecat", townRoot, m.rig.Path)
+		// Consult provider cooldown state (mayor/quota.json) so a fresh
+		// dispatch doesn't spawn straight into a hard-limited provider that
+		// the reactive failover engine would otherwise have to rescue
+		// (gt-lovb). Defers with a clear error when every agent in the
+		// role's configured backup chain is cooling down.
+		rc, reason, err := quota.SelectRoleAgent("polecat", townRoot, m.rig.Path, time.Now())
+		if err != nil {
+			return fmt.Errorf("selecting agent for polecat dispatch: %w", err)
+		}
+		runtimeConfig = rc
+		if reason != "" {
+			if recErr := quota.RecordDispatchFailover(townRoot, sessionID, rc.ResolvedAgent, reason, time.Now()); recErr != nil {
+				debugSession("recording dispatch failover", recErr)
+			}
+			style.PrintWarning("%s", reason)
+		}
 	}
 
 	// Ensure runtime settings exist in the shared polecats parent directory.
@@ -481,6 +497,19 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, workDir, command, envVars); err != nil {
 		return fmt.Errorf("creating session: %w", err)
 	}
+	startupComplete := false
+	defer func() {
+		if startupComplete {
+			return
+		}
+		_ = m.tmux.KillSessionWithProcesses(sessionID)
+		RemoveSessionHeartbeat(townRoot, sessionID)
+	}()
+
+	// Replace any inherited activity state before the daemon can inspect this
+	// newly-created session. Startup below can wait on agent readiness for long
+	// enough that an old exiting heartbeat would otherwise be reaped.
+	TouchSessionHeartbeat(townRoot, sessionID)
 
 	// Record agent's pane_id for ZFC-compliant liveness checks (gt-qmsx).
 	// Declared pane identity replaces process-tree inference in IsRuntimeRunning
@@ -600,10 +629,6 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Track PID for defense-in-depth orphan cleanup (non-fatal)
 	_ = session.TrackSessionPID(townRoot, sessionID, m.tmux)
 
-	// Touch initial heartbeat so liveness detection works from the start (gt-qjtq).
-	// Subsequent touches happen on every gt command via persistentPreRun.
-	TouchSessionHeartbeat(townRoot, sessionID)
-
 	// Stream polecat's Claude Code JSONL conversation log to VictoriaLogs (opt-in).
 	if os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {
 		if err := session.ActivateAgentLogging(sessionID, workDir, runID); err != nil {
@@ -616,6 +641,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	session.RecordAgentInstantiateFromDir(context.Background(), runID, runtimeConfig.ResolvedAgent,
 		"polecat", polecat, sessionID, m.rig.Name, townRoot, opts.Issue, workDir)
 
+	startupComplete = true
 	return nil
 }
 

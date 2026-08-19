@@ -1047,6 +1047,17 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		// Get the rig's beads prefix from rigs.json (falls back to "gt" if not found)
 		prefix := config.GetRigPrefix(ctx.TownRoot, ctx.RigName)
 
+		// Refuse to initialize a database whose prefix is already claimed by
+		// a different, already-configured rig. ctx.RigName comes from the
+		// unvalidated --rig flag; if it isn't a registered rig, GetRigPrefix's
+		// "gt" fallback would otherwise mint a second database issuing the
+		// same bead-id prefix as an existing rig (gt-czpm).
+		if prefix != "" {
+			if err := beads.CheckPrefixAvailable(ctx.TownRoot, prefix+"-", ctx.RigName); err != nil {
+				return fmt.Errorf("refusing to initialize database for rig %q: %w", ctx.RigName, err)
+			}
+		}
+
 		// Create .beads directory
 		if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
 			return fmt.Errorf("creating .beads directory: %w", err)
@@ -1054,7 +1065,7 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 		// Run bd init with the configured prefix (Dolt is the only backend since bd v0.51.0).
 		// Gas Town rigs use Dolt server mode via the shared town Dolt sql-server.
-		initArgs := []string{"init"}
+		initArgs := []string{"init", "--skip-agents", "--skip-hooks"}
 		if prefix != "" {
 			initArgs = append(initArgs, "--prefix", prefix)
 		}

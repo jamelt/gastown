@@ -105,6 +105,7 @@ Session hook checks:
 Dolt checks:
   - dolt-binary              Check that dolt is installed and meets minimum version
   - dolt-metadata            Check dolt metadata tables exist
+  - dolt-lineage             Detect rig Beads histories with no common ancestor
   - dolt-server-reachable    Check dolt sql-server is reachable
   - dolt-orphaned-databases  Detect orphaned dolt databases
 
@@ -217,6 +218,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// start with missing PATH exports. See gt-99u.
 	d.Register(doctor.NewClaudeSettingsCheck())
 	d.Register(doctor.NewDaemonCheck())
+	d.Register(doctor.NewDaemonBinaryStaleCheck())
 	d.Register(doctor.NewTmuxGlobalEnvCheck())
 	d.Register(doctor.NewBootHealthCheck())
 	d.Register(doctor.NewTownBeadsConfigCheck())
@@ -231,7 +233,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewStaleSQLServerInfoCheck()) // Check for stale sql-server.info files (GH#2770)
 	d.Register(doctor.NewPrefixMismatchCheck())
 	d.Register(doctor.NewDatabasePrefixCheck())
-	d.Register(doctor.NewBeadPrefixResidencyCheck())
+	d.Register(doctor.NewMisroutedBeadIDCheck())
 	d.Register(doctor.NewIdleTimeoutCheck()) // Verify dolt.idle-timeout: "0" for all rigs
 	d.Register(doctor.NewRoutesCheck())
 	d.Register(doctor.NewRigRoutesJSONLCheck())
@@ -240,6 +242,8 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewOrphanSessionCheck())
 	d.Register(doctor.NewZombieSessionCheck())
 	d.Register(doctor.NewStalledPolecatCheck())
+	d.Register(newRigCapacityStallCheck()) // Silent stall: rig has ready work, zero usable polecat capacity (gt-yl9q)
+	d.Register(doctor.NewNudgeQueueBacklogCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
 	d.Register(doctor.NewWispGCCheck())
 	d.Register(doctor.NewCheckMisclassifiedWisps())
@@ -310,6 +314,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 
 	// Dolt data health checks (binary + server reachability moved to top as prerequisites)
 	d.Register(doctor.NewDoltMetadataCheck())
+	d.Register(doctor.NewDoltLineageCheck())
 	d.Register(doctor.NewDoltOrphanedDatabaseCheck())
 	d.Register(doctor.NewUnregisteredBeadsDirsCheck())
 	d.Register(doctor.NewNullAssigneeCheck())

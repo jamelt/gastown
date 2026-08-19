@@ -620,6 +620,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 			fmt.Printf("%s Failed to render synthesis template: %v\n",
 				style.Dim.Render("Warning:"), err)
 		}
+		synDesc = workflowAgentDescription(synDesc, f.Synthesis.Agent)
 
 		synArgs := []string{
 			"create",
@@ -773,10 +774,14 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 	// Step 2: Create step beads and wire dependencies
 	stepBeads := make(map[string]string) // step.ID -> bead ID
 	setVars := parseSetVars(formulaRunSet)
+	workflowAgent := formulaRunAgent
+	if workflowAgent == "" {
+		workflowAgent = f.Agent
+	}
 
 	for _, step := range f.Steps {
 		stepBeadID := fmt.Sprintf("%s-wfs-%s", rigPrefix, generateFormulaShortID())
-		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, setVars))
+		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, setVars), workflowAgent)
 
 		// Use --body-file=- (stdin) for the description to avoid CLI arg
 		// length limits and quoting issues with large markdown descriptions.
@@ -873,12 +878,9 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		// Non-interactive step: sling to the step's target, or to the rig's
 		// polecat pool by default.
 		// Agent precedence: CLI --agent > formula-level
-		stepAgent := formulaRunAgent
-		if stepAgent == "" {
-			stepAgent = f.Agent
-		}
+		stepAgent := workflowAgent
 		stepTarget := workflowStepTarget(step, targetRig)
-		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, setVars))
+		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, setVars), workflowAgent)
 
 		slingArgs := buildWorkflowStepSlingArgs(stepBeadID, stepTarget, stepDescription, step.Title, stepAgent)
 
@@ -917,14 +919,31 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 	return nil
 }
 
-const workflowTargetField = "workflow_target"
+const (
+	workflowTargetField = "workflow_target"
+	workflowAgentField  = "workflow_agent"
+)
 
-func workflowStepDescription(step formula.Step, description string) string {
-	target := strings.TrimSpace(step.Target)
-	if target == "" {
+func workflowStepDescription(step formula.Step, description, agent string) string {
+	var metadata []string
+	if target := strings.TrimSpace(step.Target); target != "" {
+		metadata = append(metadata, fmt.Sprintf("%s: %s", workflowTargetField, target))
+	}
+	if agent = strings.TrimSpace(agent); agent != "" {
+		metadata = append(metadata, fmt.Sprintf("%s: %s", workflowAgentField, agent))
+	}
+	if len(metadata) == 0 {
 		return description
 	}
-	return fmt.Sprintf("%s: %s\n\n%s", workflowTargetField, target, description)
+	return strings.Join(metadata, "\n") + "\n\n" + description
+}
+
+func workflowAgentDescription(description, agent string) string {
+	agent = strings.TrimSpace(agent)
+	if agent == "" {
+		return description
+	}
+	return fmt.Sprintf("%s: %s\n\n%s", workflowAgentField, agent, description)
 }
 
 func workflowStepTarget(step formula.Step, targetRig string) string {

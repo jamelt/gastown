@@ -379,10 +379,34 @@ func ensureDatabaseInitialized(beadsDir string) error {
 	// No database found — need to initialize.
 	prefix := detectPrefix(beadsDir)
 
+	// Refuse to silently mint a new database whose prefix is already claimed
+	// by a different rig. detectPrefix() falls back to a generic default
+	// ("gt") for directories with no route or rigs.json entry, which
+	// previously let stray/misnamed directories auto-create databases that
+	// collided with an existing rig's prefix and mint duplicate bead IDs for
+	// it (gt-czpm).
+	if prefix != "" {
+		resolvedBeadsDir := ResolveBeadsDir(beadsDir)
+		if townRoot := FindTownRoot(filepath.Dir(resolvedBeadsDir)); townRoot != "" {
+			// Use the full path relative to townRoot (e.g. "myrig/mayor/rig"),
+			// not just the immediate parent's basename: canonical rig
+			// databases live at <rig>/mayor/rig/.beads, whose basename is
+			// always literally "rig" (see detectPrefix's own routes-path
+			// comment above). CheckPrefixAvailable takes only the first path
+			// segment, so the relative path still resolves to the correct
+			// rig name for both that layout and flat "<rig>/.beads" layouts.
+			if newRig, err := filepath.Rel(townRoot, filepath.Dir(resolvedBeadsDir)); err == nil {
+				if err := CheckPrefixAvailable(townRoot, prefix+"-", newRig); err != nil {
+					return fmt.Errorf("refusing to auto-initialize database: %w", err)
+				}
+			}
+		}
+	}
+
 	// bd init must run from the parent directory (not inside .beads/).
 	// Use --server to match all production callers (rig/manager.go, doctor/rig_check.go, cmd/install.go).
 	parentDir := filepath.Dir(beadsDir)
-	initArgs := []string{"init"}
+	initArgs := []string{"init", "--skip-agents", "--skip-hooks"}
 	if prefix != "" {
 		initArgs = append(initArgs, "--prefix", prefix)
 	}
@@ -442,35 +466,42 @@ func ensureDatabaseInitialized(beadsDir string) error {
 
 // detectPrefix determines the beads prefix for a directory.
 // Resolution order:
-//  1. Town-level config: FindTownRoot → config.GetRigPrefix (authoritative source from rigs.json)
+//  1. Exact database ownership from the town routes
 //  2. Local config.yaml: issue-prefix or prefix field
-//  3. Default: "gt"
+//  3. Town-level config for an unrouted, directly named rig directory
+//  4. Default: "gt"
 //
 // All candidates are validated against prefixRe before use.
-//
-// Known limitation: when beadsDir is a routed path (e.g., mayor/rig/.beads
-// via beads routing), filepath.Base(filepath.Dir(beadsDir)) yields "rig" not
-// the actual rig name. GetRigPrefix will not find "rig" in rigs.json and
-// returns the default "gt". This is a safe fallback — "gt" is the universal
-// default prefix — but rigs with custom prefixes accessed via routed paths
-// will silently use "gt" instead. Fixing this would require walking up the
-// directory tree to resolve the actual rig name, which is out of scope for
-// this crash-prevention guard.
 func detectPrefix(beadsDir string) string {
-	// 1. Try authoritative source: rigs.json via town root
-	rigDir := filepath.Dir(beadsDir)
-	if townRoot := FindTownRoot(rigDir); townRoot != "" {
-		rigName := filepath.Base(rigDir)
-		if prefix := config.GetRigPrefix(townRoot, rigName); prefix != "" && prefixRe.MatchString(prefix) {
-			return prefix
+	resolvedBeadsDir := ResolveBeadsDir(beadsDir)
+	townRoot := FindTownRoot(filepath.Dir(resolvedBeadsDir))
+
+	// 1. Routes are the authoritative database ownership map. Match the
+	// resolved target path rather than deriving a rig name from its basename:
+	// canonical rig databases normally live at <rig>/mayor/rig/.beads, whose
+	// basename is necessarily just "rig".
+	if townRoot != "" {
+		routes, err := LoadRoutes(filepath.Join(townRoot, ".beads"))
+		if err == nil {
+			for _, route := range routes {
+				candidate := filepath.Join(townRoot, ".beads")
+				if route.Path != "." {
+					candidate = ResolveBeadsDir(filepath.Join(townRoot, route.Path))
+				}
+				if !sameBeadsDir(candidate, resolvedBeadsDir) {
+					continue
+				}
+				prefix := strings.TrimSuffix(route.Prefix, "-")
+				if prefix != "" && prefixRe.MatchString(prefix) {
+					return prefix
+				}
+			}
 		}
 	}
 
-	// 2. Fallback: read from config.yaml.
-	// NOTE: Inside towns, this is typically unreachable because GetRigPrefix
-	// always returns at least "gt" (the default) when a rig isn't found in
-	// rigs.json. This fallback is primarily for standalone rigs outside towns.
-	configPath := filepath.Join(beadsDir, "config.yaml")
+	// 2. The database-local config is authoritative for standalone databases
+	// and remains a safe fallback if routes are temporarily unavailable.
+	configPath := filepath.Join(resolvedBeadsDir, "config.yaml")
 	if data, err := os.ReadFile(configPath); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
@@ -492,8 +523,33 @@ func detectPrefix(beadsDir string) string {
 		}
 	}
 
-	// 3. Default
+	// 3. Retain compatibility with old, directly named rig layouts that have a
+	// rigs.json entry but no routes file. Do not do this for mayor/rig: asking
+	// GetRigPrefix for the literal name "rig" returns the default "gt" and was
+	// the source of cross-rig gt-sc-* scheduler contexts.
+	rigDir := filepath.Dir(resolvedBeadsDir)
+	if townRoot != "" {
+		rigName := filepath.Base(rigDir)
+		if rigName != "rig" {
+			if prefix := config.GetRigPrefix(townRoot, rigName); prefix != "" && prefixRe.MatchString(prefix) {
+				return prefix
+			}
+		}
+	}
+
+	// 4. Default
 	return "gt"
+}
+
+func sameBeadsDir(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	if a == b {
+		return true
+	}
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && filepath.Clean(resolvedA) == filepath.Clean(resolvedB)
 }
 
 // stripYAMLQuotes removes surrounding single or double quotes from a string.

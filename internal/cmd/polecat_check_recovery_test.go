@@ -394,6 +394,48 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 	}
 }
 
+func TestWorkReferenceTerminal(t *testing.T) {
+	tests := []struct {
+		name         string
+		beadTerminal bool
+		hasIssue     bool
+		hookTerminal bool
+		hasHook      bool
+		want         bool
+	}{
+		{name: "no issue and no hook is vacuously terminal (gt-ykxo)", want: true},
+		{name: "non-terminal issue with no hook blocks", hasIssue: true},
+		{name: "no issue with non-terminal hook blocks", hasHook: true},
+		{name: "terminal issue with no hook is terminal", beadTerminal: true, hasIssue: true, want: true},
+		{name: "no issue with terminal hook is terminal", hookTerminal: true, hasHook: true, want: true},
+		{name: "terminal issue satisfies non-terminal hook", beadTerminal: true, hasIssue: true, hasHook: true, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := workReferenceTerminal(tt.beadTerminal, tt.hasIssue, tt.hookTerminal, tt.hasHook)
+			if got != tt.want {
+				t.Fatalf("workReferenceTerminal(%v, %v, %v, %v) = %v, want %v",
+					tt.beadTerminal, tt.hasIssue, tt.hookTerminal, tt.hasHook, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFullyIdlePolecatWithProvablyCleanGitCanIgnoreStaleCleanupStatus is the
+// end-to-end regression for gt-ykxo: a polecat with no assigned issue and no
+// hook bead — so workTerminal used to come out false even though there was
+// nothing outstanding — must still be recognized as safe to ignore a stale
+// cleanup_status once workReferenceTerminal is fed the correct value.
+func TestFullyIdlePolecatWithProvablyCleanGitCanIgnoreStaleCleanupStatus(t *testing.T) {
+	workTerminal := workReferenceTerminal(false /* beadTerminal */, false /* hasIssue */, false /* hookTerminal */, false /* hasHook */)
+	if !workTerminal {
+		t.Fatal("workReferenceTerminal() = false for a polecat with no issue and no hook, want true")
+	}
+	if !polecat.CanIgnoreStaleCleanupStatus(polecat.CleanupUncommitted, workTerminal, true /* hookSafe */, true /* activeMRSafe */, true /* gitSafe */) {
+		t.Fatal("CanIgnoreStaleCleanupStatus() = false for a provably clean, fully idle polecat, want true")
+	}
+}
+
 func TestReconcileCleanupStatusIfSafe(t *testing.T) {
 	for _, previous := range []polecat.CleanupStatus{polecat.CleanupUnpushed, polecat.CleanupStash, polecat.CleanupUncommitted} {
 		t.Run(string(previous), func(t *testing.T) {
@@ -417,6 +459,54 @@ func TestReconcileCleanupStatusIfSafe(t *testing.T) {
 			}
 			if status.CleanupStatus != polecat.CleanupClean || !status.Reconciled {
 				t.Fatalf("status after reconcile = (%q, reconciled=%v), want clean true", status.CleanupStatus, status.Reconciled)
+			}
+		})
+	}
+}
+
+func TestReconcileLegacyMissingCleanupStatusIfSafeIsIdempotent(t *testing.T) {
+	status := &RecoveryStatus{
+		CleanupStatus:     "",
+		CleanupProvenance: legacyCleanupReadOnlyProvenance,
+		Verdict:           polecat.WorkstateVerdictSafeToNuke,
+		Branch:            "polecat/legacy/completed",
+		MQStatus:          "submitted",
+	}
+	fields := &beads.AgentFields{AgentState: string(beads.AgentStateDone)}
+	updater := &fakeCleanupUpdater{}
+	reconcileCleanupStatusIfSafe(status, updater, "gt-gastown-polecat-legacy", &polecat.Polecat{State: polecat.StateDone}, fields)
+	if updater.calls != 1 || status.CleanupStatus != polecat.CleanupClean || !status.Reconciled {
+		t.Fatalf("first reconcile = status %+v updater %+v", status, updater)
+	}
+
+	fields.CleanupStatus = string(polecat.CleanupClean)
+	status.Reconciled = false
+	reconcileCleanupStatusIfSafe(status, updater, "gt-gastown-polecat-legacy", &polecat.Polecat{State: polecat.StateDone}, fields)
+	if updater.calls != 1 {
+		t.Fatalf("idempotent reconcile wrote again: calls=%d", updater.calls)
+	}
+}
+
+func TestCanUseLegacyMissingCleanupEvidenceRequiresAllReadOnlyPredicates(t *testing.T) {
+	p := &polecat.Polecat{State: polecat.StateDone}
+	fields := &beads.AgentFields{AgentState: string(beads.AgentStateDone)}
+	if !canUseLegacyMissingCleanupEvidence(p, fields, true, true, true, true, true) {
+		t.Fatal("complete dormant legacy polecat with clean evidence should reconcile")
+	}
+	tests := []struct {
+		name                                   string
+		session, work, hook, activeMR, gitSafe bool
+	}{
+		{name: "live session", work: true, hook: true, activeMR: true, gitSafe: true},
+		{name: "active work", session: true, hook: true, activeMR: true, gitSafe: true},
+		{name: "hook uncertainty", session: true, work: true, activeMR: true, gitSafe: true},
+		{name: "pending mr", session: true, work: true, hook: true, gitSafe: true},
+		{name: "dirty or unknown git", session: true, work: true, hook: true, activeMR: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if canUseLegacyMissingCleanupEvidence(p, fields, tt.session, tt.work, tt.hook, tt.activeMR, tt.gitSafe) {
+				t.Fatal("unsafe legacy evidence was accepted")
 			}
 		})
 	}
@@ -685,6 +775,133 @@ func TestDryRunNukeSummary(t *testing.T) {
 				t.Errorf("dryRunNukeSummary() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIndexOpenMRsByBranch(t *testing.T) {
+	issues := []*beads.Issue{
+		{ID: "mr-open", Status: "open", Description: "branch: polecat/fury/gt-abc\ntarget: main"},
+		{ID: "mr-closed", Status: "closed", Description: "branch: polecat/rust/gt-def\ntarget: main"},
+		{ID: "mr-no-branch", Status: "open", Description: "target: main"},
+		{ID: "mr-dup", Status: "open", Description: "branch: polecat/fury/gt-abc\ntarget: main"},
+	}
+
+	byBranch := indexOpenMRsByBranch(issues)
+
+	if got := byBranch["polecat/fury/gt-abc"]; got == nil || got.ID != "mr-open" {
+		t.Errorf("open MR for polecat/fury/gt-abc = %+v, want mr-open (first match wins)", got)
+	}
+	if got, ok := byBranch["polecat/rust/gt-def"]; ok {
+		t.Errorf("closed MR leaked into index: %+v", got)
+	}
+	if len(byBranch) != 1 {
+		t.Errorf("indexOpenMRsByBranch() len = %d, want 1: %+v", len(byBranch), byBranch)
+	}
+}
+
+func TestLookupAgentBeadUsesSharedContext(t *testing.T) {
+	issue := &beads.Issue{
+		ID:          "gt-gastown-polecat-fury",
+		Description: "role_type: polecat\nrig: gastown\nagent_state: working\ncleanup_status: clean",
+	}
+	sharedCtx := &safetyCheckContext{agentBeads: map[string]*beads.Issue{"gt-gastown-polecat-fury": issue}}
+
+	gotIssue, gotFields, err := lookupAgentBead(nil, sharedCtx, "gt-gastown-polecat-fury")
+	if err != nil {
+		t.Fatalf("lookupAgentBead() error = %v", err)
+	}
+	if gotIssue != issue {
+		t.Errorf("lookupAgentBead() issue = %+v, want %+v", gotIssue, issue)
+	}
+	if gotFields == nil || gotFields.CleanupStatus != "clean" {
+		t.Errorf("lookupAgentBead() fields = %+v, want cleanup_status=clean", gotFields)
+	}
+
+	// Miss: not in the shared map, must not fall back to a live bd call (bd is nil here).
+	missIssue, missFields, missErr := lookupAgentBead(nil, sharedCtx, "gt-gastown-polecat-unknown")
+	if missIssue != nil || missFields != nil || missErr != nil {
+		t.Errorf("lookupAgentBead() miss = (%+v, %+v, %v), want (nil, nil, nil)", missIssue, missFields, missErr)
+	}
+}
+
+func TestLookupOpenMRForBranchUsesSharedContext(t *testing.T) {
+	mr := &beads.Issue{ID: "mr-open", Status: "open"}
+	sharedCtx := &safetyCheckContext{openMRByBranch: map[string]*beads.Issue{"polecat/fury/gt-abc": mr}}
+
+	got, err := lookupOpenMRForBranch(nil, sharedCtx, "polecat/fury/gt-abc")
+	if err != nil || got != mr {
+		t.Errorf("lookupOpenMRForBranch() = (%+v, %v), want (%+v, nil)", got, err, mr)
+	}
+
+	got, err = lookupOpenMRForBranch(nil, sharedCtx, "polecat/nobody/gt-zzz")
+	if err != nil || got != nil {
+		t.Errorf("lookupOpenMRForBranch() miss = (%+v, %v), want (nil, nil)", got, err)
+	}
+}
+
+func TestDisplayDryRunSafetyCheckMissingCleanupStatus(t *testing.T) {
+	result := &SafetyCheckResult{
+		HasAgentBead:   true,
+		HasPolecatInfo: true,
+		HasBranchInfo:  true,
+		CleanupStatus:  "",
+		HookBead:       "",
+	}
+
+	out := captureStdout(t, func() {
+		if got := displayDryRunSafetyCheck(result); got {
+			t.Errorf("displayDryRunSafetyCheck() = true, want false (no reasons set)")
+		}
+	})
+
+	if !strings.Contains(out, "<missing>") {
+		t.Errorf("displayDryRunSafetyCheck() output missing '<missing>' cleanup status marker: %q", out)
+	}
+	if !strings.Contains(out, "Hook") || !strings.Contains(out, "empty") {
+		t.Errorf("displayDryRunSafetyCheck() output missing empty hook line: %q", out)
+	}
+}
+
+func TestDisplayDryRunSafetyCheckActiveHook(t *testing.T) {
+	result := &SafetyCheckResult{
+		Blocked:        true,
+		HasAgentBead:   true,
+		HasPolecatInfo: true,
+		HasBranchInfo:  true,
+		CleanupStatus:  polecat.CleanupClean,
+		HookBead:       "gt-abc123",
+		HookStale:      false,
+	}
+
+	out := captureStdout(t, func() {
+		if got := displayDryRunSafetyCheck(result); !got {
+			t.Errorf("displayDryRunSafetyCheck() = false, want true (Blocked)")
+		}
+	})
+
+	if !strings.Contains(out, "has work") || !strings.Contains(out, "gt-abc123") {
+		t.Errorf("displayDryRunSafetyCheck() output missing active hook detail: %q", out)
+	}
+}
+
+func TestDisplayDryRunSafetyCheckStaleHookNotBlocking(t *testing.T) {
+	result := &SafetyCheckResult{
+		HasAgentBead:   true,
+		HasPolecatInfo: true,
+		HasBranchInfo:  true,
+		CleanupStatus:  polecat.CleanupClean,
+		HookBead:       "gt-closed",
+		HookStale:      true,
+	}
+
+	out := captureStdout(t, func() {
+		if got := displayDryRunSafetyCheck(result); got {
+			t.Errorf("displayDryRunSafetyCheck() = true, want false (stale hook doesn't block)")
+		}
+	})
+
+	if !strings.Contains(out, "stale") || !strings.Contains(out, "gt-closed") {
+		t.Errorf("displayDryRunSafetyCheck() output missing stale hook detail: %q", out)
 	}
 }
 

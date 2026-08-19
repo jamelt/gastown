@@ -3,8 +3,11 @@ package deacon
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestFeedStrandedStateFile(t *testing.T) {
@@ -198,6 +201,73 @@ func TestLoadFeedStrandedState_CorruptedFile(t *testing.T) {
 	_, err := LoadFeedStrandedState(tmpDir)
 	if err == nil {
 		t.Fatal("expected error for corrupted file")
+	}
+}
+
+func TestBuildFeedDogArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		convoyID string
+		title    string
+		want     []string
+	}{
+		{
+			name:     "typical convoy and title",
+			convoyID: "hq-cv-abc123",
+			title:    "Work: implement feature X",
+			want: []string{
+				"sling", constants.MolConvoyFeed, "deacon/dogs",
+				"--var", "convoy=hq-cv-abc123",
+				"--var", "title=Work: implement feature X",
+			},
+		},
+		{
+			name:     "different convoy and title",
+			convoyID: "gt-cv-999",
+			title:    "Tracking epic rollout",
+			want: []string{
+				"sling", constants.MolConvoyFeed, "deacon/dogs",
+				"--var", "convoy=gt-cv-999",
+				"--var", "title=Tracking epic rollout",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildFeedDogArgs(tt.convoyID, tt.title)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("buildFeedDogArgs(%q, %q) = %v, want %v", tt.convoyID, tt.title, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateConvoyTitle(t *testing.T) {
+	tests := []struct {
+		name    string
+		convoy  StrandedConvoy
+		wantErr bool
+	}{
+		{
+			name:    "derived title from convoy",
+			convoy:  StrandedConvoy{ID: "hq-cv-abc123", Title: "Work: implement feature X"},
+			wantErr: false,
+		},
+		{
+			name:    "missing title",
+			convoy:  StrandedConvoy{ID: "hq-cv-abc123", Title: ""},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateConvoyTitle(tt.convoy)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateConvoyTitle(%+v) error = %v, wantErr %v", tt.convoy, err, tt.wantErr)
+			}
+		})
 	}
 }
 

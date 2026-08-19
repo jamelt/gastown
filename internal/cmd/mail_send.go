@@ -104,6 +104,9 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 
 	// Set message type
 	msg.Type = mail.ParseMessageType(mailType)
+	if mailNoResponse {
+		msg.ResponsePolicy = mail.ResponsePolicyNone
+	}
 
 	// Set pinned flag
 	msg.Pinned = mailPinned

@@ -21,6 +21,8 @@ type SlingContextFields struct {
 	Version          int    `json:"version"`
 	WorkBeadID       string `json:"work_bead_id"`
 	TargetRig        string `json:"target_rig"`
+	EnqueuedBy       string `json:"enqueued_by,omitempty"`
+	TargetAgent      string `json:"target_agent,omitempty"`
 	Formula          string `json:"formula,omitempty"`
 	Args             string `json:"args,omitempty"`
 	Vars             string `json:"vars,omitempty"`
@@ -29,6 +31,10 @@ type SlingContextFields struct {
 	Convoy           string `json:"convoy,omitempty"`
 	BaseBranch       string `json:"base_branch,omitempty"`
 	ResumeBranch     string `json:"resume_branch,omitempty"`
+	BaseRef          string `json:"base_ref,omitempty"`
+	PublishRemote    string `json:"publish_remote,omitempty"`
+	PublishRef       string `json:"publish_ref,omitempty"`
+	PRTargetRef      string `json:"pr_target_ref,omitempty"`
 	NoMerge          bool   `json:"no_merge,omitempty"`
 	ReviewOnly       bool   `json:"review_only,omitempty"`
 	Account          string `json:"account,omitempty"`
@@ -42,6 +48,15 @@ type SlingContextFields struct {
 
 // LabelSlingContext is the label used to identify sling context beads.
 const LabelSlingContext = "gt:sling-context"
+
+// LabelSchedulerCleared marks a work bead whose sling context was explicitly
+// removed via `gt scheduler clear`. The feeder must never re-enqueue a bead
+// carrying this label — only an explicit `gt sling` (which creates a fresh
+// sling context directly, not through the feeder) may lift it. Without this
+// marker, closing a sling context is indistinguishable from "never
+// scheduled": the next feed cycle sees the bead as ready and unscheduled and
+// recreates the context it was just cleared from (gt-5ti).
+const LabelSchedulerCleared = "gt:scheduler-cleared"
 
 // Labels that mark inter-agent messaging beads. These are never polecat work
 // and must not be dispatched to rig polecats.
@@ -142,6 +157,47 @@ func PlanDispatch(availableCapacity, batchSize int, ready []PendingBead) Dispatc
 		return DispatchPlan{Reason: "none"}
 	}
 
+	// Exact polecat reservations reuse an already-running worker and therefore
+	// do not consume a new capacity slot. Select them independently of free spawn
+	// capacity while retaining the existing FIFO/capacity behavior for rig-only
+	// contexts. This prevents a reserved recovery worker from waiting forever on
+	// capacity that it already occupies.
+	hasReservation := false
+	for _, b := range ready {
+		if b.Context != nil && b.Context.TargetAgent != "" {
+			hasReservation = true
+			break
+		}
+	}
+	if hasReservation {
+		remainingSlots := availableCapacity
+		if remainingSlots < 0 {
+			remainingSlots = 0
+		}
+		toDispatch := make([]PendingBead, 0, batchSize)
+		for _, b := range ready {
+			if len(toDispatch) >= batchSize {
+				break
+			}
+			reserved := b.Context != nil && b.Context.TargetAgent != ""
+			if !reserved && remainingSlots == 0 {
+				continue
+			}
+			toDispatch = append(toDispatch, b)
+			if !reserved {
+				remainingSlots--
+			}
+		}
+		if len(toDispatch) == 0 {
+			return DispatchPlan{Skipped: len(ready) + msgSkipped, Reason: "capacity"}
+		}
+		return DispatchPlan{
+			ToDispatch: toDispatch,
+			Skipped:    len(ready) - len(toDispatch) + msgSkipped,
+			Reason:     "reservation",
+		}
+	}
+
 	if availableCapacity <= 0 {
 		return DispatchPlan{
 			Skipped: len(ready) + msgSkipped,
@@ -214,38 +270,50 @@ func FilterCircuitBroken(beads []PendingBead, maxFailures int) ([]PendingBead, i
 // DispatchParams captures what the scheduler needs to tell the dispatcher.
 // Mirrors the relevant fields from cmd.SlingParams but is scheduler-owned.
 type DispatchParams struct {
-	BeadID       string
-	FormulaName  string
-	RigName      string
-	Args         string
-	Vars         []string
-	Merge        string
-	BaseBranch   string
-	ResumeBranch string
-	Account      string
-	Agent        string
-	Mode         string
-	NoMerge      bool
-	ReviewOnly   bool
-	HookRawBead  bool
+	BeadID        string
+	FormulaName   string
+	RigName       string
+	TargetAgent   string
+	Args          string
+	Vars          []string
+	Merge         string
+	BaseBranch    string
+	ResumeBranch  string
+	BaseRef       string
+	PublishRemote string
+	PublishRef    string
+	PRTargetRef   string
+	Account       string
+	Agent         string
+	Mode          string
+	NoMerge       bool
+	ReviewOnly    bool
+	HookRawBead   bool
+	EnqueuedBy    string
 }
 
 // ReconstructFromContext builds DispatchParams from sling context fields.
 func ReconstructFromContext(ctx *SlingContextFields) DispatchParams {
 	p := DispatchParams{
-		BeadID:       ctx.WorkBeadID,
-		RigName:      ctx.TargetRig,
-		FormulaName:  ctx.Formula,
-		Args:         ctx.Args,
-		Merge:        ctx.Merge,
-		BaseBranch:   ctx.BaseBranch,
-		ResumeBranch: ctx.ResumeBranch,
-		Account:      ctx.Account,
-		Agent:        ctx.Agent,
-		Mode:         ctx.Mode,
-		NoMerge:      ctx.NoMerge,
-		ReviewOnly:   ctx.ReviewOnly,
-		HookRawBead:  ctx.HookRawBead,
+		BeadID:        ctx.WorkBeadID,
+		RigName:       ctx.TargetRig,
+		TargetAgent:   ctx.TargetAgent,
+		FormulaName:   ctx.Formula,
+		Args:          ctx.Args,
+		Merge:         ctx.Merge,
+		BaseBranch:    ctx.BaseBranch,
+		ResumeBranch:  ctx.ResumeBranch,
+		BaseRef:       ctx.BaseRef,
+		PublishRemote: ctx.PublishRemote,
+		PublishRef:    ctx.PublishRef,
+		PRTargetRef:   ctx.PRTargetRef,
+		Account:       ctx.Account,
+		Agent:         ctx.Agent,
+		Mode:          ctx.Mode,
+		NoMerge:       ctx.NoMerge,
+		ReviewOnly:    ctx.ReviewOnly,
+		HookRawBead:   ctx.HookRawBead,
+		EnqueuedBy:    ctx.EnqueuedBy,
 	}
 	if ctx.Vars != "" {
 		p.Vars = splitVars(ctx.Vars)

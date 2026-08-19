@@ -9,14 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestDefaultMergeQueueConfig(t *testing.T) {
@@ -290,13 +288,8 @@ func TestEngineerCloseMRWithReasonNormalizesSuperseded(t *testing.T) {
 
 func setupEngineerTerminalCloseTest(t *testing.T, activeMR string) (*Engineer, *beads.Beads, *beads.Issue, *beads.Issue, *beads.Issue) {
 	t.Helper()
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	rigPath := t.TempDir()
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		t.Skipf("bd init unavailable: %v", err)
-	}
+	b := initRefineryTestBeads(t, rigPath)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -1551,8 +1544,8 @@ exit 0
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	e := NewEngineer(&rig.Rig{Name: "testrig", Path: rigDir})
-	e.notifyConvoyCompletion(townRoot, "hq-cv-ref", "Refinery Duplicate Guard", "Owner: mayor/")
-	e.notifyConvoyCompletion(townRoot, "hq-cv-ref", "Refinery Duplicate Guard", "Owner: mayor/")
+	e.notifyConvoyCompletion(townRoot, "hq-cv-ref", "Refinery Duplicate Guard")
+	e.notifyConvoyCompletion(townRoot, "hq-cv-ref", "Refinery Duplicate Guard")
 
 	data, err := os.ReadFile(mailLogPath)
 	if err != nil {

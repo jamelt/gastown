@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -665,6 +667,112 @@ func init() {
 	rootCmd.AddCommand(doneCmd)
 }
 
+// doneRigDefaultBranch returns the configured default branch for rigName,
+// falling back to "main" when the rig has no config or no override.
+func doneRigDefaultBranch(townRoot, rigName string) string {
+	defaultBranch := "main"
+	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		defaultBranch = rigCfg.DefaultBranch
+	}
+	return defaultBranch
+}
+
+// doneResolveAutoSaveIssueID resolves the source issue the auto-save
+// preflight should attribute this branch's work to, without mutating any
+// state: the --issue flag, then the bead-id embedded in the branch name,
+// then (only if neither is available) a hook lookup for this actor. Returns
+// "" if no issue can be resolved, which the preflight below fails closed on.
+func doneResolveAutoSaveIssueID(cwd, branch, sender string) string {
+	if doneIssue != "" {
+		return doneIssue
+	}
+	if branchIssue := parseBranchName(branch).Issue; branchIssue != "" {
+		return branchIssue
+	}
+	if sender == "" {
+		return ""
+	}
+	hookIssue, ambiguous := selectAssignedIssue("", findAssignedBeadsForAgent(cwd, sender))
+	if ambiguous {
+		// Multiple candidate assignments: not "no assignment", but not safe
+		// to guess either. The later --issue disambiguation error still
+		// fires downstream; here it just means auto-save fails closed too.
+		return ""
+	}
+	return hookIssue
+}
+
+// doneAssertSafeForAutoSave fails closed before the stash auto-pop / auto-commit
+// safety nets run (gt-xz2). It requires a resolvable source issue and an
+// attached, non-protected branch. Without this gate, a polecat that
+// cold-starts with an empty hook and a stray checkout of the protected
+// branch could have unrelated shared changes staged and committed locally
+// before the exitType-gated protected-branch check further down (which only
+// runs for --status COMPLETED) ever gets a chance to run.
+func doneAssertSafeForAutoSave(branch, defaultBranch, issueID string) error {
+	if branch == "" || branch == "HEAD" {
+		return fmt.Errorf("gt done refuses to auto-save: HEAD is detached or the current branch could not be determined; check out your assigned feature branch first")
+	}
+	if branch == defaultBranch || branch == "master" {
+		return fmt.Errorf("gt done refuses to auto-save on protected branch %q; check out your assigned feature branch first", branch)
+	}
+	if issueID == "" {
+		return fmt.Errorf("gt done refuses to auto-save: no assigned source issue could be resolved for branch %q (empty hook); use --issue to specify one or re-hook the work first", branch)
+	}
+	return nil
+}
+
+// doneRecordAutoSaveRefusal writes a durable, non-git recovery record
+// inventorying the working-tree state gt done refused to auto-save, so
+// ambiguous/shared changes are quarantined for manual recovery without ever
+// being committed or deleted. Best-effort: a failure here never masks or
+// replaces the caller's returned preflight error.
+func doneRecordAutoSaveRefusal(townRoot, cwd, branch, sender string, cause error) {
+	if townRoot == "" || cause == nil {
+		return
+	}
+	dir := filepath.Join(townRoot, constants.DirRuntime, "gt-done-recovery")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		style.PrintWarning("gt done: could not create recovery record dir: %v", err)
+		return
+	}
+
+	record := map[string]any{
+		"time":   time.Now().UTC().Format(time.RFC3339Nano),
+		"actor":  sender,
+		"cwd":    cwd,
+		"branch": branch,
+		"reason": cause.Error(),
+	}
+	if status, statusErr := git.NewGit(cwd).Status(); statusErr == nil {
+		record["untracked"] = status.Untracked
+		record["modified"] = status.Modified
+		record["deleted"] = status.Deleted
+		record["unmerged"] = status.Unmerged
+		record["total_paths"] = len(status.Untracked) + len(status.Modified) + len(status.Deleted) + len(status.Unmerged)
+	} else {
+		record["status_error"] = statusErr.Error()
+	}
+
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		style.PrintWarning("gt done: could not encode recovery record: %v", err)
+		return
+	}
+	actorSlug := strings.NewReplacer("/", "_").Replace(sender)
+	if actorSlug == "" {
+		actorSlug = "unknown-actor"
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%s-%s.json", time.Now().UTC().Format("20060102T150405.000000000Z"), actorSlug))
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		style.PrintWarning("gt done: could not write recovery record: %v", err)
+		return
+	}
+	style.PrintWarning("gt done: refused to auto-save (%v)", cause)
+	fmt.Printf("  Changes were left exactly as found — nothing was committed or deleted.\n")
+	fmt.Printf("  Inventory recorded at %s\n\n", path)
+}
+
 func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	defer func() { telemetry.RecordDone(context.Background(), strings.ToUpper(doneStatus), retErr) }()
 	// Guard: Only polecats should call gt done
@@ -701,6 +809,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("getting current branch: %w", err)
 	}
+	var defaultBranch string
 
 	// Auto-detect cleanup status if not explicitly provided
 	// This prevents premature polecat cleanup by ensuring witness knows git state
@@ -712,11 +821,35 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// CheckUncommittedWork.UnpushedCommits doesn't work for branches
 			// without upstream tracking (common for polecats). Use the more
 			// robust BranchPushedToRemote which compares against origin/main.
+			// workRefs isn't resolved yet this early in the flow (needs the rig's
+			// defaultBranch, computed further down) — origin is correct here anyway
+			// since PublishRemote always resolves to origin (see ResolveWorkRefs).
 			pushed, unpushedCount, pushErr := g.BranchPushedToRemote(branch, "origin")
 			if pushErr != nil {
 				style.PrintWarning("could not check if branch is pushed: %v", pushErr)
 			}
 			doneCleanupStatus = cleanupStatusFromWorkState(workStatus, pushed, unpushedCount, pushErr)
+		}
+	}
+
+	// PREFLIGHT (gt-xz2): fail closed before any git-mutating safety net runs.
+	// Everything from here down (stash auto-pop, then uncommitted-work
+	// auto-commit) mutates the index or HEAD. Before either runs, establish a
+	// non-protected/attached branch and a resolvable source issue for this
+	// actor. Without this gate, a polecat that cold-starts with an empty hook
+	// and a stray checkout of the protected branch could have unrelated
+	// shared changes staged and committed locally before the protected-branch
+	// check further down (which only runs for --status COMPLETED, after the
+	// safety net already fired) ever gets a chance to run — see incident
+	// hq-wisp-a4a1, where 12,378 pre-existing/shared files were auto-added
+	// and committed to main by a cold-started polecat.
+	var autoSaveIssueID string
+	if doneCleanupStatus == "uncommitted" || doneCleanupStatus == "stash" {
+		defaultBranch = doneRigDefaultBranch(townRoot, rigName)
+		autoSaveIssueID = doneResolveAutoSaveIssueID(cwd, branch, sender)
+		if err := doneAssertSafeForAutoSave(branch, defaultBranch, autoSaveIssueID); err != nil {
+			doneRecordAutoSaveRefusal(townRoot, cwd, branch, sender, err)
+			return err
 		}
 	}
 
@@ -823,11 +956,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				if stagedDeletions, delErr := g.StagedDeletions(); delErr == nil && len(stagedDeletions) > 0 {
 					_ = g.ResetFiles(stagedDeletions...)
 				}
-				// Build a descriptive commit message
-				autoMsg := "fix: auto-save uncommitted implementation work (gt-pvx safety net)"
-				if issueFromBranch := parseBranchName(branch).Issue; issueFromBranch != "" {
-					autoMsg = fmt.Sprintf("fix: auto-save uncommitted implementation work (%s, gt-pvx safety net)", issueFromBranch)
-				}
+				// Build a descriptive commit message. The preflight above already
+				// established autoSaveIssueID and sender as this commit's
+				// source/actor provenance before any mutation was allowed to run.
+				autoMsg := fmt.Sprintf("fix: auto-save uncommitted implementation work (%s, %s, gt-pvx safety net)", autoSaveIssueID, sender)
 				if commitErr := g.Commit(autoMsg); commitErr != nil {
 					style.PrintWarning("auto-commit: git commit failed: %v — uncommitted work may be at risk", commitErr)
 				} else {
@@ -939,12 +1071,18 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatExiting, "gt done", issueID)
 	}
 
-	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
+	// Get configured default branch for this rig. Already resolved by the
+	// auto-save preflight above when there was uncommitted/stash work to gate;
+	// otherwise resolve it now.
+	if defaultBranch == "" {
+		defaultBranch = doneRigDefaultBranch(townRoot, rigName)
 	}
 	baseRef := g.CleanBaseRef("origin", defaultBranch, doneTarget)
+	// workRefs resolves where this work publishes to and what a PR/MR targets,
+	// built on the same fork-detection primitives as baseRef above. Rig
+	// defaults only for now — explicit per-bead publish overrides are read
+	// from formula vars where individual call sites need them.
+	workRefs := g.ResolveWorkRefs(defaultBranch, git.WorkRefs{})
 
 	// For COMPLETED, we need an issue ID and branch must not be the default branch
 	var mrID string
@@ -1031,7 +1169,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// In that case, treat as "MR already submitted" and fall through. (GH#wd7)
 				branchPushedWithWork := false
 				if branch != defaultBranch {
-					pushed, unpushed, pushErr := g.BranchPushedToRemote(branch, "origin")
+					pushed, unpushed, pushErr := g.BranchPushedToRemote(branch, workRefs.PublishRemote)
 					branchPushedWithWork = pushErr == nil && pushed && unpushed == 0
 				}
 				if !branchPushedWithWork {
@@ -1085,7 +1223,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						if g.ForkBackedRemote("origin") {
 							return fmt.Errorf("cannot close no-MR code bead in fork/upstream mode: %s has no commits ahead of %s; use the fork PR flow instead", branch, baseRef)
 						}
-						if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, noMRCommitSHA); verifyErr != nil {
+						if verifyErr := g.VerifyPushedCommitReachableFromPushTarget(workRefs.PublishRemote, defaultBranch, noMRCommitSHA); verifyErr != nil {
 							noteVerifiedPushFailure(bd, cwd, issueID, defaultBranch, noMRCommitSHA, verifyErr)
 							return fmt.Errorf("cannot close no-MR code bead: %w", verifyErr)
 						}
@@ -1142,14 +1280,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		contam, err := g.CheckBranchContamination(contaminationBase)
 		if err == nil && contam.Behind > 0 {
-			const warnThreshold = 50
-			const blockThreshold = 200
-			if contam.Behind >= blockThreshold {
+			if contam.Behind >= git.ContaminationBlockBehind {
 				return fmt.Errorf("branch contamination: %d commits behind %s (threshold: %d)\n"+
 					"The branch is severely stale and will include unrelated changes in the PR.\n"+
 					"Fix: git fetch %s && git rebase %s",
-					contam.Behind, contaminationBase, blockThreshold, fetchRemote, contaminationBase)
-			} else if contam.Behind >= warnThreshold {
+					contam.Behind, contaminationBase, git.ContaminationBlockBehind, fetchRemote, contaminationBase)
+			} else if contam.Behind >= git.ContaminationWarnBehind {
 				style.PrintWarning("branch is %d commits behind %s — consider rebasing to avoid PR contamination", contam.Behind, contaminationBase)
 			}
 
@@ -1220,7 +1356,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// Push submodule changes before direct push (gt-dzs)
 			pushSubmoduleChanges(g, baseRef)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := g.Push("origin", directRefspec, false)
+			if guardErr := g.RefuseForkBackedDefaultPush(workRefs.PublishRemote, directRefspec, defaultBranch); guardErr != nil {
+				pushFailed = true
+				doneErrors = append(doneErrors, guardErr.Error())
+				style.PrintWarning("%s", guardErr.Error())
+				goto notifyWitness
+			}
+			directPushErr := g.Push(workRefs.PublishRemote, directRefspec, false)
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
@@ -1231,7 +1373,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			directCommitSHA, _ := g.Rev("HEAD")
 			if doneSkipVerify {
 				noteVerifiedPushSkipped(directBd, cwd, issueID, defaultBranch, directCommitSHA, "--skip-verify on direct merge")
-			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, directCommitSHA); verifyErr != nil {
+			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget(workRefs.PublishRemote, defaultBranch, directCommitSHA); verifyErr != nil {
 				pushFailed = true
 				errMsg := verifyErr.Error()
 				doneErrors = append(doneErrors, errMsg)
@@ -1320,7 +1462,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 			pushSubmoduleChanges(g, baseRef)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := g.Push("origin", directRefspec, false)
+			if guardErr := g.RefuseForkBackedDefaultPush(workRefs.PublishRemote, directRefspec, defaultBranch); guardErr != nil {
+				pushFailed = true
+				doneErrors = append(doneErrors, guardErr.Error())
+				style.PrintWarning("%s", guardErr.Error())
+				goto notifyWitness
+			}
+			directPushErr := g.Push(workRefs.PublishRemote, directRefspec, false)
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
@@ -1331,7 +1479,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			directCommitSHA, _ := g.Rev("HEAD")
 			if doneSkipVerify {
 				noteVerifiedPushSkipped(directBd, cwd, issueID, defaultBranch, directCommitSHA, "--skip-verify on late direct merge")
-			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, directCommitSHA); verifyErr != nil {
+			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget(workRefs.PublishRemote, defaultBranch, directCommitSHA); verifyErr != nil {
 				pushFailed = true
 				errMsg := verifyErr.Error()
 				doneErrors = append(doneErrors, errMsg)
@@ -1406,7 +1554,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		fmt.Printf("Pushing branch to remote...\n")
 		refspec = branch + ":" + branch
 		pushedCommitSHA, _ = g.Rev("HEAD")
-		pushErr = g.Push("origin", refspec, false)
+		pushErr = g.Push(workRefs.PublishRemote, refspec, false)
 		if pushErr != nil {
 			// Primary push failed — try fallback from the bare repo (GH #1348).
 			// When polecat sessions are reused or worktrees are stale, the worktree's
@@ -1417,7 +1565,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			bareRepoPath := filepath.Join(rigPath, ".repo.git")
 			if _, statErr := os.Stat(bareRepoPath); statErr == nil {
 				bareGit := git.NewGitWithDir(bareRepoPath, "")
-				pushErr = bareGit.Push("origin", refspec, false)
+				pushErr = bareGit.Push(workRefs.PublishRemote, refspec, false)
 				if pushErr != nil {
 					style.PrintWarning("bare repo push also failed: %v", pushErr)
 				} else {
@@ -1443,7 +1591,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		if doneSkipVerify {
 			noteVerifiedPushSkipped(sourceBD, cwd, issueID, branch, pushedCommitSHA, "--skip-verify on branch push")
-		} else if verifyErr := verifyPushedCommitWithBareFallback(g, townRoot, rigName, branch, pushedCommitSHA); verifyErr != nil {
+		} else if verifyErr := verifyPushedCommitWithBareFallback(g, townRoot, rigName, workRefs.PublishRemote, branch, pushedCommitSHA); verifyErr != nil {
 			pushFailed = true
 			errMsg := verifyErr.Error()
 			doneErrors = append(doneErrors, errMsg)
@@ -1515,12 +1663,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					prBodyBuilder.WriteString("---\n")
 					prBodyBuilder.WriteString(fmt.Sprintf("*Polecat: %s | Issue: %s*\n", worker, issueID))
 					prBody := prBodyBuilder.String()
-					ghCmd := exec.CommandContext(context.Background(), "gh", "pr", "create",
-						"--base", defaultBranch,
-						"--head", branch,
-						"--title", prTitle,
-						"--body", prBody,
-					)
+					prArgs := prCreateArgs(g, defaultBranch, branch, prTitle, prBody)
+					ghCmd := exec.CommandContext(context.Background(), "gh", prArgs...)
 					ghCmd.Dir = cwd
 					prOutput, prErr := ghCmd.Output()
 					if prErr != nil {
@@ -2078,8 +2222,36 @@ func noteVerifiedPushSkipped(sourceBD *beads.Beads, cwd, issueID, branch, commit
 	_ = bd.AddComment(issueID, msg)
 }
 
-func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, commit string) error {
-	verifyErr := g.VerifyPushedCommit("origin", branch, commit)
+// prCreateArgs builds the `gh pr create` argument list for a fork-aware PR
+// flow. When the PR target repo (upstream) differs from the push destination
+// (origin), gh needs an explicit --repo and an owner-qualified --head —
+// otherwise gh infers both from the local origin remote, which is correct
+// as-is for non-fork rigs (no --repo, bare --head branch name).
+func prCreateArgs(g *git.Git, defaultBranch, branch, title, body string) []string {
+	headRef := branch
+	args := []string{"pr", "create", "--base", defaultBranch}
+	resolvedHead, headErr := g.PRHeadRef(branch)
+	if headErr != nil {
+		// Can't determine whether this is a fork PR — fall back to gh's own
+		// inference from the local origin remote. On a genuine fork rig this
+		// would misdirect the PR at origin (the fork) instead of upstream, so
+		// surface it instead of failing silently.
+		style.PrintWarning("could not resolve fork-aware PR head/repo, falling back to gh's default inference: %v", headErr)
+	} else {
+		headRef = resolvedHead
+		if strings.Contains(resolvedHead, ":") {
+			if targetRepo, repoErr := g.PRTargetRepo(); repoErr == nil && targetRepo != "" {
+				args = append(args, "--repo", targetRepo)
+			} else if repoErr != nil {
+				style.PrintWarning("could not resolve PR target repo, omitting --repo: %v", repoErr)
+			}
+		}
+	}
+	return append(args, "--head", headRef, "--title", title, "--body", body)
+}
+
+func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, remote, branch, commit string) error {
+	verifyErr := g.VerifyPushedCommit(remote, branch, commit)
 	if verifyErr == nil {
 		return nil
 	}
@@ -2321,16 +2493,18 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 	// paused for resumption". Close them on DEFERRED so the convoy can advance.
 	isWorkflowStep := strings.Contains(hookedBeadID, "-wfs-")
 
-	if hookedBeadID != "" && (exitType != ExitDeferred || isWorkflowStep) {
+	if hookedBeadID != "" && (exitType == ExitCompleted || (exitType == ExitDeferred && isWorkflowStep)) {
 		// BUG FIX (gt-pftz): Close hooked bead unless already terminal (closed/tombstone).
 		// Previously checked hookedBead.Status == StatusHooked, but polecats update
 		// their work bead to in_progress during work. The exact-match check caused
 		// gt done to skip closing the bead, leaving it as unassigned open work after
 		// the hook was cleared — triggering infinite dispatch loops.
 		//
-		// DEFERRED exits preserve the bead: work is paused, not done. The bead
-		// stays open/in_progress so it can be resumed on the next session.
-		// Exception: workflow step beads (*-wfs-*) are always closed — see above.
+		// DEFERRED and ESCALATED exits preserve the bead: work is paused or blocked
+		// on a human, not done. The bead stays open/in_progress so it can be resumed
+		// or reviewed. ESCALATED never closes the bead, even for workflow step beads —
+		// unlike DEFERRED, it always signals an unresolved gate, not step completion.
+		// Exception: workflow step beads (*-wfs-*) are always closed on DEFERRED — see above.
 		hookBd, _, _ := routedIssueBeads(beadsPath, hookedBeadID)
 		if hookBd == nil {
 			hookBd = bd
@@ -2425,15 +2599,15 @@ doneStateUpdate:
 	}
 
 	// ZFC #10: Self-report cleanup status
-	// Agent observes git state and passes cleanup status via --cleanup-status flag
-	if doneCleanupStatus != "" {
-		cleanupStatus := parseCleanupStatus(doneCleanupStatus)
-		if cleanupStatus != polecat.CleanupUnknown {
-			if err := agentBd.UpdateAgentCleanupStatus(agentBeadID, string(cleanupStatus)); err != nil {
-				// Non-fatal: don't return — done-intent labels still need clearing (za-o9e)
-				fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
-			}
-		}
+	// Agent observes git state and passes cleanup status via --cleanup-status flag.
+	// The write is unconditional (gt-dr8y): a derivation failure or empty flag must
+	// still persist "unknown" rather than skip the write. A skipped write leaves the
+	// field null, which is indistinguishable from "gt done never ran" and leaves the
+	// polecat permanently non-reusable with no verdict to reconcile later.
+	cleanupStatus := parseCleanupStatus(doneCleanupStatus)
+	if err := agentBd.UpdateAgentCleanupStatus(agentBeadID, string(cleanupStatus)); err != nil {
+		// Non-fatal: don't return — done-intent labels still need clearing (za-o9e)
+		fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
 	}
 
 	// Clear done-intent label and checkpoints on clean exit — gt done completed

@@ -227,6 +227,9 @@ func TestNewReplyMessage(t *testing.T) {
 	if reply.Subject != "Re: Original Subject" {
 		t.Errorf("Subject = %q, want 'Re: Original Subject'", reply.Subject)
 	}
+	if reply.ResponsePolicy != ResponsePolicyNone {
+		t.Errorf("ResponsePolicy = %q, want ResponsePolicyNone", reply.ResponsePolicy)
+	}
 }
 
 func TestBeadsMessageToMessage(t *testing.T) {
@@ -286,6 +289,35 @@ func TestBeadsMessageToMessageWithReplyTo(t *testing.T) {
 	}
 	if msg.Type != TypeReply {
 		t.Errorf("Type = %q, want TypeReply", msg.Type)
+	}
+}
+
+func TestBeadsMessageToMessageWithResponsePolicy(t *testing.T) {
+	bm := BeadsMessage{
+		ID:          "hq-terminal",
+		Title:       "MERGED nux",
+		Description: "durable terminal receipt",
+		Status:      "open",
+		Assignee:    "gastown/witness",
+		Labels: []string{
+			"from:gastown/refinery",
+			"thread:t-terminal",
+			"msg-type:notification",
+			"response-policy:none",
+		},
+		CreatedAt: time.Now(),
+		Priority:  1,
+	}
+
+	msg := bm.ToMessage()
+	if msg.ResponsePolicy != ResponsePolicyNone {
+		t.Fatalf("ResponsePolicy = %q, want ResponsePolicyNone", msg.ResponsePolicy)
+	}
+}
+
+func TestParseResponsePolicyUnknownFallsBackToAuto(t *testing.T) {
+	if got := ParseResponsePolicy("future-policy"); got != ResponsePolicyAuto {
+		t.Fatalf("ParseResponsePolicy(unknown) = %q, want auto", got)
 	}
 }
 

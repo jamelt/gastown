@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -1002,9 +1003,37 @@ func (g *Git) CleanDefaultBranchBaseRef(remote, defaultBranch string) string {
 	fetchURL, fetchErr := g.RemoteURL(remote)
 	upstreamURL, upstreamErr := g.GetUpstreamURL()
 	if fetchErr == nil && upstreamErr == nil && upstreamURL != "" && !sameGitRemoteURL(fetchURL, upstreamURL) {
+		// hq-sz6wa: basing on upstream is correct only for a rig that actually
+		// contributes UP to its parent. If pushes to upstream are disabled, work
+		// can never integrate there, so upstream is not this rig's trunk and
+		// basing on it strands every polecat at whatever the parent last
+		// published. Observed: upstream/main was 157 commits and 27 days behind
+		// origin/main, and polecats spawned today branched from July.
+		//
+		// A remote you cannot push to cannot be your integration target, so it
+		// cannot be your base. Fall through to the fetch remote in that case.
+		if !g.upstreamAcceptsPushes() {
+			return remote + "/" + defaultBranch
+		}
 		return "upstream/" + defaultBranch
 	}
 	return remote + "/" + defaultBranch
+}
+
+// disabledPushURL is the sentinel Gas Town writes to remote.<name>.pushurl to
+// fail closed on pushes to a remote that must never receive them.
+const disabledPushURL = "DISABLED"
+
+// upstreamAcceptsPushes reports whether the upstream remote can actually receive
+// work. Fails OPEN — if the push URL cannot be read we assume upstream is usable
+// and preserve the existing fork-aware behaviour, so this narrows the special
+// case rather than removing it.
+func (g *Git) upstreamAcceptsPushes() bool {
+	pushURL, err := g.GetPushURL("upstream")
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(pushURL), disabledPushURL)
 }
 
 // CleanBaseRef returns a fully qualified base ref for a target branch. Explicit
@@ -2558,6 +2587,65 @@ type BranchContamination struct {
 	Ahead  int // commits HEAD is ahead of base
 }
 
+// Contamination thresholds shared by every caller that gates on branch
+// divergence (gt done's preflight, gt pr-sheriff-check --merge-gate, and the
+// branch-hygiene tap guard). Behind thresholds were established for GH#2220.
+// Ahead thresholds close a gap GH#2220 left open: a branch can carry commits
+// unrelated to its intended diff without ever falling behind. The known
+// contamination cases (PR #4238: ~86 ahead, PR #4257: ~98 ahead) were both
+// well past these Ahead thresholds; a small legitimate replacement/fixup
+// branch is expected to stay in the low single-to-double digits.
+const (
+	ContaminationWarnBehind  = 50
+	ContaminationBlockBehind = 200
+	ContaminationWarnAhead   = 20
+	ContaminationBlockAhead  = 50
+)
+
+// ContaminationSeverity classifies how severe a BranchContamination reading is.
+type ContaminationSeverity int
+
+const (
+	SeverityClean ContaminationSeverity = iota
+	SeverityWarn
+	SeverityBlock
+)
+
+// Evaluate classifies a contamination reading against the shared thresholds,
+// returning the worst severity found across both dimensions (Behind and
+// Ahead) plus a human-readable reason for each dimension that is at or above
+// its warn threshold.
+func (bc BranchContamination) Evaluate() (ContaminationSeverity, []string) {
+	severity := SeverityClean
+	reasons := []string{}
+
+	raise := func(s ContaminationSeverity) {
+		if s > severity {
+			severity = s
+		}
+	}
+
+	switch {
+	case bc.Behind >= ContaminationBlockBehind:
+		raise(SeverityBlock)
+		reasons = append(reasons, fmt.Sprintf("%d commits behind (block threshold: %d)", bc.Behind, ContaminationBlockBehind))
+	case bc.Behind >= ContaminationWarnBehind:
+		raise(SeverityWarn)
+		reasons = append(reasons, fmt.Sprintf("%d commits behind (warn threshold: %d)", bc.Behind, ContaminationWarnBehind))
+	}
+
+	switch {
+	case bc.Ahead >= ContaminationBlockAhead:
+		raise(SeverityBlock)
+		reasons = append(reasons, fmt.Sprintf("%d commits ahead, likely unrelated changes (block threshold: %d)", bc.Ahead, ContaminationBlockAhead))
+	case bc.Ahead >= ContaminationWarnAhead:
+		raise(SeverityWarn)
+		reasons = append(reasons, fmt.Sprintf("%d commits ahead, check for unrelated changes (warn threshold: %d)", bc.Ahead, ContaminationWarnAhead))
+	}
+
+	return severity, reasons
+}
+
 // CheckBranchContamination checks whether the current branch has diverged
 // significantly from a base ref (typically origin/main). Returns the number
 // of commits behind and ahead, letting callers decide severity thresholds.
@@ -2578,6 +2666,32 @@ func (g *Git) CheckBranchContamination(baseRef string) (BranchContamination, err
 	result.Ahead = ahead
 
 	return result, nil
+}
+
+// ResolveContaminationCheck resolves the base ref to compare against (the
+// explicit ref if given, otherwise the fork-aware default), best-effort
+// fetches its remote, and returns the resulting BranchContamination reading.
+// Shared by gt pr-sheriff-check and the branch-hygiene tap guard so both
+// follow the identical resolve/fetch/check sequence.
+//
+// The fetch error (if any) is returned separately rather than swallowed,
+// since callers differ on whether to surface it: gt pr-sheriff-check warns
+// on fetch failure and proceeds with local refs, the tap guard ignores it
+// silently as part of its documented fail-open contract.
+func (g *Git) ResolveContaminationCheck(explicitBase string) (base string, contam BranchContamination, fetchErr error, err error) {
+	base = explicitBase
+	if base == "" {
+		base = g.CleanBaseRef("origin", g.RemoteDefaultBranch(), "")
+	}
+
+	remote := RemoteForRef(base)
+	if remote == "" {
+		remote = "origin"
+	}
+	fetchErr = g.Fetch(remote)
+
+	contam, err = g.CheckBranchContamination(base)
+	return base, contam, fetchErr, err
 }
 
 // StashCount returns the number of stashes belonging to the current branch.
@@ -2800,15 +2914,62 @@ func (g *Git) branchPreservationStatus(localBranch, remote string, targets []str
 		}
 	}
 
+	// gt-mv6f: if HEAD is reachable from ANY remote ref, the work is preserved and
+	// nothing is unpushed — full stop. Without this, a polecat whose branch was
+	// merged and then deleted on the remote has no exact-branch evidence, falls
+	// through to @{u}, and is judged against whatever that happens to point at. In
+	// a fork-based town @{u} is often upstream/main (the parent), which will never
+	// contain fork commits, so merged work is reported unpushed forever and the
+	// polecat is pinned at NEEDS_RECOVERY.
+	//
+	// Deliberately gated on includeExactBranch: BranchTargetStatus asks a stricter
+	// question — whether the work reached its target/custody refs — and for that,
+	// merely existing on some remote is NOT sufficient evidence.
+	if includeExactBranch {
+		if onRemote, err := g.headOnAnyRemote(); err == nil && onRemote {
+			result.Preserved = true
+			result.UnpreservedPatchCount = 0
+			result.Evidence = "remote_reachable"
+			if result.ComparisonBase == "" {
+				result.ComparisonBase = "any-remote"
+			}
+			return result, nil
+		}
+	}
+
 	for _, target := range nonEmptyUnique(targets) {
 		if ref, ok := g.resolveComparisonRef(target, remote); ok {
 			candidates = append(candidates, ref)
 		}
 	}
 
+	// gt-mv6f: with no explicit target/custody refs, the remote's default branch IS
+	// the target — "did this work reach the trunk" is the question being asked. Without
+	// this, a polecat whose work was merged and whose branch was then deleted has no
+	// candidate at all, falls through to the @{u}/pushed-branch heuristics, and is
+	// reported as having submittable work forever even though its commits are in main.
+	if len(candidates) == 0 {
+		if def, err := g.run("rev-parse", "--verify", "--quiet", remote+"/HEAD"); err == nil && strings.TrimSpace(def) != "" {
+			hasEvidence = true
+			candidates = append(candidates, remote+"/HEAD")
+		} else if def, err := g.run("rev-parse", "--verify", "--quiet", remote+"/main"); err == nil && strings.TrimSpace(def) != "" {
+			hasEvidence = true
+			candidates = append(candidates, remote+"/main")
+		}
+	}
+
 	if upstream, err := g.run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"); err == nil && strings.TrimSpace(upstream) != "" {
 		upstream = strings.TrimSpace(upstream)
-		if includeExactBranch || !isPolecatSelfUpstream(localBranch, remote, upstream) {
+		// gt-mv6f: only trust @{u} when it belongs to the remote we were asked
+		// about. Callers pass an explicit remote ("origin"); in a fork-based town
+		// a polecat branch often tracks upstream/main (the parent), which will
+		// never contain fork commits. Comparing against it reports merged work as
+		// unpreserved forever, which pins the polecat at NEEDS_RECOVERY /
+		// NEEDS_MQ_SUBMIT. Silently answering about a different remote than the
+		// one requested is wrong regardless of which question is being asked, so
+		// this guard applies to both preservation and target checks.
+		if strings.HasPrefix(upstream, remote+"/") &&
+			(includeExactBranch || !isPolecatSelfUpstream(localBranch, remote, upstream)) {
 			hasEvidence = true
 			candidates = append(candidates, upstream)
 		}
@@ -2856,6 +3017,20 @@ func (g *Git) branchPreservationStatus(localBranch, remote string, targets []str
 	return result, fmt.Errorf("no usable comparison refs")
 }
 
+// headOnAnyRemote reports whether HEAD is reachable from any remote-tracking ref.
+//
+// gt-mv6f: this is the ground truth for "is this work preserved somewhere other
+// than this worktree". Reachability from any remote means the commits exist off
+// this machine, regardless of which branch survived — merged-and-deleted polecat
+// branches are the common case, and for those the exact remote branch is gone.
+func (g *Git) headOnAnyRemote() (bool, error) {
+	out, err := g.run("for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/remotes/")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 func isPolecatSelfUpstream(localBranch, remote, upstream string) bool {
 	return strings.HasPrefix(localBranch, "polecat/") && upstream == remote+"/"+localBranch
 }
@@ -2892,7 +3067,13 @@ func comparisonRefCandidates(ref, remote string) []string {
 		return []string{ref}
 	}
 	if !strings.Contains(ref, "/") && remote != "upstream" {
-		return []string{"upstream/" + ref, remote + "/" + ref, ref}
+		// gt-mv6f: prefer the REQUESTED remote over upstream. A bare target like
+		// "main" means the trunk of the remote the caller named. Resolving it to
+		// upstream/main first is wrong in a fork-based town: the parent never
+		// receives fork commits, so merged work compares as unpreserved forever and
+		// the polecat is pinned at NEEDS_MQ_SUBMIT. upstream is kept as a fallback
+		// for towns where it genuinely is the trunk.
+		return []string{remote + "/" + ref, "upstream/" + ref, ref}
 	}
 	return []string{remote + "/" + ref, ref}
 }
@@ -3041,6 +3222,20 @@ func isBeadsPath(path string) bool {
 	return strings.Contains(path, ".beads/") || strings.Contains(path, ".beads\\")
 }
 
+// AgentRuntimeDirs lists the config/scaffolding directories that coding-agent
+// tools write into a worktree (agent instructions, generated skill/tool
+// config). None of it is bead-scoped work, so it must be excluded from both
+// checkpoint/gt-done "real work" detection (runtimeArtifactRoot below) and
+// the gitignore patterns seeded into fresh worktrees (rig.gasTownIgnorePatterns,
+// which composes this list with its own extras the same way it composes
+// gasTownLocalExcludePatterns with ".beads/").
+//
+// Add a new agent tool's directory here, not by copy-pasting a literal into
+// both call sites separately — that drift is what let checkpoint_dog
+// auto-commit a Codex-CLI polecat's untemplated ".codex"/".agents" scaffolding
+// as if it were real work (gt-gvjc).
+var AgentRuntimeDirs = []string{".claude", ".opencode", ".codex", ".agents"}
+
 // runtimeArtifactRoot returns the path that should be reset when a runtime artifact
 // is staged. Directory artifacts return the directory root so large trees like
 // nested node_modules are unstaged with one pathspec instead of thousands.
@@ -3053,8 +3248,11 @@ func runtimeArtifactRoot(path string) (string, bool) {
 
 	parts := strings.Split(bare, "/")
 	for i, part := range parts {
+		if slices.Contains(AgentRuntimeDirs, part) {
+			return strings.Join(parts[:i+1], "/") + "/", true
+		}
 		switch part {
-		case ".beads", ".claude", ".opencode", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "coverage", "htmlcov":
+		case ".beads", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "coverage", "htmlcov":
 			return strings.Join(parts[:i+1], "/") + "/", true
 		}
 	}

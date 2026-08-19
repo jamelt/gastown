@@ -121,11 +121,6 @@ func runWitnessGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
-type testMayorEvent struct {
-	Type    string            `json:"type"`
-	Payload map[string]string `json:"payload"`
-}
-
 func setupSlotOpenTestTown(t *testing.T) (string, string) {
 	t.Helper()
 	townRoot := t.TempDir()
@@ -142,25 +137,38 @@ func setupSlotOpenTestTown(t *testing.T) (string, string) {
 	return townRoot, workDir
 }
 
-func readMayorEvents(t *testing.T, townRoot string) []testMayorEvent {
+func assertNoMayorEvents(t *testing.T, townRoot string) {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join(townRoot, "events", "mayor", "*.event"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := make([]testMayorEvent, 0, len(paths))
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var event testMayorEvent
-		if err := json.Unmarshal(data, &event); err != nil {
-			t.Fatal(err)
-		}
-		events = append(events, event)
+	if len(paths) != 0 {
+		t.Fatalf("mayor event files = %v, want none", paths)
 	}
-	return events
+}
+
+func setupMayorMailFallback(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "mail.log")
+	t.Setenv("GT_TEST_MAYOR_MAIL_LOG", logPath)
+	t.Setenv("PATH", binDir)
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$GT_TEST_MAYOR_MAIL_LOG\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return logPath
+}
+
+func assertMayorMailFallback(t *testing.T, logPath string) {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read mayor mail fallback: %v", err)
+	}
+	if !strings.Contains(string(data), "mail send mayor/") {
+		t.Fatalf("mayor mail fallback = %q, want mail send mayor/", data)
+	}
 }
 
 func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
@@ -168,17 +176,7 @@ func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeDeferred))
 
-	events := readMayorEvents(t, townRoot)
-	if len(events) != 1 {
-		t.Fatalf("events = %v, want one SLOT_BLOCKED event", events)
-	}
-	event := events[0]
-	if event.Type != "SLOT_BLOCKED" {
-		t.Fatalf("event type = %q, want SLOT_BLOCKED", event.Type)
-	}
-	if event.Payload["reason"] != "exit-deferred" {
-		t.Fatalf("reason = %q, want exit-deferred", event.Payload["reason"])
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
 func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
@@ -214,13 +212,11 @@ func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
 	if !called {
 		t.Fatal("scheduler trigger was not called")
 	}
-	if events := readMayorEvents(t, townRoot); len(events) != 0 {
-		t.Fatalf("events = %+v, want none when scheduler dispatches", events)
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
-func TestNotifyMayorSlotOpen_DispatchThenEmptyEmitsSchedulerOpen(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+func TestNotifyMayorSlotOpen_DispatchThenEmptyNotifiesWithoutEvent(t *testing.T) {
+	mailLog := setupMayorMailFallback(t)
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
 	prevRecovery := slotOpenRecoveryCheck
@@ -250,13 +246,8 @@ func TestNotifyMayorSlotOpen_DispatchThenEmptyEmitsSchedulerOpen(t *testing.T) {
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	events := readMayorEvents(t, townRoot)
-	if len(events) != 1 {
-		t.Fatalf("events = %+v, want one SCHEDULER_OPEN event", events)
-	}
-	if events[0].Type != "SCHEDULER_OPEN" {
-		t.Fatalf("event type = %q, want SCHEDULER_OPEN", events[0].Type)
-	}
+	assertNoMayorEvents(t, townRoot)
+	assertMayorMailFallback(t, mailLog)
 }
 
 func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T) {
@@ -284,13 +275,11 @@ func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	if events := readMayorEvents(t, townRoot); len(events) != 0 {
-		t.Fatalf("events = %+v, want none after confirmed dispatch", events)
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
-func TestNotifyMayorSlotOpen_EmitsSchedulerOpenWhenQueueEmpty(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+func TestNotifyMayorSlotOpen_QueueEmptyNotifiesWithoutEvent(t *testing.T) {
+	mailLog := setupMayorMailFallback(t)
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
 	prevRecovery := slotOpenRecoveryCheck
@@ -318,16 +307,8 @@ func TestNotifyMayorSlotOpen_EmitsSchedulerOpenWhenQueueEmpty(t *testing.T) {
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	events := readMayorEvents(t, townRoot)
-	if len(events) != 1 {
-		t.Fatalf("events = %+v, want one SCHEDULER_OPEN event", events)
-	}
-	if events[0].Type != "SCHEDULER_OPEN" {
-		t.Fatalf("event type = %q, want SCHEDULER_OPEN", events[0].Type)
-	}
-	if events[0].Payload["capacity_free"] != "2" {
-		t.Fatalf("capacity_free = %q, want 2", events[0].Payload["capacity_free"])
-	}
+	assertNoMayorEvents(t, townRoot)
+	assertMayorMailFallback(t, mailLog)
 }
 
 func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
@@ -361,13 +342,7 @@ func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	events := readMayorEvents(t, townRoot)
-	if len(events) != 1 {
-		t.Fatalf("events = %+v, want one fallback SLOT_OPEN event", events)
-	}
-	if events[0].Type != "SLOT_OPEN" {
-		t.Fatalf("event type = %q, want SLOT_OPEN", events[0].Type)
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
 func TestNotifyMayorSlotOpen_NoDispatchAfterCapacityFillsSuppressesMayor(t *testing.T) {
@@ -403,9 +378,7 @@ func TestNotifyMayorSlotOpen_NoDispatchAfterCapacityFillsSuppressesMayor(t *test
 
 	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
-	if events := readMayorEvents(t, townRoot); len(events) != 0 {
-		t.Fatalf("events = %+v, want none when scheduler no longer has capacity", events)
-	}
+	assertNoMayorEvents(t, townRoot)
 }
 
 func TestParseSchedulerRunDispatched(t *testing.T) {
@@ -1573,8 +1546,7 @@ func TestResetAbandonedBead_NoRouter(t *testing.T) {
 
 func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	// Not parallel: overrides package-level verifyCommitOnMain.
-	// When verifyCommitOnMain returns true, resetAbandonedBead should close the
-	// bead instead of resetting it for re-dispatch. This is the fix for #2036.
+	// An on-main commit plus a successful submission receipt may close source.
 
 	oldVerify := verifyCommitOnMain
 	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
@@ -1582,9 +1554,25 @@ func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	}
 	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
 
+	agentDescription := beads.FormatAgentDescription("agent", &beads.AgentFields{
+		RoleType:        "polecat",
+		Rig:             "testrig",
+		AgentState:      "done",
+		ExitType:        string(ExitTypeCompleted),
+		MRID:            "gt-mr-123",
+		LastSourceIssue: "gt-work123",
+		CompletionTime:  time.Now().UTC().Format(time.RFC3339),
+	})
+	agentJSON, err := json.Marshal([]map[string]string{{"description": agentDescription}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	bd, mock := mockBd(
 		func(args []string) (string, error) {
 			if len(args) >= 1 && args[0] == "show" {
+				if len(args) > 1 && strings.Contains(args[1], "polecat-alpha") {
+					return string(agentJSON), nil
+				}
 				return `[{"status":"hooked"}]`, nil
 			}
 			return "", nil
@@ -1615,6 +1603,68 @@ func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	}
 	if foundUpdate {
 		t.Error("bd update --status=open should NOT be called when work is on main")
+	}
+}
+
+func TestResetAbandonedBead_ZeroCommitWithoutSubmissionEvidenceIsResumable(t *testing.T) {
+	// A fresh branch is an ancestor of main. This exact scheduler/Witness race
+	// must reset the source rather than falsely reporting successful closure.
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-work123" {
+				return `[{"status":"hooked"}]`, nil
+			}
+			return `[{"description":"agent_state: spawning\\nhook_bead: null"}]`, nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	if !resetAbandonedBead(bd, t.TempDir(), "testrig", "gt-work123", "alpha", nil) {
+		t.Fatal("zero-commit dispatch without MR evidence must remain resumable")
+	}
+	var foundClose, foundReset, foundAbort bool
+	for _, call := range mock.calls {
+		foundClose = foundClose || strings.Contains(call, "close gt-work123")
+		foundReset = foundReset || (strings.Contains(call, "update gt-work123") && strings.Contains(call, "--status=open"))
+		foundAbort = foundAbort || strings.Contains(call, "comments add gt-work123 DISPATCH_ABORTED")
+	}
+	if foundClose || !foundReset || !foundAbort {
+		t.Fatalf("close=%v reset=%v abort_provenance=%v calls=%v", foundClose, foundReset, foundAbort, mock.calls)
+	}
+}
+
+func TestWitnessHasCompletionEvidence(t *testing.T) {
+	valid := &beads.AgentFields{
+		ExitType:        string(ExitTypeCompleted),
+		MRID:            "gt-mr-1",
+		LastSourceIssue: "gt-source",
+		CompletionTime:  time.Now().UTC().Format(time.RFC3339),
+	}
+	if !witnessHasCompletionEvidence(valid, "gt-source") {
+		t.Fatal("complete matching MR receipt should be accepted")
+	}
+	for name, mutate := range map[string]func(*beads.AgentFields){
+		"no MR":       func(f *beads.AgentFields) { f.MRID = "" },
+		"MR failed":   func(f *beads.AgentFields) { f.MRFailed = true },
+		"push failed": func(f *beads.AgentFields) { f.PushFailed = true },
+		"wrong source": func(f *beads.AgentFields) {
+			f.LastSourceIssue = "gt-other"
+		},
+		"no timestamp": func(f *beads.AgentFields) { f.CompletionTime = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fields := *valid
+			mutate(&fields)
+			if witnessHasCompletionEvidence(&fields, "gt-source") {
+				t.Fatalf("%s must not authorize source closure", name)
+			}
+		})
 	}
 }
 
@@ -2714,8 +2764,9 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	// notifyRefineryMergeReady takes workDir and calls workspace.Find(workDir) internally
 	notifyRefineryMergeReady(townRoot, "dashboard", result)
 
-	// Verify that a MERGE_READY event file was created in the refinery channel
-	eventDir := filepath.Join(townRoot, "events", "refinery")
+	// Verify that a MERGE_READY event file was created in the rig-scoped
+	// refinery channel (gt-v5d4: channel must not be shared across rigs).
+	eventDir := filepath.Join(townRoot, "events", "refinery-dashboard")
 	entries, err := os.ReadDir(eventDir)
 	if err != nil {
 		t.Fatalf("reading event dir: %v", err)
@@ -2729,7 +2780,7 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 
 	if len(eventFiles) == 0 {
-		t.Fatal("expected at least one .event file in ~/gt/events/refinery/, got none")
+		t.Fatal("expected at least one .event file in ~/gt/events/refinery-dashboard/, got none")
 	}
 
 	// Read and verify the event content
@@ -2746,8 +2797,8 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	if event["type"] != "MERGE_READY" {
 		t.Errorf("event type = %v, want MERGE_READY", event["type"])
 	}
-	if event["channel"] != "refinery" {
-		t.Errorf("event channel = %v, want refinery", event["channel"])
+	if event["channel"] != "refinery-dashboard" {
+		t.Errorf("event channel = %v, want refinery-dashboard", event["channel"])
 	}
 
 	payload, ok := event["payload"].(map[string]interface{})
@@ -2759,6 +2810,35 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 	if payload["rig"] != "dashboard" {
 		t.Errorf("payload.rig = %v, want dashboard", payload["rig"])
+	}
+}
+
+// TestNotifyRefineryMergeReady_DoesNotCrossRigChannels is the gt-v5d4
+// regression test: an emit for rig A's refinery must land only in rig A's
+// channel directory, never in rig B's. Before the fix, every rig shared the
+// literal "refinery" channel, so any rig's MQ_SUBMIT/MERGE_READY woke every
+// other rig's refinery await-event loop, resetting its idle backoff and
+// causing a fleet-wide busy loop.
+func TestNotifyRefineryMergeReady_DoesNotCrossRigChannels(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
+
+	notifyRefineryMergeReady(townRoot, "rig-a", &HandlerResult{})
+
+	rigAEventDir := filepath.Join(townRoot, "events", "refinery-rig-a")
+	if entries, err := os.ReadDir(rigAEventDir); err != nil || len(entries) == 0 {
+		t.Fatalf("expected an event in %s, got entries=%v err=%v", rigAEventDir, entries, err)
+	}
+
+	rigBEventDir := filepath.Join(townRoot, "events", "refinery-rig-b")
+	if _, err := os.ReadDir(rigBEventDir); err == nil {
+		t.Fatalf("rig A's emit must not create rig B's channel dir %s", rigBEventDir)
 	}
 }
 
@@ -2816,5 +2896,50 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 	// Should NOT take the archive path.
 	if strings.Contains(z.Action, "work-already-merged") {
 		t.Errorf("action = %q, should not archive when work is not merged", z.Action)
+	}
+}
+
+// TestHandleZombieRestart_InvalidatesCleanupStatusBeforeRestart is part of
+// gt-h6u4: a confirmed-dead session's persisted cleanup_status must be
+// invalidated before restart, since it may be stale relative to whatever the
+// dead session actually left behind and gt polecat list / gt scheduler
+// status trust it between witness patrol sweeps.
+//
+// Not parallel: overrides package-level vars.
+func TestHandleZombieRestart_InvalidatesCleanupStatusBeforeRestart(t *testing.T) {
+	oldVerify := verifyBranchAlreadyMerged
+	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+
+	oldInvalidate := invalidateZombieCleanupStatus
+	var invalidated bool
+	var gotRig, gotPolecat, gotSnapshot string
+	invalidateZombieCleanupStatus = func(townRoot, workDir, rigName, polecatName, snapshotCleanupStatus string) {
+		invalidated = true
+		gotRig, gotPolecat, gotSnapshot = rigName, polecatName, snapshotCleanupStatus
+	}
+	t.Cleanup(func() { invalidateZombieCleanupStatus = oldInvalidate })
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	z := &ZombieResult{PolecatName: "scavenger", HookBead: "ma-poc.4"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "scavenger", "ma-poc.4", "clean", z)
+
+	if !invalidated {
+		t.Fatal("cleanup_status was never invalidated")
+	}
+	if gotRig != "testrig" || gotPolecat != "scavenger" {
+		t.Errorf("invalidateZombieCleanupStatus(rig=%q, polecat=%q), want (testrig, scavenger)", gotRig, gotPolecat)
+	}
+	// The snapshot value passed through must be the one handleZombieRestart
+	// read, not a hardcoded guess — this is what lets the write no-op if a
+	// concurrent restart's fresh self-report has already moved it on.
+	if gotSnapshot != "clean" {
+		t.Errorf("invalidateZombieCleanupStatus snapshot = %q, want %q", gotSnapshot, "clean")
 	}
 }

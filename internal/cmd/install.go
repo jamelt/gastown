@@ -661,7 +661,7 @@ func writeJSON(path string, data interface{}) error {
 func buildBdInitArgs(townPath string) []string {
 	cfg := bdInitDoltConfig(townPath)
 	// gt install --force preserves town state; bd reinit flags would destroy town beads.
-	return []string{"init", "--prefix", "hq", "--server",
+	return []string{"init", "--skip-agents", "--skip-hooks", "--prefix", "hq", "--server",
 		"--server-port", strconv.Itoa(cfg.Port)}
 }
 

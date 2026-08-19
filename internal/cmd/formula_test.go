@@ -275,10 +275,20 @@ func TestWorkflowStepDescriptionAddsTargetMetadata(t *testing.T) {
 	t.Parallel()
 
 	description := "Line one\n\nLine two"
-	got := workflowStepDescription(formula.Step{Target: "mayor"}, description)
-	want := "workflow_target: mayor\n\nLine one\n\nLine two"
+	got := workflowStepDescription(formula.Step{Target: "mayor"}, description, "claude-opus-5")
+	want := "workflow_target: mayor\nworkflow_agent: claude-opus-5\n\nLine one\n\nLine two"
 	if got != want {
 		t.Fatalf("workflowStepDescription() = %q, want %q", got, want)
+	}
+}
+
+func TestWorkflowStepAgentFromDescription(t *testing.T) {
+	t.Parallel()
+	if got := workflowStepAgentFromDescription("workflow_agent: claude-opus-5\n\nBody"); got != "claude-opus-5" {
+		t.Fatalf("workflowStepAgentFromDescription() = %q", got)
+	}
+	if got := workflowStepAgentFromDescription("Body only"); got != "" {
+		t.Fatalf("unexpected agent metadata: %q", got)
 	}
 }
 

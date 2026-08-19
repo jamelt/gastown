@@ -188,6 +188,7 @@ Thank you for your contribution! Your worktree will be cleaned up shortly.`,
 		),
 	)
 	msg.Priority = mail.PriorityNormal
+	msg.ResponsePolicy = mail.ResponsePolicyNone
 
 	return h.Router.Send(msg)
 }

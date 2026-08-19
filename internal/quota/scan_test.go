@@ -91,7 +91,7 @@ func TestScanAll_DetectsRateLimited(t *testing.T) {
 			"some-other": `This is not a gas town session content`,
 		},
 		envVars: map[string]map[string]string{
-			"hq-mayor":     {"CLAUDE_CONFIG_DIR": "/home/user/.claude-accounts/work"},
+			"hq-mayor":     {"CLAUDE_CONFIG_DIR": "/home/user/.claude-accounts/work", "GT_AGENT": "claude-opus-5", "GT_ROLE": "mayor"},
 			"gt-crew-bear": {"CLAUDE_CONFIG_DIR": "/home/user/.claude-accounts/personal"},
 			"gt-witness":   {"CLAUDE_CONFIG_DIR": "/home/user/.claude-accounts/work"},
 		},
@@ -137,6 +137,9 @@ func TestScanAll_DetectsRateLimited(t *testing.T) {
 	if mayor.ResetsAt != "7pm (America/Los_Angeles)" {
 		t.Errorf("expected resets at '7pm (America/Los_Angeles)', got %q", mayor.ResetsAt)
 	}
+	if mayor.Agent != "claude-opus-5" || mayor.Role != "mayor" {
+		t.Errorf("expected active agent/role metadata, got agent=%q role=%q", mayor.Agent, mayor.Role)
+	}
 
 	// gt-crew-bear should NOT be rate-limited
 	crew := resultMap["gt-crew-bear"]
@@ -154,6 +157,37 @@ func TestScanAll_DetectsRateLimited(t *testing.T) {
 	}
 	if witness.ResetsAt != "9pm (America/Los_Angeles)" {
 		t.Errorf("expected resets at '9pm (America/Los_Angeles)', got %q", witness.ResetsAt)
+	}
+}
+
+func TestScanAll_DetectsProviderQuotaErrors(t *testing.T) {
+	setupTestRegistry(t)
+
+	tests := []string{
+		`API Error: code=insufficient_quota message="monthly budget exhausted"`,
+		`HTTP 429 Too Many Requests: rate limit exceeded`,
+		`Error: usage quota has been exhausted`,
+	}
+	for i, pane := range tests {
+		sessionName := fmt.Sprintf("gt-crew-provider-%d", i)
+		tmux := &mockTmux{
+			sessions:    []string{sessionName},
+			paneContent: map[string]string{sessionName: pane},
+			envVars: map[string]map[string]string{
+				sessionName: {"GT_AGENT": "codex-terra", "GT_ROLE": "gastown/polecats/provider"},
+			},
+		}
+		scanner, err := NewScanner(tmux, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		results, err := scanner.ScanAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 1 || !results[0].RateLimited {
+			t.Errorf("pane %q was not classified as a hard provider quota signal: %+v", pane, results)
+		}
 	}
 }
 
@@ -389,10 +423,10 @@ func TestIsGasTownSession(t *testing.T) {
 		{"gt-crew-bear", true},
 		{"gt-witness", true},
 		{"bd-refinery", true},
-		{"my-app", false},       // has dash but not a known prefix
-		{"dev-server", false},   // has dash but not a known prefix
-		{"myapp", false},        // no dash, no known prefix
-		{"devserver", false},    // no dash, no known prefix
+		{"my-app", false},     // has dash but not a known prefix
+		{"dev-server", false}, // has dash but not a known prefix
+		{"myapp", false},      // no dash, no known prefix
+		{"devserver", false},  // no dash, no known prefix
 	}
 
 	for _, tt := range tests {

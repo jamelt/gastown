@@ -33,6 +33,7 @@ var schedulerCmd = &cobra.Command{
 Subcommands:
   gt scheduler status    # Show scheduler state
   gt scheduler list      # List all scheduled beads
+  gt scheduler feed      # Survey ready beads and schedule eligible work
   gt scheduler run       # Manual dispatch trigger
   gt scheduler pause     # Pause dispatch
   gt scheduler resume    # Resume dispatch
@@ -333,6 +334,12 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		// Mark the work bead itself, not just the context: an explicit clear
+		// must survive the next feed cycle even when there is nothing left to
+		// close (e.g. re-running clear, or a context that closed for another
+		// reason moments earlier). Only a fresh `gt sling` lifts this marker.
+		markSchedulerCleared(townRoot, schedulerClearBead)
+
 		if closed == 0 {
 			fmt.Printf("%s No sling context found for %s\n", style.Dim.Render("○"), schedulerClearBead)
 		} else {
@@ -360,10 +367,42 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		cleared++
+		if fields := beads.ParseSlingContextFields(ctx.issue.Description); fields != nil && fields.WorkBeadID != "" {
+			markSchedulerCleared(townRoot, fields.WorkBeadID)
+		}
 	}
 
 	fmt.Printf("%s Cleared %d context bead(s) from scheduler\n", style.Bold.Render("✓"), cleared)
 	return nil
+}
+
+// markSchedulerCleared records a durable marker on the work bead itself
+// (not the ephemeral context bead) saying its sling context was explicitly
+// removed via `gt scheduler clear`. Closing the context alone is not
+// durable: the next `gt scheduler feed` pass sees a ready, unscheduled bead
+// and — with no memory that a human just cleared it — recreates the exact
+// context it was cleared from (gt-5ti). The feeder checks this label and
+// skips marked beads; only `gt sling` (which bypasses the feeder) removes it.
+// Best-effort: the context close is the primary action and already
+// succeeded or failed on its own by the time this runs.
+func markSchedulerCleared(townRoot, workBeadID string) {
+	rigName := resolveRigForBead(townRoot, workBeadID)
+	if rigName == "" {
+		fmt.Printf("  %s Could not resolve rig for %s; scheduler-cleared marker not set (a later feed pass may re-enqueue it)\n",
+			style.Dim.Render("Warning:"), workBeadID)
+		return
+	}
+	rigBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, rigName)
+	if !ok {
+		fmt.Printf("  %s Could not resolve beads dir for rig %s; scheduler-cleared marker not set on %s (a later feed pass may re-enqueue it)\n",
+			style.Dim.Render("Warning:"), rigName, workBeadID)
+		return
+	}
+	b := beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForLocalBeads()
+	if err := b.Update(workBeadID, beads.UpdateOptions{AddLabels: []string{capacity.LabelSchedulerCleared}}); err != nil {
+		fmt.Printf("  %s Could not set scheduler-cleared marker on %s: %v (a later feed pass may re-enqueue it)\n",
+			style.Dim.Render("Warning:"), workBeadID, err)
+	}
 }
 
 func runSchedulerRun(cmd *cobra.Command, args []string) error {
@@ -451,10 +490,13 @@ func beadsSearchDirs(townRoot string) ([]string, error) {
 	return dirs, nil
 }
 
-// countActivePolecats counts all running polecat tmux sessions across all rigs.
+// countActivePolecats counts running, inventory-backed polecat tmux sessions.
+// A parseable name alone is not sufficient evidence: malformed and test
+// sessions such as gt-test-nudge-1 otherwise look like polecats because a
+// polecat name may contain dashes.
 // Capacity admission uses polecatCapacitySnapshotForTown instead; active sessions
 // are shown for operator context only.
-func countActivePolecats() int {
+func countActivePolecats(townRoot string) int {
 	listCmd := tmux.BuildCommand("list-sessions", "-F", "#{session_name}")
 	out, err := listCmd.Output()
 	if err != nil {
@@ -471,7 +513,13 @@ func countActivePolecats() int {
 			continue
 		}
 		if identity.Role == session.RolePolecat {
-			count++
+			if identity.Name == "." || identity.Name == ".." || filepath.Base(identity.Name) != identity.Name {
+				continue
+			}
+			polecatDir := filepath.Join(townRoot, identity.Rig, "polecats", identity.Name)
+			if info, statErr := os.Stat(polecatDir); statErr == nil && info.IsDir() {
+				count++
+			}
 		}
 	}
 	return count

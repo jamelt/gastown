@@ -121,9 +121,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			townBeadsPath := beads.GetTownBeadsPath(townRoot)
-			townBeads := beads.New(townBeadsPath)
-			issues, err := townBeads.Ready()
+			issues, err := readyIssuesForSource(townRoot, "town", beads.GetTownBeadsPath(townRoot))
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -131,18 +129,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				src.Error = err.Error()
 			} else {
-				// Filter out formula scaffolds (gt-579)
-				formulaNames := getFormulaNames(townBeadsPath)
-				filtered := filterFormulaScaffolds(issues, formulaNames)
-				// Defense-in-depth: also filter wisps that shouldn't appear in ready work
-				wispIDs := getWispIDs(townBeadsPath)
-				filtered = filterWisps(filtered, wispIDs)
-				// Only show work whose ID routes back to the source that reported it.
-				// Otherwise the dashboard can render a row that `gt sling <same-id>`
-				// cannot resolve because routes.jsonl points that prefix elsewhere.
-				filtered = filterReadyIssuesByRoute(townRoot, "town", filtered)
-				// Filter identity beads (agents, roles, rigs) - not actionable work
-				src.Issues = filterIdentityBeads(filtered)
+				src.Issues = issues
 			}
 			sources = append(sources, src)
 		}()
@@ -155,8 +142,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			defer wg.Done()
 			// Use rig root path where rig-level beads are stored
 			// BeadsPath returns rig root; redirect system handles mayor/rig routing
-			rigBeads := beads.New(r.BeadsPath())
-			issues, err := rigBeads.Ready()
+			issues, err := readyIssuesForSource(townRoot, r.Name, r.BeadsPath())
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -164,18 +150,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				src.Error = err.Error()
 			} else {
-				// Filter out formula scaffolds (gt-579)
-				formulaNames := getFormulaNames(r.BeadsPath())
-				filtered := filterFormulaScaffolds(issues, formulaNames)
-				// Defense-in-depth: also filter wisps that shouldn't appear in ready work
-				wispIDs := getWispIDs(r.BeadsPath())
-				filtered = filterWisps(filtered, wispIDs)
-				// Only show work whose ID routes back to this rig. This keeps the
-				// Ready Across Rigs surface honest: every displayed ID must be
-				// usable by the stock `gt sling <id> <rig>` command.
-				filtered = filterReadyIssuesByRoute(townRoot, r.Name, filtered)
-				// Filter identity beads (agents, roles, rigs) - not actionable work
-				src.Issues = filterIdentityBeads(filtered)
+				src.Issues = issues
 			}
 			sources = append(sources, src)
 		}(r)
@@ -332,6 +307,26 @@ func printReadyHuman(result ReadyResult) error {
 	}
 
 	return nil
+}
+
+// readyIssuesForSource fetches ready issues from a single beads source (a
+// rig's beads dir, or the town beads dir) and applies the full eligibility
+// chain `gt ready` uses: formula scaffolds, wisps, route ownership (every
+// surviving ID resolves back to sourceName via `gt sling <id> <sourceName>`),
+// and identity beads (agent/role/rig trackers) stripped. Shared by runReady
+// and the scheduler feeder (gt-j3xq) so both agree on what counts as ready,
+// dispatchable work.
+func readyIssuesForSource(townRoot, sourceName, beadsPath string) ([]*beads.Issue, error) {
+	issues, err := beads.New(beadsPath).Ready()
+	if err != nil {
+		return nil, err
+	}
+	formulaNames := getFormulaNames(beadsPath)
+	filtered := filterFormulaScaffolds(issues, formulaNames)
+	wispIDs := getWispIDs(beadsPath)
+	filtered = filterWisps(filtered, wispIDs)
+	filtered = filterReadyIssuesByRoute(townRoot, sourceName, filtered)
+	return filterIdentityBeads(filtered), nil
 }
 
 // getFormulaNames reads the formulas directory and returns a set of formula names.

@@ -4,8 +4,28 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+// TestReapCmdSafetyCheckIsPerDatabase is a regression test for
+// gt-reaper-alert-flood-root-cause: the open-wisp safety-net check must be
+// evaluated per database (inside the per-result loop), never against a
+// cross-database sum — summing first makes the check scale with the number
+// of monitored databases rather than any single database's health.
+func TestReapCmdSafetyCheckIsPerDatabase(t *testing.T) {
+	data, err := os.ReadFile("reaper.go")
+	if err != nil {
+		t.Fatalf("read reaper.go: %v", err)
+	}
+	source := string(data)
+	if strings.Contains(source, "totalOpen > reaper.DefaultAlertThreshold") {
+		t.Fatal("reaperReapCmd should not compare a cross-database totalOpen sum against DefaultAlertThreshold")
+	}
+	if !strings.Contains(source, "reaper.ExceedsOpenWispSafetyThreshold(r.OpenRemain)") {
+		t.Fatal("reaperReapCmd should evaluate ExceedsOpenWispSafetyThreshold per database (r.OpenRemain), inside the per-result loop")
+	}
+}
 
 func TestReaperDatabaseNamesTrimsConfiguredList(t *testing.T) {
 	oldDB := reaperDB

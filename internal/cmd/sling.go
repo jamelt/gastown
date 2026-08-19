@@ -50,7 +50,7 @@ Merge Strategy (--merge):
   gt sling gt-abc gastown --merge=mr      # Merge queue (default)
   gt sling gt-abc gastown --merge=local   # Keep on feature branch
 
-Target Resolution:
+Target Resolution (rig and explicit polecat targets also work with deferred dispatch):
   gt sling gt-abc                       # Self (current agent)
   gt sling gt-abc crew                  # Crew worker in current rig
   gt sling gp-abc greenplace               # Auto-spawn polecat in rig
@@ -326,6 +326,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		} else {
 			args = redirected
 		}
+		applyWorkflowStepAgentOverride(args)
 	}
 
 	// Config-driven dispatch mode: check scheduler.max_polecats
@@ -372,20 +373,20 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Deferred routing: formula-on-bead with rig target
 	// gt sling mol-review --on gt-abc gastown  (when max_polecats > 0)
 	if deferred && slingOnTarget != "" && len(args) >= 2 {
-		rigName, isRig := IsRigName(args[len(args)-1])
-		if isRig {
+		target, targetErr := resolveDeferredPolecatTarget(args[len(args)-1], townRoot, slingOnTarget, slingResumeBranch, slingForce)
+		if targetErr == nil {
 			formulaName := args[0]
 			if slingHookRawBead {
 				formulaName = ""
 			}
-			beadID := slingOnTarget
-			return scheduleBead(beadID, rigName, ScheduleOptions{
+			return scheduleBeadForSling(slingOnTarget, target.RigName, ScheduleOptions{
 				Formula:      formulaName,
 				Args:         slingArgs,
 				Vars:         slingVars,
 				Merge:        slingMerge,
 				BaseBranch:   slingBaseBranch,
 				ResumeBranch: slingResumeBranch,
+				TargetAgent:  target.Agent,
 				NoConvoy:     slingNoConvoy,
 				Owned:        slingOwned,
 				DryRun:       slingDryRun,
@@ -398,6 +399,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				Ralph:        slingRalph,
 			})
 		}
+		return targetErr
 	}
 
 	// Deferred routing: formula-on-bead without explicit rig (auto-resolve from bead prefix)
@@ -420,7 +422,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		if slingHookRawBead {
 			formulaName = ""
 		}
-		return scheduleBead(slingOnTarget, rigName, ScheduleOptions{
+		return scheduleBeadForSling(slingOnTarget, rigName, ScheduleOptions{
 			Formula:      formulaName,
 			Args:         slingArgs,
 			Vars:         slingVars,
@@ -442,8 +444,25 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Single bead + rig (2 args): deferred check before resolveTarget side-effects
 	if deferred && len(args) == 2 {
-		rigName, isRig := IsRigName(args[1])
-		if isRig {
+		// Dogs remain direct-dispatch targets because they are outside polecat
+		// capacity. Every other deferred target must be either a rig or a live,
+		// exact polecat reservation.
+		if _, isDog := IsDogTarget(args[1]); !isDog {
+			// Preserve standalone-formula behavior for the rig-only form. Formula
+			// slings do not consume a scheduler slot and therefore remain direct.
+			if rigName, isRig := IsRigName(args[1]); isRig && verifyBeadExists(args[0]) != nil {
+				formulaWorkDir := townRoot
+				if rigBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, rigName); ok {
+					formulaWorkDir = filepath.Dir(rigBeadsDir)
+				}
+				if verifyFormulaExists(args[0], formulaWorkDir, townRoot) == nil {
+					return runSlingFormula(ctx, args)
+				}
+			}
+			target, err := resolveDeferredPolecatTarget(args[1], townRoot, args[0], slingResumeBranch, slingForce)
+			if err != nil {
+				return err
+			}
 			// Reject epic/convoy IDs — they must be dispatched without a rig
 			// (children auto-resolve their rigs)
 			idType, err := detectSchedulerIDType(args[0])
@@ -451,27 +470,16 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				return fmt.Errorf("%s cannot be scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)",
 					idType, args[0])
 			}
-			if verifyBeadExists(args[0]) != nil {
-				formulaWorkDir := townRoot
-				if rigBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, rigName); ok {
-					formulaWorkDir = filepath.Dir(rigBeadsDir)
-				}
-				if verifyFormulaExists(args[0], formulaWorkDir, townRoot) == nil {
-					// Standalone formula slinging (cook+wisp+attach) is not bead-based
-					// dispatch and does not consume a scheduler slot — fall through to
-					// runSlingFormula, which handles polecat spawning via resolveTarget.
-					return runSlingFormula(ctx, args)
-				}
-			}
 			beadID := args[0]
-			formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, rigName)
-			return scheduleBead(beadID, rigName, ScheduleOptions{
+			formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, target.RigName)
+			return scheduleBeadForSling(beadID, target.RigName, ScheduleOptions{
 				Formula:      formula,
 				Args:         slingArgs,
 				Vars:         slingVars,
 				Merge:        slingMerge,
 				BaseBranch:   slingBaseBranch,
 				ResumeBranch: slingResumeBranch,
+				TargetAgent:  target.Agent,
 				NoConvoy:     slingNoConvoy,
 				Owned:        slingOwned,
 				DryRun:       slingDryRun,
@@ -489,11 +497,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		// polecat slots, and therefore don't participate in the capacity scheduler.
 		// Without this fallthrough, dispatchFeedDog can't feed stranded convoys when a
 		// scheduler is active (bead aa-4yf2).
-		if _, isDog := IsDogTarget(args[1]); !isDog {
-			// Non-rig, non-dog target in deferred mode — reject to prevent bypassing capacity control
-			return fmt.Errorf("deferred dispatch requires a rig target: gt sling %s <rig>\n'%s' is not a known rig", args[0], args[1])
-		}
-		// else: fall through to direct dispatch path below (resolveTarget handles dogs).
+		// Dog target: fall through to direct dispatch path below (resolveTarget handles dogs).
 	}
 
 	// Epic/convoy auto-detection (1 arg, no rig): works for both deferred and direct
@@ -1252,6 +1256,46 @@ func restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info
 	return true, nil
 }
 
+// restoreRollbackDispatchFieldsFromCurrent removes the dispatch receipt and
+// other metadata written before hook publication, restoring their prior values.
+// Molecule/formula fields remain owned by rollbackSlingArtifacts.
+func restoreRollbackDispatchFieldsFromCurrent(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo) {
+	current, err := getBeadInfoForRollback(beadID)
+	if err != nil || current == nil {
+		return
+	}
+	issue := &beads.Issue{Description: current.Description}
+	fields := beads.ParseAttachmentFields(issue)
+	if fields == nil {
+		return
+	}
+	original := &beads.AttachmentFields{}
+	if originalInfo != nil {
+		if parsed := beads.ParseAttachmentFields(&beads.Issue{Description: originalInfo.Description}); parsed != nil {
+			original = parsed
+		}
+	}
+	fields.AttachedArgs = original.AttachedArgs
+	fields.AttachedVars = append([]string(nil), original.AttachedVars...)
+	fields.DispatchedBy = original.DispatchedBy
+	fields.DispatchContext = original.DispatchContext
+	fields.DispatchActor = original.DispatchActor
+	fields.Mode = original.Mode
+	fields.FormulaVars = original.FormulaVars
+	newDesc := beads.SetAttachmentFields(issue, fields)
+	if newDesc == current.Description {
+		return
+	}
+	updateDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
+	if err := BdCmd("update", beadID, "--description="+newDesc).
+		Dir(updateDir).
+		StripBeadsDir().
+		WithAutoCommit().
+		Run(); err != nil {
+		fmt.Printf("  %s Could not restore dispatch metadata on %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
+	}
+}
+
 func clearRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info *beadInfo) (bool, error) {
 	return restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir, info, nil)
 }
@@ -1422,6 +1466,11 @@ func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, 
 		}
 	}
 
-	// 3. Clean up the spawned polecat (worktree, agent bead, convoy, etc.)
-	cleanupSpawnedPolecat(spawnInfo, spawnInfo.RigName, convoyID)
+	// 3. Clean up a spawned polecat. An explicit deferred reservation reuses an
+	// existing polecat, so rollback must never remove its preserved worktree.
+	if spawnInfo != nil {
+		cleanupSpawnedPolecat(spawnInfo, spawnInfo.RigName, convoyID)
+	} else if convoyID != "" {
+		closeConvoy(convoyID, "Sling rollback - assignment failed")
+	}
 }

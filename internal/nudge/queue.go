@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -135,6 +136,54 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 	}
 
 	return nil
+}
+
+// EnqueueUniqueByKindThread enqueues at most one outstanding nudge for a
+// structured kind/thread pair. It is intended for retryable reminders, where
+// duplicate delivery must not create duplicate prompts. Existing queue files
+// are inspected rather than mail records, so durable audit mail is untouched.
+// The returned bool reports whether a new nudge was written.
+func EnqueueUniqueByKindThread(townRoot, session string, queued QueuedNudge) (bool, error) {
+	if queued.Kind == "" || queued.ThreadID == "" {
+		return true, Enqueue(townRoot, session, queued)
+	}
+
+	dir := queueDir(townRoot, session)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return false, fmt.Errorf("creating nudge queue dir: %w", err)
+	}
+
+	// The same mail can be retried by separate gt processes. Serialize the
+	// check-and-enqueue sequence across processes so they cannot both observe an
+	// empty queue and create duplicate reminders.
+	queueLock := flock.New(filepath.Join(dir, ".unique.lock"))
+	if err := queueLock.Lock(); err != nil {
+		return false, fmt.Errorf("locking nudge queue: %w", err)
+	}
+	defer func() { _ = queueLock.Unlock() }()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("reading nudge queue: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				continue
+			}
+			return false, fmt.Errorf("reading queued nudge %s: %w", entry.Name(), readErr)
+		}
+		var existing QueuedNudge
+		if json.Unmarshal(data, &existing) == nil && existing.Kind == queued.Kind && existing.ThreadID == queued.ThreadID {
+			return false, nil
+		}
+	}
+
+	return true, Enqueue(townRoot, session, queued)
 }
 
 // Requeue writes previously drained nudges back to the queue for later delivery.
