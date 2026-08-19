@@ -111,35 +111,35 @@ func (c *WorktreeGitdirCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// checkRigWorktrees checks all worktrees within a single rig.
+// checkRigWorktrees checks all worktrees within a single rig: refinery,
+// polecats, witness, mayor, and crew.
 func (c *WorktreeGitdirCheck) checkRigWorktrees(rigPath, rigName string) {
 	// Check refinery/rig
 	refineryRig := filepath.Join(rigPath, "refinery", "rig")
 	c.checkWorktree(refineryRig, rigPath)
 
 	// Check polecats (both structures: polecats/<name>/<rigname>/ and polecats/<name>/)
+	// A missing polecats dir must not short-circuit the witness/mayor/crew
+	// checks below.
 	polecatsDir := filepath.Join(rigPath, "polecats")
-	polecatEntries, err := os.ReadDir(polecatsDir)
-	if err != nil {
-		return
-	}
+	if polecatEntries, err := os.ReadDir(polecatsDir); err == nil {
+		for _, entry := range polecatEntries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
 
-	for _, entry := range polecatEntries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
+			// Try new structure first: polecats/<name>/<rigname>/
+			newPath := filepath.Join(polecatsDir, entry.Name(), rigName)
+			if c.hasGitFile(newPath) {
+				c.checkWorktree(newPath, rigPath)
+				continue
+			}
 
-		// Try new structure first: polecats/<name>/<rigname>/
-		newPath := filepath.Join(polecatsDir, entry.Name(), rigName)
-		if c.hasGitFile(newPath) {
-			c.checkWorktree(newPath, rigPath)
-			continue
-		}
-
-		// Fall back to old structure: polecats/<name>/
-		oldPath := filepath.Join(polecatsDir, entry.Name())
-		if c.hasGitFile(oldPath) {
-			c.checkWorktree(oldPath, rigPath)
+			// Fall back to old structure: polecats/<name>/
+			oldPath := filepath.Join(polecatsDir, entry.Name())
+			if c.hasGitFile(oldPath) {
+				c.checkWorktree(oldPath, rigPath)
+			}
 		}
 	}
 
@@ -147,6 +147,27 @@ func (c *WorktreeGitdirCheck) checkRigWorktrees(rigPath, rigName string) {
 	witnessRig := filepath.Join(rigPath, "witness", "rig")
 	if c.hasGitFile(witnessRig) {
 		c.checkWorktree(witnessRig, rigPath)
+	}
+
+	// Check mayor/rig
+	mayorRig := filepath.Join(rigPath, "mayor", "rig")
+	if c.hasGitFile(mayorRig) {
+		c.checkWorktree(mayorRig, rigPath)
+	}
+
+	// Check crew/<name> (each crew member is a single-level worktree, unlike
+	// the two-level polecats/<name>/<rigname> layout).
+	crewDir := filepath.Join(rigPath, "crew")
+	if crewEntries, err := os.ReadDir(crewDir); err == nil {
+		for _, entry := range crewEntries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			crewPath := filepath.Join(crewDir, entry.Name())
+			if c.hasGitFile(crewPath) {
+				c.checkWorktree(crewPath, rigPath)
+			}
+		}
 	}
 }
 
