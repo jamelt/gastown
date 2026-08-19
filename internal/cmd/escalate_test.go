@@ -581,6 +581,36 @@ func TestRunEscalateValidation(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
+
+	t.Run("empty reason rejected", func(t *testing.T) {
+		// gt-e8r6: an escalation with no reason carries only its title and
+		// cannot be acted on by its recipient.
+		escalateStdin = false
+		escalateReason = ""
+		escalateSeverity = "medium"
+
+		err := runEscalate(escalateCmd, []string{"test escalation"})
+		if err == nil {
+			t.Fatal("expected error when --reason is empty")
+		}
+		if !strings.Contains(err.Error(), "escalation reason is required") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("whitespace-only reason rejected", func(t *testing.T) {
+		escalateStdin = false
+		escalateReason = "   "
+		escalateSeverity = "medium"
+
+		err := runEscalate(escalateCmd, []string{"test escalation"})
+		if err == nil {
+			t.Fatal("expected error when --reason is whitespace-only")
+		}
+		if !strings.Contains(err.Error(), "escalation reason is required") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
 }
 
 func TestFormatEscalationMailBodyNeutralSubjectStillCarriesStructuredBody(t *testing.T) {
