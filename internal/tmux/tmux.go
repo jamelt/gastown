@@ -170,7 +170,7 @@ func BuildCommand(args ...string) *exec.Cmd {
 // BuildCommandContext is like BuildCommand but honors a context for cancellation.
 func BuildCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	allArgs := []string{"-u"}
-	if sock := GetDefaultSocket(); sock != "" {
+	if sock := resolvedSocketName(); sock != "" {
 		allArgs = append(allArgs, "-L", sock)
 	}
 	allArgs = append(allArgs, args...)
@@ -196,17 +196,40 @@ const noTownSocket = "gt-no-town-socket"
 const EnvAgentReady = "GT_AGENT_READY"
 
 // NewTmux creates a new Tmux wrapper using the initialized town socket.
-// Falls back to GT_TOWN_SOCKET env var (set by cross-socket tmux bindings).
+// Falls back to explicit socket env vars when registry init did not run.
 // Empty socket means use the default tmux server.
 func NewTmux() *Tmux {
-	sock := GetDefaultSocket()
-	if sock == "" {
-		// GT_TOWN_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
-		// so that "gt agents menu" / "gt feed" invoked from a personal terminal still
-		// target the correct town server even when InitRegistry was not called.
-		sock = os.Getenv("GT_TOWN_SOCKET")
+	return &Tmux{socketName: resolvedSocketName()}
+}
+
+// resolvedSocketName returns the tmux socket this process should use.
+// InitRegistry normally sets the package default via SetDefaultSocket. When a
+// command runs outside a discoverable workspace (InitRegistry never ran, or
+// found no town root), fall back to explicit socket env overrides instead of
+// silently targeting tmux's default server — which has a different set of
+// sessions/windows and produces "can't find window" errors. (GH#3761)
+func resolvedSocketName() string {
+	if sock := GetDefaultSocket(); sock != "" {
+		return sock
 	}
-	return &Tmux{socketName: sock}
+
+	// GT_TOWN_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
+	// so commands invoked from a personal terminal still target the right town
+	// even when InitRegistry was not called.
+	if sock := os.Getenv("GT_TOWN_SOCKET"); sock != "" {
+		return sock
+	}
+
+	// GT_TMUX_SOCKET is the user-facing override normally consumed by
+	// InitRegistry (see session.InitRegistry). If InitRegistry did not run,
+	// honor an explicit socket name here too. "default"/"auto" require a town
+	// root to resolve into a real socket name, so they are not literal names.
+	switch sock := os.Getenv("GT_TMUX_SOCKET"); sock {
+	case "", "default", "auto":
+		return ""
+	default:
+		return sock
+	}
 }
 
 // NewTmuxWithSocket creates a Tmux wrapper that targets a named socket.
