@@ -656,6 +656,14 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
 	}
 
+	// Molecule-machinery guard (gt-6va3): a formula-molecule container or one of
+	// its materialized step beads is scaffolding, never real work. Mirrors the
+	// closed/tombstone guard above and the same check in scheduleBead and
+	// executeSling — no override, since no dispatch of it is ever legitimate.
+	if reason := moleculeScaffoldRejectReason(info); reason != "" {
+		return fmt.Errorf("bead %s is %s", beadID, reason)
+	}
+
 	// Guard against slinging deferred beads (gt-1326mw).
 	// Deferred work (e.g., "deferred to post-launch") should not consume polecat slots.
 	// Use --force to override when intentionally re-activating deferred work.
