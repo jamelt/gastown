@@ -2397,6 +2397,16 @@ func TestCleanExcludingRuntime(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			// AGENTS.md is managed by beads bootstrap but is also a tracked source file.
+			// Divergence from bootstrap should not block gt done (gt-zwzt).
+			name: "AGENTS.md is runtime artifact",
+			s: UncommittedWorkStatus{
+				HasUncommittedChanges: true,
+				ModifiedFiles:         []string{"AGENTS.md"},
+			},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
