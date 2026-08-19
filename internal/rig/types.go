@@ -90,7 +90,15 @@ func (r *Rig) BeadsPath() string {
 // DefaultBranch returns the configured default branch for this rig.
 // Falls back to "main" if not configured or if config cannot be loaded.
 func (r *Rig) DefaultBranch() string {
-	cfg, err := LoadRigConfig(r.Path)
+	return DefaultBranchForPath(r.Path)
+}
+
+// DefaultBranchForPath returns the configured default branch for the rig rooted
+// at rigPath, falling back to "main" if not configured or unreadable. This is
+// the single path-based resolver the LoadRigConfig()+fallback-to-main idiom
+// should route through instead of being re-inlined per call site.
+func DefaultBranchForPath(rigPath string) string {
+	cfg, err := LoadRigConfig(rigPath)
 	if err != nil || cfg.DefaultBranch == "" {
 		return "main"
 	}

@@ -518,12 +518,15 @@ func ResolveBeadsDirForID(currentBeadsDir, beadID string) string {
 }
 
 // ValidateRigPrefix checks that a newly created bead landed in the expected rig's
-// database (gt-gpy). This is a POST-creation guard: the bead already exists, so
-// callers MUST treat a non-nil return as a warning, not a hard failure.
+// database (gt-gpy). This is a POST-creation guard: the bead already exists.
 //
 // A mismatch means the bead's prefix doesn't match the expected rig prefix, which
 // typically indicates the bd create routing resolved to the town-level database
-// instead of the rig's database. Callers should log the warning and continue.
+// instead of the rig's database. How a caller reacts depends on the bead: for an
+// advisory context, log and continue; but a submission path that depends on the
+// bead being findable (e.g. an MR bead the Refinery must merge) should treat a
+// non-nil return as a failed submission, since a mis-routed bead is invisible to
+// the consumer that database mismatch hides it from (gt-29cb).
 func ValidateRigPrefix(townRoot, rigName, beadID string) error {
 	expectedPrefix := GetPrefixForRig(townRoot, rigName)           // e.g., "gt"
 	actualPrefix := strings.TrimSuffix(ExtractPrefix(beadID), "-") // e.g., "gt"

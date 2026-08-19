@@ -276,7 +276,8 @@ if [ "$TOTAL_ISSUES" -ge "$MASS_DEATH_THRESHOLD" ]; then
     gt escalate "Mass agent death: $CONFIRMED_TOTAL agents down" \
       -s CRITICAL \
       --source "plugin:stuck-agent-dog" \
-      --fingerprint "stuck-agent-dog:mass-death"
+      --fingerprint "stuck-agent-dog:mass-death" \
+      --reason "$MASS_DEATH_DETAIL"   # per-agent crashed/stuck breakdown (rig/pcat/hook)
     echo "Skipping per-agent restart/kill actions during mass-death escalation"
   fi
 fi
@@ -347,7 +348,8 @@ if [ -n "$DEACON_ISSUE" ]; then
   gt escalate "Deacon $DEACON_ISSUE detected by stuck-agent-dog" \
     -s "$DEACON_SEVERITY" \
     --source "plugin:stuck-agent-dog" \
-    --fingerprint "$DEACON_FINGERPRINT"
+    --fingerprint "$DEACON_FINGERPRINT" \
+    --reason "$DEACON_REASON"   # what was observed (crashed/zombie/stale heartbeat)
 fi
 ```
 

@@ -148,6 +148,11 @@ const (
 
 	// CloseReasonSuperseded means the MR was replaced by another.
 	CloseReasonSuperseded CloseReason = "superseded"
+
+	// CloseReasonNoop means the MR's source branch had no commits ahead of the
+	// target, so nothing was merged. Distinct from "merged" so the record never
+	// asserts a merge that did not happen or stamps an unrelated commit_sha.
+	CloseReasonNoop CloseReason = "no-op"
 )
 
 // QueueItem represents an item in the merge queue for display.

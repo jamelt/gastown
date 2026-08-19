@@ -2184,3 +2184,48 @@ func TestScheduleBead_RefusesHardProhibition(t *testing.T) {
 		t.Errorf("scheduleBead should have created a sling context once --confirm-human-approved was set")
 	}
 }
+
+// TestScheduleBead_RefusesMoleculeStepBead verifies scheduleBead refuses to
+// enqueue a materialized formula-molecule step bead — a type=task child with a
+// parent-child dependency to a molecule root, the exact stale gt-6va3 fixture
+// shape. Regression for the wiring at sling_schedule.go: deleting the guard
+// invocation must make this fail, and no sling context may be created.
+func TestScheduleBead_RefusesMoleculeStepBead(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	molID := createTestBeadOfType(t, rigPath, "mol-polecat-work", "molecule")
+
+	// A step child parented to the molecule (bd --parent creates the
+	// parent-child dependency edge that survives dispatch's description rewrite).
+	createArgs := []string{"create", "--title=Load context and verify assignment",
+		"--type=task", "--description=step", "--parent=" + molID, "--json"}
+	createCmd := exec.Command("bd", createArgs...)
+	createCmd.Dir = rigPath
+	out, err := createCmd.Output()
+	if err != nil {
+		combined, _ := exec.Command("bd", createArgs...).CombinedOutput()
+		t.Fatalf("bd create --parent failed: %v\n%s", err, combined)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &issue); err != nil {
+		t.Fatalf("parse bd create output: %v\nraw: %s", err, out)
+	}
+	childID := issue.ID
+	if childID == "" {
+		t.Fatalf("bd create --parent returned empty ID\nraw: %s", out)
+	}
+
+	slingOut, err := runGTCmdMayFail(t, gtBinary, hqPath, env,
+		"sling", childID, "testrig", "--hook-raw-bead")
+	if err == nil {
+		t.Fatalf("expected gt sling to fail for molecule step bead, got success\noutput: %s", slingOut)
+	}
+	if !strings.Contains(slingOut, "formula molecule machinery") {
+		t.Errorf("expected error to mention formula molecule machinery, got: %s", slingOut)
+	}
+	if hasSlingContext(t, hqPath, childID) {
+		t.Errorf("scheduleBead should not have created a sling context for molecule step bead %s", childID)
+	}
+}

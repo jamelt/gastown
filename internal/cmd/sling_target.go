@@ -17,16 +17,26 @@ var spawnPolecatForSling = SpawnPolecatForSling
 // resolveTargetAgentFn is a seam for tests. Production uses resolveTargetAgent.
 var resolveTargetAgentFn = resolveTargetAgent
 
+// resolveTargetAgentID converts a target spec to an agent ID (and the tmux
+// session name it was derived from) without requiring a live tmux pane.
+// Callers that only need the agent identity — e.g. unsling, which releases a
+// hook by bead/agent record — must work even when the target's tmux session
+// is dead. resolveTargetAgent builds on this for callers that also need the
+// live pane and working directory.
+func resolveTargetAgentID(target string) (agentID string, sessionName string, err error) {
+	sessionName, err = resolveRoleToSession(target)
+	if err != nil {
+		return "", "", err
+	}
+	return sessionToAgentID(sessionName), sessionName, nil
+}
+
 // resolveTargetAgent converts a target spec to agent ID, pane, and hook root.
 func resolveTargetAgent(target string) (agentID string, pane string, hookRoot string, err error) {
-	// First resolve to session name
-	sessionName, err := resolveRoleToSession(target)
+	agentID, sessionName, err := resolveTargetAgentID(target)
 	if err != nil {
 		return "", "", "", err
 	}
-
-	// Convert session name to agent ID format (this doesn't require tmux)
-	agentID = sessionToAgentID(sessionName)
 
 	// Get the pane for that session
 	pane, err = getSessionPane(sessionName)

@@ -1946,10 +1946,19 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// branch can flip Reusable to true; that must not by itself authorize wiping a
 	// worktree. Fail closed — refusing costs a fresh polecat, being wrong costs work.
 	resetSafety := WorktreeResetSafety{}
-	if dirty, err := polecatGit.HasUncommittedChanges(); err != nil {
+	// hq-f2n8c: judge dirtiness by the same contamination policy gt done and
+	// git-state already use. A raw HasUncommittedChanges() counts toolchain
+	// droppings — .claude/, .runtime/, .agents/, CLAUDE.local.md — as if they
+	// were user work, so every pooled polecat looked unsafe to reset forever.
+	// Reuse then failed, allocation hit the per-rig directory cap, and the rig
+	// stopped dispatching entirely while git-state reported the same worktrees
+	// CLEAN. CleanExcludingRuntime evaluates only file changes by design;
+	// stashes and unpushed commits stay separate checks below, so real work is
+	// still protected. Still fail closed when the status cannot be read.
+	if status, err := polecatGit.CheckUncommittedWork(); err != nil {
 		resetSafety.DirtyErr = true
 	} else {
-		resetSafety.Dirty = dirty
+		resetSafety.Dirty = !status.CleanExcludingRuntime()
 	}
 	if stashes, err := polecatGit.StashListForBranch(); err != nil {
 		resetSafety.StashErr = true
@@ -2411,9 +2420,12 @@ func (m *Manager) List() ([]*Polecat, error) {
 // Idle means no hook, no active session, and no pending completion/MR cleanup state.
 // isReuseCandidateState reports whether a polecat's lifecycle state makes it
 // eligible to be considered for reuse. It mirrors DecideWorkstate, which lets
-// StateIdle and StateDone fall through to the real reuse predicates.
+// StateIdle, StateDone and StateStuck fall through to the real reuse
+// predicates. StateStuck is included per hq-f2n8c: `gt done --status DEFERRED`
+// maps to stuck, so excluding it permanently stranded every polecat that
+// correctly reported its work unnecessary.
 func isReuseCandidateState(s State) bool {
-	return s == StateIdle || s == StateDone
+	return s == StateIdle || s == StateDone || s == StateStuck
 }
 
 func (m *Manager) FindIdlePolecat() (*Polecat, error) {

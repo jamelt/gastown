@@ -350,6 +350,37 @@ func IsProtectedBead(issue *Issue) bool {
 	return false
 }
 
+// IsMoleculeContainerOrStep reports whether issue is formula-molecule machinery
+// rather than dispatchable user/code work: either a molecule container itself
+// (issue_type "molecule") or a materialized step bead whose parent-child
+// dependency points at a molecule container. Old-format molecule instantiation
+// (see instantiateFromChildren / instantiateFromMarkdown in molecule.go) turns
+// each formula step into an ordinary task bead parented to the molecule root,
+// so a stale validation/template molecule leaves behind step beads that look
+// exactly like real ready work and get auto-scheduled (gt-6va3). Dispatch
+// rewrites a step bead's description, so the durable signal is the parent-child
+// edge up to a molecule-typed parent, not any description provenance.
+//
+// The step arm needs Dependencies populated (e.g. from bd show); callers with
+// only bd-ready output (sparse dependencies, no parent issue_type) fall through
+// to false, which is safe — the shared dispatch choke points scheduleBead and
+// executeSling re-check with full bead info before anything is dispatched.
+func IsMoleculeContainerOrStep(issue *Issue) bool {
+	if issue == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(issue.Type), "molecule") {
+		return true
+	}
+	for _, dep := range issue.Dependencies {
+		if strings.EqualFold(strings.TrimSpace(dep.DependencyType), "parent-child") &&
+			strings.EqualFold(strings.TrimSpace(dep.Type), "molecule") {
+			return true
+		}
+	}
+	return false
+}
+
 // IssueDep represents a dependency or dependent issue with its relation.
 type IssueDep struct {
 	ID             string `json:"id"`
@@ -2170,6 +2201,15 @@ func (b *Beads) ForceCloseWithReason(reason string, ids ...string) error {
 func (b *Beads) closeWithOptions(opts closeOptions, ids ...string) error {
 	if len(ids) == 0 {
 		return nil
+	}
+
+	// A decision bead holding an unruled DECISION_CARD v2 must not be closed:
+	// doing so buries the council's output before the overseer can act on it
+	// (gt-v0kz). Checked here, at the single choke point every close routes
+	// through, so it holds for the store path, the CLI path, and --force
+	// alike.
+	if err := b.guardDecisionBeads(ids...); err != nil {
+		return err
 	}
 
 	if !b.noRoute {

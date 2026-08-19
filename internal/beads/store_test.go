@@ -14,6 +14,7 @@ import (
 // Embeds beadsdk.Storage to satisfy unimplemented methods (they panic if called).
 type mockStorage struct {
 	beadsdk.Storage // embedded for unimplemented methods
+	comments        map[string][]*beadsdk.Comment
 	issues          map[string]*beadsdk.Issue
 	labels          map[string][]string // issueID -> labels
 	deps            map[string][]string // issueID -> depends-on IDs
@@ -917,4 +918,15 @@ func containsSubstr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// GetIssueComments completes the double for the decision-bead lifecycle guard
+// (gt-v0kz), which reads comments on every close to refuse burying an unruled
+// DECISION_CARD v2. Without it the embedded nil Storage panics. Beads with no
+// seeded comments correctly report none.
+func (m *mockStorage) GetIssueComments(_ context.Context, issueID string) ([]*beadsdk.Comment, error) {
+	if m.comments == nil {
+		return nil, nil
+	}
+	return m.comments[issueID], nil
 }

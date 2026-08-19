@@ -121,6 +121,30 @@ func TestFeedSkipReason(t *testing.T) {
 			},
 			skip: false,
 		},
+		// gt-6va3: stale formula-molecule scaffolding must never be fed.
+		{
+			name:  "molecule container is skipped",
+			issue: &beads.Issue{ID: "gt-vf2u", Title: "mol-polecat-work", Status: "open", Type: "molecule"},
+			want:  "formula molecule machinery, not dispatchable work",
+			skip:  true,
+		},
+		{
+			// The offending shape: a step bead (type=task) whose parent-child
+			// dependency points at a molecule root, as the bd-show overlay
+			// renders it in the feeder (see effectiveIssueForFeed).
+			name: "molecule step bead is skipped via overlaid dependencies",
+			issue: &beads.Issue{
+				ID:     "gt-nhyl",
+				Title:  "Load context and verify assignment",
+				Status: "open",
+				Type:   "task",
+				Dependencies: []beads.IssueDep{
+					{ID: "gt-vf2u", Type: "molecule", DependencyType: "parent-child"},
+				},
+			},
+			want: "formula molecule machinery, not dispatchable work",
+			skip: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -172,6 +196,40 @@ func TestEffectiveIssueForFeedAppliesBatchLabels(t *testing.T) {
 	fallback := effectiveIssueForFeed(readyIssue, nil)
 	if fallback.ID != readyIssue.ID {
 		t.Fatalf("effectiveIssueForFeed with no batch entry = %+v, want unchanged issue", fallback)
+	}
+}
+
+// TestEffectiveIssueForFeedAppliesBatchDependencies guards gt-6va3: a stale
+// molecule step bead is only distinguishable from real work by its parent-child
+// edge to a molecule parent, and bd ready --json returns sparse dependencies
+// (no parent issue_type). Without the bd-show dependency overlay the
+// molecule-machinery skip is a silent no-op and the step bead gets dispatched.
+func TestEffectiveIssueForFeedAppliesBatchDependencies(t *testing.T) {
+	// What bd ready --json returns for a molecule step bead: the parent-child
+	// edge is present but sparse (no parent issue_type), so nothing skips it.
+	readyIssue := &beads.Issue{
+		ID:     "gt-nhyl",
+		Title:  "Load context and verify assignment",
+		Status: "open",
+		Type:   "task",
+		Dependencies: []beads.IssueDep{
+			{DependencyType: "parent-child"},
+		},
+	}
+	if reason, skip := feedSkipReason(readyIssue); skip {
+		t.Fatalf("expected the un-overlaid ready issue (sparse deps, as bd ready returns) to be fed, got skip=true reason=%q", reason)
+	}
+
+	// The bd-show batch fetch fills in the parent's issue_type=molecule.
+	depsByID := map[string]beadStatusInfo{
+		"gt-nhyl": {Dependencies: []beads.IssueDep{{ID: "gt-vf2u", Type: "molecule", DependencyType: "parent-child"}}},
+	}
+	effective := effectiveIssueForFeed(readyIssue, depsByID)
+	if len(effective.Dependencies) == 0 || effective.Dependencies[0].Type != "molecule" {
+		t.Fatal("effectiveIssueForFeed did not apply the batch-fetched dependencies")
+	}
+	if reason, skip := feedSkipReason(effective); !skip {
+		t.Fatalf("expected the dependency-overlaid molecule step bead to be skipped, got fed (reason=%q)", reason)
 	}
 }
 
