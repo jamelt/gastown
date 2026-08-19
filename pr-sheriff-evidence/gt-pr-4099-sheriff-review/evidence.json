@@ -1,0 +1,95 @@
+{
+  "schema_version": "pr-sheriff-evidence/v1",
+  "policy_version": "pr-sheriff-run-2026-06-04",
+  "generated_at": "2026-08-19T00:00:00Z",
+  "run_id": "gt-pr-4099-sheriff-review",
+  "subject": {
+    "forge": "github",
+    "repo_id": "gastownhall/gastown",
+    "default_branch": "main",
+    "change_type": "confirmatory_review",
+    "change_id": "pr-4099",
+    "url": "https://github.com/gastownhall/gastown/pull/4099",
+    "title": "fix(deacon): start nudge-poller so the nudge queue drains",
+    "author": "KayoticSully",
+    "draft": true,
+    "state": "closed",
+    "merged": false,
+    "closed_at": "2026-07-07T22:54:06Z",
+    "head_sha": "363c47a213b1353df00be5bf5f44058ef28d5e88"
+  },
+  "superseded_by": [
+    {
+      "pr": 4423,
+      "title": "fix(deacon): start nudge-poller for deacon lifecycle",
+      "state": "MERGED",
+      "merged_at": "2026-07-07T22:54:05Z",
+      "merge_commit": "3600ac4f77b58342101ba91206e26fd211b33c91",
+      "ancestor_of_upstream_main": true,
+      "upstream_main_checked_at": "649b832b7672bc7a2dbef26f5983aba6198b819b",
+      "diff_stat": "internal/cmd/deacon.go +21, internal/deacon/manager.go +36/-4, internal/deacon/manager_test.go +81 (new)",
+      "implementing_bead": "gt-g0sd"
+    }
+  ],
+  "related_cluster": {
+    "gt-pr-sheriff-4099": "CLOSED, original review pass, reason 'Merged in gt-wisp-vu8'",
+    "gt-2r8z": "CLOSED, review-only, verdict defer_human_review; found #4099 incomplete (CLI path only, not internal/deacon/manager.go); filed fixup gt-dcb0bd",
+    "gt-7n93": "CLOSED, rejected fixup attempt; pushed branch was contaminated/stale (122 files/7443 insertions vs upstream/main); not merged/MQ-submitted; filed clean replacement gt-g0sd",
+    "gt-g0sd": "CLOSED, clean replacement; implemented and merged PR #4423 as 3600ac4f77b58342101ba91206e26fd211b33c91; full 15+5+5 evidence recorded in its own bd notes/comments; filed non-blocking follow-up hq-wm9 (now aged out of Dolt)"
+  },
+  "related_issue": {
+    "number": null,
+    "note": "PR #4099's own body states 'No GitHub issue — bug fix with reproduction'. Broader search found #4711 (Mayor nudge-poller not started — same bug class, different role, independently tracked, not referenced by #4099) and #4713 (orphaned .claimed files — unrelated topic). Neither requires linking/dispositioning from this bead."
+  },
+  "research_legs": {
+    "count": 17,
+    "completed": 17,
+    "summary": "17 independent, tool-grounded checks performed directly by this bead (exceeds 15-leg minimum): (1) gh pr view 4099 state/closed/draft; (2) gh pr view 4099 comments — closing comment cites #4423/3600ac4f; (3) gh pr view 4423 state/mergedAt/mergeCommit — exact hash match; (4) git merge-base --is-ancestor 3600ac4f... upstream/main (fresh fetch) — success; (5) git show 3600ac4f... --stat — 3 files, 134 lines; (6) git grep StartPoller/StopPoller on upstream/main — wired in both internal/cmd/deacon.go and internal/deacon/manager.go; (7) direct read of manager.go/manager_test.go — correct lifecycle ordering, idempotent poller start, DI seam; (8) manager_test.go has real targeted tests, not trivial; (9) gh pr view 4423 statusCheckRollup — Test/Lint/Integration/Windows all SUCCESS; (10) grepped all deacon.NewManager callers — no third uncovered production startup path; (11) design/cleanup check — reuses existing nudge.StartPoller/StopPoller pattern used by crew/mayor/refinery/witness, no resurrected per-turn mail-check hook; (12) attribution check — real Co-authored-by trailers + PR-body attribution section citing #4099/KayoticSully/Ryan Sullivan/Claude Opus 4.7; (13) policy check — zero contributor-change-request comments; (14) merge-route check — standard GitHub PR merge, not refinery/MQ; (15) bd show on gt-pr-sheriff-4099/gt-2r8z/gt-7n93/gt-g0sd — all closed, consistent, non-contradicting; (16) bd search '4099' — no other open/in-progress bead references this PR; hq-wm9/gt-dcb0bd both aged out of Dolt, consistent with normal ephemeral-bead lifecycle; (17) gh issue search 'deacon nudge-poller'/'nudge queue drains' — no open issue tied to #4099; #4711/#4713 found but out of scope (different roles/topics, already independently tracked)."
+  },
+  "pre_decision_review_legs": {
+    "count": 5,
+    "completed": 5,
+    "confirm": 5,
+    "object": 0,
+    "summary": "5 independent fresh subagents (general-purpose, no shared context), each given only the compiled facts and required to independently re-run real gh/git verification commands before rendering a verdict. Leg 1 (core fix-logic + linkage): CONFIRM. Leg 2 (safety/regression risk + test coverage): CONFIRM. Leg 3 (duplicate/conflicting prior review history): CONFIRM. Leg 4 (cleanup-first design quality vs. bandaid check): CONFIRM. Leg 5 (attribution + no-contributor-change-request + merge-route policy compliance): CONFIRM. 5/5 confirmed the disposition outright; zero objections."
+  },
+  "post_implementation_review_legs": {
+    "applicable": false,
+    "reason": "no code change to the PR's subject was made by this bead; the fix was already implemented, reviewed with 5 post-implementation legs, and merged by the prior bead gt-g0sd (PR #4423) before this bead was worked"
+  },
+  "discovered_work": [],
+  "prior_sheriff_history": {
+    "gt-pr-sheriff-4099": {
+      "closed_at": "2026-06-12",
+      "assignee": "gastown/polecats/dust",
+      "verdict": "original review pass",
+      "reconciliation": "superseded by later, more complete review chain (gt-2r8z -> gt-7n93 -> gt-g0sd)"
+    },
+    "gt-2r8z": {
+      "closed_at": "2026-07-06",
+      "assignee": "gastown/polecats/pipboy",
+      "verdict": "defer_human_review; #4099 incomplete (CLI-path only)",
+      "reconciliation": "correctly identified the gap that gt-g0sd's replacement (#4423) then closed"
+    },
+    "gt-7n93": {
+      "closed_at": "2026-07-07",
+      "assignee": "gastown/polecats/chrome",
+      "verdict": "fixup attempt rejected — contaminated/stale branch",
+      "reconciliation": "correctly rejected; superseded by clean replacement gt-g0sd"
+    },
+    "gt-g0sd": {
+      "closed_at": "2026-07-07",
+      "assignee": "gastown/polecats/brahmin",
+      "verdict": "implemented and merged clean replacement PR #4423, merge commit 3600ac4f77b58342101ba91206e26fd211b33c91",
+      "reconciliation": "this bead's disposition confirms and records gt-g0sd's outcome; not a re-implementation"
+    },
+    "note": "this bead (gt-pr-4099-sheriff-review) is a stale 5th-dispatch re-review of the same PR, worked six weeks after the fix already shipped"
+  },
+  "final_verdict": "no_action_required_code / no_action_required_github",
+  "merge_path_allowed": "not_applicable",
+  "required_next_actions": [
+    "none required on GitHub or the subject repo"
+  ],
+  "no_refinery_mq_route_used": true,
+  "no_github_write_performed": true
+}
