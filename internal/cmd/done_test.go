@@ -893,21 +893,60 @@ func TestShouldNudgeRefinery(t *testing.T) {
 		name     string
 		exitType string
 		mrID     string
+		mrFailed bool
 		want     bool
 	}{
-		{"completed with MR nudges", ExitCompleted, "gt-abc123", true},
-		{"completed without MR does not nudge", ExitCompleted, "", false},
-		{"deferred without MR does not nudge", ExitDeferred, "", false},
-		{"deferred with stray MR does not nudge", ExitDeferred, "gt-abc123", false},
-		{"escalated without MR does not nudge", ExitEscalated, "", false},
-		{"escalated with stray MR does not nudge", ExitEscalated, "gt-abc123", false},
+		{"completed with MR nudges", ExitCompleted, "gt-abc123", false, true},
+		{"completed without MR does not nudge", ExitCompleted, "", false, false},
+		{"completed with failed/invisible MR does not nudge", ExitCompleted, "gt-abc123", true, false},
+		{"deferred without MR does not nudge", ExitDeferred, "", false, false},
+		{"deferred with stray MR does not nudge", ExitDeferred, "gt-abc123", false, false},
+		{"escalated without MR does not nudge", ExitEscalated, "", false, false},
+		{"escalated with stray MR does not nudge", ExitEscalated, "gt-abc123", false, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldNudgeRefinery(tt.exitType, tt.mrID); got != tt.want {
-				t.Errorf("shouldNudgeRefinery(%q, %q) = %v, want %v",
-					tt.exitType, tt.mrID, got, tt.want)
+			if got := shouldNudgeRefinery(tt.exitType, tt.mrID, tt.mrFailed); got != tt.want {
+				t.Errorf("shouldNudgeRefinery(%q, %q, %v) = %v, want %v",
+					tt.exitType, tt.mrID, tt.mrFailed, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMRInvisibleReason pins the gt-29cb guard: gt done must recognize an MR
+// bead the Refinery cannot see and route it through mrFailed (non-empty reason)
+// so the source bead is not silently closed over stranded work. A refinery-
+// visible MR must return "" so healthy completions still close normally.
+func TestMRInvisibleReason(t *testing.T) {
+	prefixErr := errors.New("prefix \"hq\" routes to town, not rig \"gastown\"")
+	tests := []struct {
+		name          string
+		localBeadsDir bool
+		prefixErr     error
+		wantEmpty     bool
+		wantContains  string
+	}{
+		{"refinery-visible MR closes normally", false, nil, true, ""},
+		{"local unredirected beads dir is invisible", true, nil, false, "gt polecat repair"},
+		{"wrong-rig routing is invisible", false, prefixErr, false, "wrong database"},
+		{"local dir wins precedence over prefix", true, prefixErr, false, "gt polecat repair"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mrInvisibleReason("gt-mr1", "gastown", "/w/.beads", tt.localBeadsDir, tt.prefixErr)
+			if tt.wantEmpty {
+				if got != "" {
+					t.Fatalf("mrInvisibleReason = %q, want empty (visible MR must not block close)", got)
+				}
+				return
+			}
+			if got == "" {
+				t.Fatalf("mrInvisibleReason = empty, want a failure reason for an invisible MR")
+			}
+			if !strings.Contains(got, tt.wantContains) {
+				t.Errorf("mrInvisibleReason = %q, want it to contain %q", got, tt.wantContains)
 			}
 		})
 	}
