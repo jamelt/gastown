@@ -105,7 +105,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// Polecat sessions end with gt done — the session is cleaned up, but the
 	// polecat's persistent identity (agent bead, CV chain) survives across assignments.
 	actor := os.Getenv("BD_ACTOR")
-	if actor != "" && !isPolecatActor(actor) {
+	if actor == "" {
+		return fmt.Errorf("gt done requires BD_ACTOR to be set (caller identity unknown)")
+	}
+	if !isPolecatActor(actor) {
 		return fmt.Errorf("gt done is for polecats only (you are %s)\nPolecat sessions end with gt done — the session is cleaned up, but identity persists.\nOther roles persist across tasks and don't use gt done.", actor)
 	}
 
