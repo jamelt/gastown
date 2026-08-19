@@ -2172,6 +2172,15 @@ func (b *Beads) closeWithOptions(opts closeOptions, ids ...string) error {
 		return nil
 	}
 
+	// A decision bead holding an unruled DECISION_CARD v2 must not be closed:
+	// doing so buries the council's output before the overseer can act on it
+	// (gt-v0kz). Checked here, at the single choke point every close routes
+	// through, so it holds for the store path, the CLI path, and --force
+	// alike.
+	if err := b.guardDecisionBeads(ids...); err != nil {
+		return err
+	}
+
 	if !b.noRoute {
 		groups := make(map[string][]string)
 		targets := make(map[string]*Beads)
