@@ -115,6 +115,19 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	lastMaintenanceRun time.Time
 
+	// binaryPath, startupBinaryModTime and startupBinarySize record this
+	// daemon's own on-disk executable and its identity at startup. The
+	// heartbeat compares the current on-disk identity against these to detect
+	// an in-place binary replacement (e.g. `make safe-install` from the
+	// rebuild-gt plugin, which installs a new binary without restarting the
+	// daemon) and self-heal by restarting. restartRequested latches once such a
+	// restart has been spawned so we never spawn a second one.
+	// Only accessed from heartbeat loop goroutine - no sync needed.
+	binaryPath           string
+	startupBinaryModTime time.Time
+	startupBinarySize    int64
+	restartRequested     bool
+
 	// mayorZombieCount tracks consecutive patrol cycles where the Mayor tmux
 	// session exists but the agent process is not detected. A count >= 3
 	// triggers a zombie restart, debouncing transient gaps during handoffs.
@@ -526,6 +539,14 @@ func (d *Daemon) Run() (err error) {
 	binaryPath, pathErr := os.Executable()
 	if pathErr != nil {
 		binaryPath = fmt.Sprintf("unknown (%v)", pathErr)
+	} else {
+		// Record the on-disk executable and its identity so the heartbeat can
+		// detect an in-place binary replacement and self-restart to adopt it.
+		d.binaryPath = binaryPath
+		if fi, statErr := os.Stat(binaryPath); statErr == nil {
+			d.startupBinaryModTime = fi.ModTime()
+			d.startupBinarySize = fi.Size()
+		}
 	}
 	commitDisplay := "dev build"
 	if state.BinaryCommit != "" {
@@ -956,6 +977,12 @@ func (d *Daemon) heartbeat(state *State) {
 	if err := SaveState(d.config.TownRoot, state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
+
+	// 16. Self-heal a stale daemon binary: if a rebuilt gt has been installed on
+	// disk underneath us (e.g. by the rebuild-gt plugin's `make safe-install`,
+	// which deliberately does not restart the daemon), restart to adopt it. No-op
+	// unless the on-disk binary actually changed, so this is cheap every tick.
+	d.maybeSelfRestartStaleBinary(state)
 
 	d.logger.Printf("Heartbeat complete (#%d)", state.HeartbeatCount)
 }
