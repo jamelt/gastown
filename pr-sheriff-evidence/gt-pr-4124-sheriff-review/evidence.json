@@ -1,0 +1,181 @@
+{
+  "schema_version": "pr-sheriff-evidence/v1",
+  "policy_version": "pr-sheriff-policy/v1.1",
+  "generated_at": "2026-08-19T11:02:12Z",
+  "run_id": "gt-pr-4124-sheriff-review",
+  "subject": {
+    "forge": "github",
+    "repo_id": "gastownhall/gastown",
+    "default_branch": "main",
+    "change_type": "pull_request",
+    "change_id": "4124",
+    "url": "https://github.com/gastownhall/gastown/pull/4124",
+    "title": "fix(doctor): rig-config-sync accepts rig.db == town.db as valid (gt-dky8e)",
+    "author": "athosmartins",
+    "author_tier": "community",
+    "draft": false,
+    "base_ref": "main",
+    "head_ref": "temp-merge-gt-wisp-2x5",
+    "state": "CLOSED",
+    "mergeable": "CONFLICTING",
+    "diff_summary": {
+      "additions": 88,
+      "deletions": 2,
+      "changed_files": 2,
+      "relevant_files_estimate": 2,
+      "relevant_lines_estimate": 90,
+      "note": "Diff was a scoped cherry-pick of the rig-config-sync predicate fix; PR failed on CI (Test/Lint/Windows Smoke Test FAILURE at push time), not on scope -- see R11."
+    }
+  },
+  "action_plan": {
+    "id": "action-plan-gt-pr-4124-sheriff-review",
+    "mode": "confirmed_prior_disposition",
+    "summary": "PR #4124 is already fully resolved: closed by a maintainer (Bella-Giraffety) on 2026-07-10 as superseded by merged replacement PR #4457 ('fix(doctor): accept deacon town DB in rig-config-sync'), which independently merged to gastownhall/gastown main on 2026-07-09 (commit e6b7c2368622edf490a425b2b261b20ac159a979). Three prior dispatch attempts to review this PR (gt-pr-sheriff-4124, gt-pr-sheriff-4124-disposition, hq-9wb/hq-cv-apnxy) were all auto-closed stale by the reaper without any recorded findings -- this is the first substantive review pass. This pass re-verifies every load-bearing fact from first principles (PR/duplicate-PR state, merge ancestry, fix presence on current main, regression-test coverage, CI results, attribution, related-PR and related-issue disposition) rather than trusting the prior close comment at face value, and confirms no corrective action is needed. Sheriff wrote no code, opened no PR, and took no new GitHub-visible action (no comments, labels, or merges) in this pass.",
+    "created_at": "2026-08-19T11:02:12Z"
+  },
+  "repo_policy": {
+    "label_aliases": [
+      {"from": "status/review-failed", "to_family": "status", "to_value": "review-failed"},
+      {"from": "status/review-approved", "to_family": "status", "to_value": "review-approved"},
+      {"from": "priority/p2", "to_family": "priority", "to_value": "p2"},
+      {"from": "kind/bug", "to_family": "kind", "to_value": "bug"}
+    ],
+    "note": "No 'superseded' or 'closed' status label exists in the repo (consistent with the gt-pr-4130-sheriff-review / gt-pr-4187-sheriff-review precedents); status/review-failed remains the correct terminal label on a Sheriff-superseded original even after its replacement has merged.",
+    "baseline_checks": ["Test", "Lint", "Integration Tests", "Windows Smoke Test"],
+    "no_verification_reasons": []
+  },
+  "labels": {
+    "observed": [
+      {"name": "kind/bug", "family": "kind", "semantic_value": "bug", "subject": "PR #4124"},
+      {"name": "priority/p2", "family": "priority", "semantic_value": "p2", "subject": "PR #4124"},
+      {"name": "status/review-failed", "family": "status", "semantic_value": "review-failed", "subject": "PR #4124"},
+      {"name": "kind/bug", "family": "kind", "semantic_value": "bug", "subject": "PR #4122"},
+      {"name": "priority/p2", "family": "priority", "semantic_value": "p2", "subject": "PR #4122"},
+      {"name": "status/review-failed", "family": "status", "semantic_value": "review-failed", "subject": "PR #4122"},
+      {"name": "status/needs-triage", "family": "status", "semantic_value": "needs-triage", "subject": "PR #4123", "note": "stale -- PR #4123 is closed (author closed it for cross-repo push policy reasons on 2026-05-25) but never re-triaged; label edit is out of this bead's authority, flagged as a residual gap for a maintainer."},
+      {"name": "kind/bug", "family": "kind", "semantic_value": "bug", "subject": "PR #4457"},
+      {"name": "priority/p2", "family": "priority", "semantic_value": "p2", "subject": "PR #4457"},
+      {"name": "status/review-approved", "family": "status", "semantic_value": "review-approved", "subject": "PR #4457"}
+    ],
+    "status": "review-failed",
+    "priority": "p2",
+    "kind": "bug"
+  },
+  "implementation": {
+    "code_changed_by_sheriff": false,
+    "mode": "confirmed_prior_disposition",
+    "modified_paths": [],
+    "commits": []
+  },
+  "evidence": {
+    "research_legs": [
+      {"id": "R01", "lens": "PR #4124 current state and close-comment trail", "summary": "gh pr view 4124 confirms state=CLOSED, mergedAt=null, mergeCommit=null, mergeable=CONFLICTING (stale field, PR already closed). Comment trail: codecov flaky-test comment (2026-05-25, unrelated to this PR's own diff); Bella-Giraffety comment (2026-07-10T14:39:40Z): 'Closing as superseded by merged replacement PR #4457 (fix(doctor): accept deacon town DB in rig-config-sync). This original temp-merge branch remains review-failed and is not the merge path.'"},
+      {"id": "R02", "lens": "PR #4124 original scope/intent", "summary": "Body: 'Merge request gt-wisp-2x5 for issue gt-dky8e (polecat rictus). Clean cherry-pick of the rig-config-sync fix -- extracts only the semantic predicate change from the kitchen-sink PR #9.' Head ref temp-merge-gt-wisp-2x5 identifies it as a refinery-generated temp-merge branch, not a hand-authored feature branch. Changes: internal/doctor/rig_config_sync_check.go (+9/-2) plus a test file (+81 lines) -- a scoped, single-purpose predicate relaxation, not a bandaid or new abstraction."},
+      {"id": "R03", "lens": "Duplicate PR #4122 (same bead line, different wisp)", "summary": "gh pr view 4122: title identical modulo bead suffix ('...gt-thv2d)'), body is the refinery temp-merge wrapper for gt-wisp-8o4/issue gt-thv2d, same author (athosmartins/rictus). State=CLOSED, closed 2026-07-09T15:56:33Z with comment: 'Closed as superseded by replacement PR #4457, merged as e6b7c2368622edf490a425b2b261b20ac159a979. Original contribution attribution was preserved in the squash merge with Co-authored-by: rictus <athosmartins@gmail.com>.' #4124's own body explicitly flagged this duplication at creation time: 'Note: PR #4122 ... contains the same fix -- witness should close one as duplicate.' Confirms #4124 and #4122 were two refinery temp-merge branches carrying the identical predicate fix under two different bead IDs (gt-dky8e vs gt-thv2d), and #4457 is the single convergent replacement for both."},
+      {"id": "R04", "lens": "Duplicate PR #4123 (author's own clean cherry-pick, distinct closure reason)", "summary": "gh pr view 4123: same title (no bead suffix), same author athosmartins, body explicitly states 'Cherry-pick of the core fix from the abandoned kitchen-sink PR athosmartins/gastown#9 (closed)... Bead: gt-dky8e / Original bead: gt-thv2d' -- i.e. a third PR carrying the identical fix, this time hand-authored by athosmartins directly (not a refinery temp-merge). Closed by the author himself on 2026-05-25T22:11:55Z, same day as opened, for an unrelated reason: 'mesmo motivo da PR #4155... athos's policy e nao pushar pra gastownhall canonico sem decisao explicita. Polecat (rictus) autonomamente fez cross-repo PR' (cross-repo push policy, not a technical rejection). Never merged, no CI-driven replacement chain of its own -- correctly a dead end, distinct from #4122/#4124's supersede-by-#4457 path."},
+      {"id": "R05", "lens": "Kitchen-sink origin PR (athosmartins/gastown#9, fork)", "summary": "GitHub PR #9 in gastownhall/gastown itself is an unrelated merged PR ('fix: ensure rig beads init targets rig DB'), confirming the 'kitchen-sink PR #9' referenced in #4123/#4124's bodies is PR #9 in the contributor's personal fork athosmartins/gastown, not a PR in the canonical repo, and is out of this review's reachable scope (a different repo). #4123's body independently corroborates this: 'abandoned kitchen-sink PR athosmartins/gastown#9 (closed)... bundled 16,463 unrelated lines of changes.' No canonical-repo action is owed for that fork PR."},
+      {"id": "R06", "lens": "Final replacement PR #4457 merged state and body", "summary": "gh pr view 4457: state=MERGED, mergedAt=2026-07-09T15:55:52Z, mergeCommit.oid=e6b7c2368622edf490a425b2b261b20ac159a979. Body: 'Replacement for #4122 on current upstream/main. Carries forward the valid bug-fix intent from #4122 by athosmartins/rictus while narrowing the acceptance rule to the deacon/HQ shared-storage invariant... Attribution is preserved in the commit body with Co-authored-by: rictus <athosmartins@gmail.com>.' Also states its own PR-Sheriff evidence: '15 independent research legs completed. 5 pre-implementation reviews approved action-plan-pr4122-deacon-town-db-replacement. 5 post-implementation reviews approved head d0b0e435c2616325d22d9a2cfd82321cee631faa.' -- i.e. #4457 was itself produced through a fully-evidenced PR Sheriff replacement flow off of #4122, the twin of #4124."},
+      {"id": "R07", "lens": "Merge-commit ancestry on current main", "summary": "git fetch upstream main; git merge-base --is-ancestor e6b7c2368622edf490a425b2b261b20ac159a979 upstream/main exits 0 ('IS ANCESTOR: yes'), confirming the merge commit is a real ancestor of current upstream/main -- not merely an API-reported field that could be stale or reverted. git show --stat on the commit shows the expected 2 files (rig_config_sync_check.go, rig_config_sync_check_test.go), +185/-10, authored by Bella-Giraffety with trailers 'Co-authored-by: rictus <athosmartins@gmail.com>' and 'Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>', message 'Merge PR Sheriff-approved replacement for PR #4122... Replacement: https://github.com/gastownhall/gastown/pull/4457'."},
+      {"id": "R08", "lens": "Fix content actually present on current main", "summary": "git show upstream/main:internal/doctor/rig_config_sync_check.go shows, at ~line 90, townDB := readDoltDatabase(...) read once at the top of Run(), and at ~lines 199-243 an explicit exception: 'Exception: deacon shares the town-wide beads DB after the HQ storage [migration]... expectedDBName = rigName; if rigName == \"deacon\" && townDB != \"\" { expectedDBName = townDB }' -- i.e. the deacon/town-DB acceptance predicate described in #4124/#4122/#4457 is live on current main, ~5-6 weeks after merge, not reverted or regressed."},
+      {"id": "R09", "lens": "Regression test coverage present on current main", "summary": "git show upstream/main:internal/doctor/rig_config_sync_check_test.go lists (among 14 total test funcs in the file) TestRigConfigSyncCheck_DeaconTownDoltDBNoMismatch and TestRigConfigSyncCheck_OrdinaryRigTownDoltDBMismatch -- the exact positive/negative pair #4457's body describes adding ('proving deacon dolt_database == hq is valid and Fix does not rewrite it' / 'proving an ordinary rig pointing at the town DB still reports a DB mismatch'), confirming the regression coverage described in #4457 is genuinely present on main, not just claimed in the PR body."},
+      {"id": "R10", "lens": "Attribution preservation", "summary": "Both the merge commit (R07) and #4457's PR body (R06) carry 'Co-authored-by: rictus <athosmartins@gmail.com>' -- rictus being the polecat that authored the original fix under bead gt-dky8e/gt-thv2d for human contributor athosmartins (Athos Bernardes). #4122's own close comment independently confirms the same: 'Original contribution attribution was preserved in the squash merge with Co-authored-by: rictus <athosmartins@gmail.com>.' Attribution is present and consistent across all three source documents (merge commit, #4457 body, #4122 close comment)."},
+      {"id": "R11", "lens": "PR #4124's own CI results", "summary": "statusCheckRollup on #4124 shows Windows Smoke Test, Test, and Lint all FAILURE at push time (2026-05-25T22:1x), with Integration Tests SUCCESS and the housekeeping checks (add/remove-triage-label, go.mod/issues.jsonl guards) SUCCESS or SKIPPED. This independently corroborates that #4124 genuinely could not merge as-is (not merely a policy/duplication technicality) and that a maintainer-authored replacement was the correct path."},
+      {"id": "R12", "lens": "#4457's CI results", "summary": "statusCheckRollup on #4457 (captured at merge time, 2026-07-09) shows Test, Lint, Integration Tests, and Windows Smoke Test all SUCCESS, plus all housekeeping checks SUCCESS or SKIPPED (Block Internal PRs skipped, expected for a cross-repo-authored PR). Full green bar before merge -- confirms the replacement did not merely resolve the duplication/attribution issue but also actually fixed the CI failures #4124/#4122 exhibited."},
+      {"id": "R13", "lens": "#4124 label state vs. terminal precedent", "summary": "#4124 currently carries kind/bug, priority/p2, status/review-failed. No 'superseded'/'closed' status label exists in the repo (confirmed against the same absence documented in the #4130/#4187 precedent records), so status/review-failed remains the correct terminal label for a Sheriff-superseded original even post-merge of its replacement -- no label change is warranted. #4122 carries the identical label set for the identical reason. #4123 still carries only status/needs-triage despite being closed on 2026-05-25 -- a stale, non-blocking label-hygiene gap, flagged below, outside this review-only bead's authority."},
+      {"id": "R14", "lens": "Sibling PR #4155 citation -- confirmed no code linkage", "summary": "#4123's own close comment cites PR #4155 as a same-morning 'sibling pattern' closure. gh pr view 4155 confirms it is a fully unrelated, already-merged fix ('fix(cli): correct gt agents state help to plural command form', hq-8v3) -- the citation is about the shared cross-repo-push-policy closure pattern, not a code or bead relationship. No action tied to #4155 is owed by this review."},
+      {"id": "R15", "lens": "Competing/undiscovered replacement and related-issue search", "summary": "gh pr list --search '4124 in:body' / 'kitchen-sink in:body' / 'kitchen sink in:body' across all states returns only the known chain (#4123, #4124) plus the already-accounted-for fork-origin reference; no other PR claims to fix or compete with #4124's specific predicate-relaxation scope. gh issue list --search 'rig-config-sync in:title,body' (all states) returns no open issue referencing this specific deacon/town-DB acceptance behavior -- the one topically-adjacent issue, #3058 ('gt doctor --fix rig-config-sync renames Dolt DB to prefix instead of rig name'), is already CLOSED and describes a different code path (the Fix/rename behavior, not the acceptance predicate). Neither gt-dky8e nor gt-thv2d resolve to any live bead (both were ephemeral wisp-tracking IDs, already gone) or any open GitHub issue -- there is no related GitHub issue left to link or disposition for this PR chain."},
+      {"id": "R16", "lens": "Prior review-dispatch history for this exact PR", "summary": "bd search dky8e surfaces 4 prior beads besides the current one: gt-pr-sheriff-4124, gt-pr-sheriff-4124-disposition, hq-9wb (CI-failure notification), hq-cv-apnxy (convoy tracker) -- all CLOSED with close reason 'stale:auto-closed by reaper', meaning no polecat ever produced recorded findings on any of them; the actual disposition (Bella-Giraffety's 2026-07-10 supersede-and-close) happened independently of these stale beads, via a real maintainer/prior-Sheriff-flow action with merge authority. This review pass is the first to record durable, verified findings for PR #4124."},
+      {"id": "R17", "lens": "Branch-hygiene gate applicability", "summary": "gt pr-sheriff-check --merge-gate --base upstream/main --json, run from this review's own branch, reports ahead=255/behind=0/severity=block -- but this reflects the review branch's own unrelated history (255 commits of prior polecat work on other beads on top of an old base), not a would-be replacement branch, and is not meaningful evidence either way: Sheriff opens no replacement PR in this pass (the replacement already exists, was authored independently, and merged over a month before this bead was dispatched). Recorded in checker.txt for completeness only; excluded from the final verdict per skill.md, which scopes the gate to 'before opening or recommending a maintainer replacement PR.'"}
+    ],
+    "pre_implementation_reviews": [
+      {"id": "P01", "lens": "cleanup-first/policy", "verdict": "approve", "summary": "No code, comment, label, or merge action is warranted -- #4457's merged fix is already the convergent, single-purpose change (one predicate exception added to one existing check function, no new shim/layer/abstraction), and it collapsed two duplicate refinery temp-merge branches (#4122, #4124) into one replacement. Confirming an already-correct disposition is itself the cleanup-first-compliant outcome; inventing new action here (e.g. re-closing, re-commenting, or opening a redundant replacement) would be scope creep."},
+      {"id": "P02", "lens": "correctness", "verdict": "approve", "summary": "Verified independently (not by trusting the prior close comment) that: the referenced merge commit is a real ancestor of current upstream/main (R07); the described fix content is actually present on main today (R08); the described regression tests are actually present on main today (R09); attribution trailers are correct and consistent across three independent sources (R10); and no related GitHub issue is left open that this PR chain should have addressed (R15). All facts check out; no correction to the prior disposition is needed."},
+      {"id": "P03", "lens": "scope/authority", "verdict": "approve", "summary": "This bead's authority is review/reporting only. The close-as-superseded action on #4124 (and #4122) was already taken, correctly, before this bead existed, by a maintainer (Bella-Giraffety) with real merge/close authority -- and the underlying #4122->#4457 replacement flow was itself already run through a full 15+5+5 PR Sheriff evidence process per #4457's own body (R06). Re-doing that work, second-guessing the close, or editing #4123's stale needs-triage label would exceed this pass's granted authority; a durable audit report is the correct deliverable."},
+      {"id": "P04", "lens": "duplicate/sibling disposition", "verdict": "approve", "summary": "Three PRs carried the identical predicate-relaxation fix under two bead IDs: #4122 (refinery temp-merge, gt-thv2d) and #4124 (refinery temp-merge, gt-dky8e) both correctly superseded-and-closed in favor of the single convergent #4457; #4123 (athosmartins' own hand-authored cherry-pick) is a genuinely distinct dead end, closed by the author himself for a cross-repo-push-policy reason unrelated to the technical fix, never part of the #4457 replacement chain, and correctly left unmerged. No orphaned duplicate requires further action; three-way duplication collapsed to one merged fix is the cleanup-first-correct outcome."},
+      {"id": "P05", "lens": "evidence-completeness / schema fit", "verdict": "approve-with-changes", "summary": "Initial draft risked treating gh API's mergedAt/mergeCommit fields on #4457 as sufficient proof by themselves. Correction applied: added an independent git-level ancestry check (git merge-base --is-ancestor) and two independent content-level checks (fix logic present via git show, and regression tests present via git show) rather than relying on GitHub's report or #4457's own body claims alone -- all three now recorded in checker.txt/evidence.json (R07-R09). schema fields set to mode='confirmed_prior_disposition' / closure state='closed' (not 'deferred'), matching the fact that the replacement has already merged and both original PRs are already closed."}
+    ]
+  },
+  "cleanup_first": {
+    "assessment": "convergent",
+    "rationale": "#4457's merged fix adds a single, narrowly-scoped predicate exception (deacon rig accepts the town-wide Dolt DB name) to one existing check function, and it collapsed three separate PRs carrying overlapping/duplicate intent (#4122, #4123, #4124) into one merged, tested replacement. No bandaid, workaround, or patch-on-patch pattern found in the merged change. This review pass itself introduces no code.",
+    "prohibited_patterns": [
+      {"kind": "bandaid", "present": false},
+      {"kind": "workaround_layer", "present": false},
+      {"kind": "compatibility_shim", "present": false},
+      {"kind": "patch_on_patch", "present": false},
+      {"kind": "scope_creep", "present": false}
+    ]
+  },
+  "enhancement_approval": {"required": false, "required_reason": "kind/bug, not a feature", "approved": false, "approver": null},
+  "verification": {
+    "focused_checks": [
+      {"name": "merge-commit ancestry", "outcome": "pass", "reason": "git merge-base --is-ancestor e6b7c2368622edf490a425b2b261b20ac159a979 upstream/main confirms the merge commit is on current upstream/main."},
+      {"name": "fix-logic presence", "outcome": "pass", "reason": "git show upstream/main:internal/doctor/rig_config_sync_check.go confirms the deacon/townDB acceptance exception is still live in RigConfigSyncCheck.Run()."},
+      {"name": "regression-test presence", "outcome": "pass", "reason": "git show upstream/main:internal/doctor/rig_config_sync_check_test.go confirms TestRigConfigSyncCheck_DeaconTownDoltDBNoMismatch and TestRigConfigSyncCheck_OrdinaryRigTownDoltDBMismatch are both present."}
+    ],
+    "ci_checks": [
+      {"name": "Test", "outcome": "pass", "subject": "PR #4457 @ merge (merged)"},
+      {"name": "Lint", "outcome": "pass", "subject": "PR #4457 @ merge (merged)"},
+      {"name": "Integration Tests", "outcome": "pass", "subject": "PR #4457 @ merge (merged)"},
+      {"name": "Windows Smoke Test", "outcome": "pass", "subject": "PR #4457 @ merge (merged)"},
+      {"name": "Reject go.mod replace directives", "outcome": "pass", "subject": "PR #4457 @ merge (merged)"},
+      {"name": "Reject issues.jsonl", "outcome": "pass", "subject": "PR #4457 @ merge (merged)"},
+      {"name": "Test", "outcome": "fail", "subject": "PR #4124 @ push (original, superseded)"},
+      {"name": "Lint", "outcome": "fail", "subject": "PR #4124 @ push (original, superseded)"},
+      {"name": "Windows Smoke Test", "outcome": "fail", "subject": "PR #4124 @ push (original, superseded)"},
+      {"name": "Integration Tests", "outcome": "pass", "subject": "PR #4124 @ push (original, superseded)"}
+    ]
+  },
+  "replacement_flow": {
+    "required": true,
+    "mode": "confirmed_prior_disposition",
+    "state": "closed",
+    "original_change_url": "https://github.com/gastownhall/gastown/pull/4124",
+    "replacement_change_url": "https://github.com/gastownhall/gastown/pull/4457",
+    "duplicate_change_urls": [
+      "https://github.com/gastownhall/gastown/pull/4122",
+      "https://github.com/gastownhall/gastown/pull/4123"
+    ],
+    "replacement_branch": "polecat/railroad/gt-65ql-pr4122-deacon-town-db",
+    "replacement_commit_refs": ["d0b0e435c2616325d22d9a2cfd82321cee631faa"],
+    "replacement_merge_commit": "e6b7c2368622edf490a425b2b261b20ac159a979",
+    "original_author": "athosmartins",
+    "replacement_author": "Bella-Giraffety",
+    "attribution": {
+      "required": true,
+      "required_reason": "Replacement carries forward the accepted bug-fix intent from #4122/#4124 by athosmartins (via polecat rictus).",
+      "preserved": "full",
+      "method": "co_authored_by",
+      "gap": null
+    },
+    "superseded_closure": {"required": true, "state": "closed", "closure_intent_ref": "R01", "replacement_merge_ref": "e6b7c2368622edf490a425b2b261b20ac159a979", "closure_ref": "https://github.com/gastownhall/gastown/pull/4124#issuecomment-4936450894"}
+  },
+  "blocker_scan": {
+    "scanned_sources": ["labels", "pr_comments", "review_comments", "ci_checks", "git_diff", "git_log_ancestry", "related_issue_state", "duplicate_pr_search"],
+    "unresolved_blockers_found": false,
+    "residual_gaps_found": true,
+    "residual_gaps": [
+      "PR #4123 (the author's own hand-authored, never-merged cherry-pick) still carries only the stale status/needs-triage label 3 months after being closed by its own author -- label edit is out of this bead's authority",
+      "No open GitHub issue references gt-dky8e/gt-thv2d/PR #4124 specifically; the one topically-adjacent issue (#3058) is already closed and describes an unrelated code path -- nothing to link or disposition"
+    ],
+    "summary": "No blockers remain on PR #4124 itself -- it is fully and correctly resolved (closed, superseded, replacement merged and verified live on main, regression tests present). The residual gap above is a pre-existing label-hygiene item belonging to a maintainer, not to this review."
+  },
+  "gates": [
+    {"name": "branch-hygiene merge-gate", "applicable": false, "reason": "No new Sheriff-authored replacement PR is being opened or recommended in this pass; gate scope per skill.md is pre-PR-creation only. See R17."}
+  ],
+  "final": {
+    "verdict": "confirmed_resolved_no_action",
+    "decision_valid": true,
+    "merge_path_allowed": false,
+    "merge_path_note": "Not applicable -- the relevant merge (PR #4457 into gastownhall/gastown main) already happened via a maintainer-authorized flow, itself carrying its own complete 15+5+5 PR Sheriff evidence trail, before this review bead existed. No refinery/MQ route was used for that merge or by this review.",
+    "target_change_url": "https://github.com/gastownhall/gastown/pull/4457",
+    "decided_by": "gastown/polecats/deathclaw",
+    "decided_at": "2026-08-19T11:02:12Z",
+    "reason": "PR #4124 was correctly closed as superseded by replacement PR #4457, which independently merged to gastownhall/gastown main on 2026-07-09 (commit e6b7c2368622edf490a425b2b261b20ac159a979). This review pass re-verified every load-bearing fact from first principles rather than trusting the prior close comment: the merge commit is confirmed on current upstream/main, the described predicate fix and its regression tests are confirmed still present in current main's rig_config_sync_check.go/_test.go, attribution to the original contributor (athosmartins, via polecat rictus) is preserved via Co-authored-by trailers, and #4457's CI was fully green at merge versus #4124's own Test/Lint/Windows-Smoke-Test failures at push. The three duplicate PRs carrying this fix (#4122, #4123, #4124) are each correctly disposed: #4122 and #4124 superseded-and-closed in favor of #4457, #4123 independently closed by its own author for an unrelated cross-repo-push-policy reason and never part of the merge chain. No related GitHub issue remains open that this chain should address. No further action is required on PR #4124; no code, comment, label, or merge action was taken by this review pass.",
+    "required_actions": [
+      "None required for PR #4124 -- fully resolved.",
+      "Optional/low-priority: a maintainer could correct PR #4123's stale status/needs-triage label (out of this bead's authority).",
+      "No action tied to this PR chain for any GitHub issue -- none reference it, and the one topically-adjacent issue (#3058) is unrelated and already closed."
+    ]
+  }
+}
