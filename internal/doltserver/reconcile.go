@@ -128,6 +128,99 @@ func exportDoltRevision(townRoot, db, label, ref, outputDir string, files map[st
 	return writePreservedFile(outputDir, filepath.Join(label, "dolt_log.json"), []byte(history), files)
 }
 
+// ReconciliationVerification reports whether every issue preserved in a
+// reconciliation bundle is present in the live database after reconstruction.
+type ReconciliationVerification struct {
+	Database      string   `json:"database"`
+	ExpectedCount int      `json:"expected_count"`
+	CurrentCount  int      `json:"current_count"`
+	MissingIDs    []string `json:"missing_ids"`
+}
+
+// OK reports whether no preserved issue was lost.
+func (v ReconciliationVerification) OK() bool {
+	return len(v.MissingIDs) == 0
+}
+
+// VerifyReconciliationImport compares the issue IDs preserved on both heads
+// of a reconciliation bundle (written by CreateReconciliationBundle) against
+// the issue IDs currently live in db, and reports any that are missing. It
+// performs no writes.
+//
+// This is the check the 2026-08-17 incident lacked: 31 gastown issues,
+// including 3 open P0s, were dropped during a manual post-bundle
+// reconstruction with no automated verification to catch the loss.
+func VerifyReconciliationImport(townRoot, bundleDir, db string) (ReconciliationVerification, error) {
+	expected := make(map[string]bool)
+	for _, label := range []string{"local", "remote"} {
+		ids, err := readBundleIssueIDs(filepath.Join(bundleDir, label, "issues.json"))
+		if err != nil {
+			return ReconciliationVerification{}, fmt.Errorf("reading %s issue snapshot: %w", label, err)
+		}
+		for _, id := range ids {
+			expected[id] = true
+		}
+	}
+	if len(expected) == 0 {
+		return ReconciliationVerification{}, fmt.Errorf("bundle %s has no preserved issues to verify against", bundleDir)
+	}
+
+	currentJSON, err := reconciliationQueryJSON(townRoot, fmt.Sprintf("USE `%s`; SELECT id FROM issues", db))
+	if err != nil {
+		return ReconciliationVerification{}, fmt.Errorf("querying live issues: %w", err)
+	}
+	current, err := parseIssueIDRows(currentJSON)
+	if err != nil {
+		return ReconciliationVerification{}, fmt.Errorf("parsing live issue IDs: %w", err)
+	}
+	currentSet := make(map[string]bool, len(current))
+	for _, id := range current {
+		currentSet[id] = true
+	}
+
+	var missing []string
+	for id := range expected {
+		if !currentSet[id] {
+			missing = append(missing, id)
+		}
+	}
+	sort.Strings(missing)
+
+	return ReconciliationVerification{
+		Database:      db,
+		ExpectedCount: len(expected),
+		CurrentCount:  len(current),
+		MissingIDs:    missing,
+	}, nil
+}
+
+func readBundleIssueIDs(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parseIssueIDRows(string(data))
+}
+
+func parseIssueIDRows(data string) ([]string, error) {
+	var parsed struct {
+		Rows []map[string]any `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(data), &parsed); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(parsed.Rows))
+	for _, row := range parsed.Rows {
+		if id, ok := row["id"].(string); ok && id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 func writePreservedFile(root, relative string, data []byte, files map[string]string) error {
 	if !strings.HasSuffix(string(data), "\n") {
 		data = append(data, '\n')
