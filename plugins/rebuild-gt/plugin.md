@@ -66,9 +66,14 @@ Before building, verify the source repo is clean and on main:
 
 ```bash
 cd ~/gt/gastown/mayor/rig
-git status --porcelain  # Must be clean
+git status --porcelain  # Must be clean, ignoring .beads/config.yaml and .beads.gate.lock
 git branch --show-current  # Must be "main"
 ```
+
+`.beads/config.yaml` and `.beads.gate.lock` are machine-local runtime
+artifacts, not source changes, and are always present in the canonical
+checkout — porcelain lines for only those two paths do not count as dirty
+(gt-svqh).
 
 If either check fails, skip the rebuild and record a wisp.
 
