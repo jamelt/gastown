@@ -41,6 +41,7 @@ import (
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/wisp"
 	"github.com/steveyegge/gastown/internal/witness"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -152,6 +153,17 @@ const (
 	// doctorMolCooldown is the minimum interval between mol-dog-doctor molecules.
 	// Configurable via operational.daemon.doctor_mol_cooldown.
 	doctorMolCooldown = 5 * time.Minute
+
+	// gracefulShutdownTimeout bounds how long StopDaemon waits for the
+	// daemon's own graceful shutdown() to finish before force-killing it.
+	// shutdown() runs sequentially: pushDoltRemotes (bounded to
+	// doltRemotesShutdownBudget = 10s), then DoltServerManager.stopLocked
+	// (up to its own 30s force-kill budget), then OTel provider shutdown (up
+	// to 5s) — a worst case of ~45s. A SIGKILL landing mid-journal-write in
+	// either the remotes push or Dolt's own stop can corrupt the database,
+	// requiring `dolt fsck` to recover, so this must clear that worst case
+	// with real margin rather than race it.
+	gracefulShutdownTimeout = 60 * time.Second
 )
 
 const beadsModulePath = "github.com/steveyegge/beads"
@@ -497,9 +509,10 @@ func (d *Daemon) Run() (err error) {
 
 	// Update state
 	state := &State{
-		Running:   true,
-		PID:       os.Getpid(),
-		StartedAt: time.Now(),
+		Running:      true,
+		PID:          os.Getpid(),
+		StartedAt:    time.Now(),
+		BinaryCommit: version.CurrentCommit(),
 	}
 	if err := SaveState(d.config.TownRoot, state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
@@ -2332,8 +2345,11 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		d.logger.Println("KRC pruner stopped")
 	}
 
-	// Push Dolt remotes before stopping the server (if patrol is enabled)
-	d.pushDoltRemotes()
+	// Push Dolt remotes before stopping the server (if patrol is enabled).
+	// Bounded so a slow/unreachable remote can't block StopDaemon's
+	// graceful-shutdown window indefinitely (gt-if5q); remaining databases
+	// are just picked up on the next periodic dolt_remotes cycle.
+	d.pushDoltRemotesWithDeadline(time.Now().Add(doltRemotesShutdownBudget))
 
 	// Stop Dolt server if we're managing it
 	if d.doltServer != nil && d.doltServer.IsEnabled() && !d.doltServer.IsExternal() {
@@ -2525,12 +2541,18 @@ func StopDaemon(townRoot string) error {
 		return fmt.Errorf("sending termination signal: %w", err)
 	}
 
-	// Wait a bit for graceful shutdown
-	time.Sleep(constants.ShutdownNotifyDelay)
-
-	// Check if still running
+	// Wait for graceful shutdown to actually finish, not just a fixed delay.
+	// shutdown() can take up to ~45s in the worst case (bounded remotes push,
+	// Dolt's own stop budget, and OTel flush) — SIGKILLing before it
+	// completes can corrupt the Dolt database or leave beads stores/state
+	// uncleaned. Poll for exit up to gracefulShutdownTimeout; only
+	// force-kill if still alive after that.
+	deadline := time.Now().Add(gracefulShutdownTimeout)
+	for time.Now().Before(deadline) && isProcessAlive(process) {
+		time.Sleep(constants.ShutdownNotifyDelay)
+	}
 	if isProcessAlive(process) {
-		// Still running, force kill
+		// Still running after the grace period, force kill.
 		_ = sendKillSignal(process)
 	}
 
