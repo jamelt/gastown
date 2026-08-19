@@ -1295,6 +1295,16 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 	// assignee set) after removal, permanently stuck with no one working on them.
 	m.unassignWorkBeads(name)
 
+	// Kill any lingering tmux session for this identity. Without this, a
+	// removed polecat's worktree and beads record disappear but its tmux
+	// session can outlive them — a zombie that `gt polecat list` reports
+	// (session alive, no directory) while `gt polecat status` reports "not
+	// found" for the same name, and whose identity can be handed to a later
+	// dispatch while the stale session is still attached (gt-rmwp).
+	if err := m.killExistingPolecatSession(name, "remove"); err != nil {
+		style.PrintWarning("could not kill session for %s during removal: %v", name, err)
+	}
+
 	// Best-effort: Push the polecat's branch to remote before removing the worktree.
 	// This preserves committed work that hasn't been pushed yet — without this,
 	// nuking a stalled polecat (e.g., after disk space recovery) permanently loses
@@ -1427,7 +1437,7 @@ func (m *Manager) ReclaimBrokenIdlePolecat(name string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if current.State != StateIdle || current.Issue != "" {
+	if !isReuseCandidateState(current.State) || current.Issue != "" {
 		return fmt.Errorf("not a clean idle polecat: state=%s issue=%s", current.State, current.Issue)
 	}
 
@@ -2395,6 +2405,16 @@ func (m *Manager) List() ([]*Polecat, error) {
 // StateIdle and StateDone fall through to the real reuse predicates.
 func isReuseCandidateState(s State) bool {
 	return s == StateIdle || s == StateDone
+}
+
+// IsReuseCandidateState exposes isReuseCandidateState so callers outside this
+// package (e.g. broken-idle-worktree reclaim before allocation) classify
+// reuse-eligible states the same way FindIdlePolecats does. gt-rmwp: a
+// StateIdle-only copy of this check let StateDone identities — the common
+// case once a polecat finishes work — with a missing worktree stay
+// registered forever, never reclaimed and never disqualified.
+func IsReuseCandidateState(s State) bool {
+	return isReuseCandidateState(s)
 }
 
 func (m *Manager) FindIdlePolecat() (*Polecat, error) {
