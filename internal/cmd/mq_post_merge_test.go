@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -34,12 +35,13 @@ func (m *fakeMQPostMergeManager) PostMergeMR(mr *refinery.MergeRequest) (*refine
 }
 
 type fakeMQPostMergeGit struct {
-	verifyErr error
-	openPR    bool
-	deleteErr error
-	remoteTip string
-	localHead string
-	tipErr    error
+	verifyErr    error
+	tipVerifyErr error
+	openPR       bool
+	deleteErr    error
+	remoteTip    string
+	localHead    string
+	tipErr       error
 
 	verifiedCommits []string
 	deletedBranches []string
@@ -47,8 +49,15 @@ type fakeMQPostMergeGit struct {
 	localDeleted    []string
 }
 
+// VerifyPushedCommitReachableFromPushTarget is called twice on the happy
+// path: once by verifyMQPostMergeProof against the MR's submitted commit_sha,
+// and again by cleanupMQPostMergeBranch against the freshly-read remote tip.
+// tipVerifyErr lets tests fail only the second call.
 func (g *fakeMQPostMergeGit) VerifyPushedCommitReachableFromPushTarget(_, _, commit string) error {
 	g.verifiedCommits = append(g.verifiedCommits, commit)
+	if len(g.verifiedCommits) > 1 {
+		return g.tipVerifyErr
+	}
 	return g.verifyErr
 }
 
@@ -122,8 +131,9 @@ func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) 
 	if mgr.postMergeMR != mgr.mr {
 		t.Fatal("PostMerge did not use the verified MR snapshot")
 	}
-	if len(rigGit.verifiedCommits) != 1 || rigGit.verifiedCommits[0] != mgr.mr.CommitSHA {
-		t.Fatalf("verified commits = %v, want [%s]", rigGit.verifiedCommits, mgr.mr.CommitSHA)
+	wantVerified := []string{mgr.mr.CommitSHA, mgr.mr.CommitSHA}
+	if !reflect.DeepEqual(rigGit.verifiedCommits, wantVerified) {
+		t.Fatalf("verified commits = %v, want %v", rigGit.verifiedCommits, wantVerified)
 	}
 	if !cleanup.RemoteDeleted || len(rigGit.deletedBranches) != 1 || rigGit.deletedBranches[0] != mgr.mr.Branch {
 		t.Fatalf("remote delete = cleanup=%+v branches=%v", cleanup, rigGit.deletedBranches)
@@ -133,6 +143,52 @@ func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) 
 	}
 	if !cleanup.LocalDeleted || len(rigGit.localDeleted) != 1 || rigGit.localDeleted[0] != mgr.mr.Branch {
 		t.Fatalf("local delete = cleanup=%+v local=%v", cleanup, rigGit.localDeleted)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_StaleCommitSHAUsesFreshRemoteTip covers gt-twuj:
+// a conflict-resolution push after MR submission moves the branch tip without
+// updating the MR bead's recorded commit_sha. The delete's compare-and-swap
+// must target the branch's current remote tip, not the stale submitted head.
+func TestRunVerifiedMQPostMerge_StaleCommitSHAUsesFreshRemoteTip(t *testing.T) {
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	freshTip := "eb20c1f259fresh"
+	rigGit := &fakeMQPostMergeGit{remoteTip: freshTip, localHead: freshTip}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup.RemoteDeleted = false, cleanup=%+v", cleanup)
+	}
+	if len(rigGit.deletedHeads) != 1 || rigGit.deletedHeads[0] != freshTip {
+		t.Fatalf("deleted heads = %v, want [%s] (fresh tip, not stale commit_sha %s)", rigGit.deletedHeads, freshTip, mgr.mr.CommitSHA)
+	}
+	if !cleanup.LocalDeleted || len(rigGit.localDeleted) != 1 || rigGit.localDeleted[0] != mgr.mr.Branch {
+		t.Fatalf("local delete = cleanup=%+v local=%v, want deleted at fresh tip %s", cleanup, rigGit.localDeleted, freshTip)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_FreshTipNotReachableFailsClosed covers the
+// reachability re-check added alongside the gt-twuj fix: the freshly-read
+// remote tip is a new, unverified value (unlike the already-proven submitted
+// commit_sha), so it must be confirmed reachable from the target branch
+// before it's used as the delete's compare-and-swap reference.
+func TestRunVerifiedMQPostMerge_FreshTipNotReachableFailsClosed(t *testing.T) {
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	freshTip := "eb20c1f259fresh"
+	rigGit := &fakeMQPostMergeGit{remoteTip: freshTip, localHead: freshTip, tipVerifyErr: errors.New("not reachable")}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	if err == nil || !strings.Contains(err.Error(), "not proven on") {
+		t.Fatalf("runVerifiedMQPostMerge error = %v, want fresh-tip reachability failure", err)
+	}
+	if cleanup.RemoteDeleted || len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("remote branch deleted despite unproven fresh tip: cleanup=%+v branches=%v", cleanup, rigGit.deletedBranches)
+	}
+	if len(rigGit.localDeleted) != 0 {
+		t.Fatalf("local branch deleted despite unproven fresh tip: %v", rigGit.localDeleted)
 	}
 }
 

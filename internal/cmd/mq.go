@@ -646,23 +646,35 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 
 	// Deleting a branch with an open PR causes GitHub to auto-close the PR as
 	// "closed" (not "merged"), destroying the PR audit trail. (gas-fk4)
+	var remoteTip string
 	if rigGit.HasOpenPullRequest(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: cleanup.Branch, HeadSHA: expectedHead}) {
 		cleanup.OpenPR = true
 	} else {
-		remoteTip, err := rigGit.PushRemoteBranchTip("origin", cleanup.Branch)
+		tip, err := rigGit.PushRemoteBranchTip("origin", cleanup.Branch)
 		if err != nil {
 			return cleanup, fmt.Errorf("remote branch delete %s: read remote branch tip: %w", cleanup.Branch, err)
 		}
-		if strings.TrimSpace(remoteTip) == "" {
+		remoteTip = strings.TrimSpace(tip)
+		if remoteTip == "" {
 			cleanup.AlreadyGone = true
-		} else if err := rigGit.DeleteRemoteBranchIfAt("origin", cleanup.Branch, expectedHead); err != nil {
-			return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, expectedHead, err)
+		} else if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", mr.TargetBranch, remoteTip); err != nil {
+			return cleanup, fmt.Errorf("remote branch delete %s: current tip %s not proven on %s: %w", cleanup.Branch, remoteTip, mr.TargetBranch, err)
+		} else if err := rigGit.DeleteRemoteBranchIfAt("origin", cleanup.Branch, remoteTip); err != nil {
+			// expectedHead (mr.CommitSHA) is captured at MR-submit time and goes
+			// stale if a conflict-resolution push later lands a new commit on the
+			// same branch, so the delete's compare-and-swap must target the
+			// branch's current remote tip instead (gt-twuj).
+			return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, remoteTip, err)
 		} else {
 			cleanup.RemoteDeleted = true
 		}
 	}
 
-	if deleteMQPostMergeLocalBranchIfAt(rigGit, cleanup.Branch, expectedHead) {
+	deleteHead := expectedHead
+	if remoteTip != "" {
+		deleteHead = remoteTip
+	}
+	if deleteMQPostMergeLocalBranchIfAt(rigGit, cleanup.Branch, deleteHead) {
 		cleanup.LocalDeleted = true
 	}
 	return cleanup, nil
