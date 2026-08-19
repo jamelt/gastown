@@ -293,6 +293,36 @@ func TestCleanupStatusBlockerForRecovery_PartialSpawnWithoutHook(t *testing.T) {
 	}
 }
 
+func TestDisplayedCleanupStatusMatchesWhatTheVerdictDecidedOn(t *testing.T) {
+	// Regression test for gt-ve9o: check-recovery must never print a raw
+	// stale/unknown cleanup status next to a verdict (e.g. SAFE_TO_NUKE) that
+	// was only reached because that same raw value was ignored in favor of
+	// live evidence.
+	tests := []struct {
+		name                string
+		status              polecat.CleanupStatus
+		ignoreCleanupStatus bool
+		want                polecat.CleanupStatus
+	}{
+		{name: "not ignored reports raw clean", status: polecat.CleanupClean, ignoreCleanupStatus: false, want: polecat.CleanupClean},
+		{name: "not ignored reports raw unknown", status: polecat.CleanupUnknown, ignoreCleanupStatus: false, want: polecat.CleanupUnknown},
+		{name: "not ignored reports raw dirty status", status: polecat.CleanupUnpushed, ignoreCleanupStatus: false, want: polecat.CleanupUnpushed},
+		{name: "ignored unknown displays as clean, not unknown", status: polecat.CleanupUnknown, ignoreCleanupStatus: true, want: polecat.CleanupClean},
+		{name: "ignored stale dirty status displays as clean", status: polecat.CleanupUnpushed, ignoreCleanupStatus: true, want: polecat.CleanupClean},
+		{name: "ignored missing status displays as clean", status: "", ignoreCleanupStatus: true, want: polecat.CleanupClean},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := polecat.WorkstateInput{CleanupStatus: tt.status, IgnoreCleanupStatus: tt.ignoreCleanupStatus}
+			got := displayedCleanupStatus(input)
+			if got != tt.want {
+				t.Errorf("displayedCleanupStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 	tests := []struct {
 		name         string
