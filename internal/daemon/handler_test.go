@@ -127,8 +127,13 @@ func TestDetectStaleWorkingDogs_KillsSessionBeforeClearing(t *testing.T) {
 
 	oldSocket := tmux.GetDefaultSocket()
 	socketName := fmt.Sprintf("gt-test-dog-stale-%d", time.Now().UnixNano())
+	// Pre-kill any stale server from a prior crash.
+	_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
 	tmux.SetDefaultSocket(socketName)
-	t.Cleanup(func() { tmux.SetDefaultSocket(oldSocket) })
+	t.Cleanup(func() {
+		tmux.SetDefaultSocket(oldSocket)
+		_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
+	})
 
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
@@ -533,8 +538,13 @@ func TestCleanupStuckDogs_ClearsAgentDeadWorker(t *testing.T) {
 
 	oldSocket := tmux.GetDefaultSocket()
 	socketName := fmt.Sprintf("gt-test-dog-cleanup-%d", time.Now().UnixNano())
+	// Pre-kill any stale server from a prior crash.
+	_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
 	tmux.SetDefaultSocket(socketName)
-	t.Cleanup(func() { tmux.SetDefaultSocket(oldSocket) })
+	t.Cleanup(func() {
+		tmux.SetDefaultSocket(oldSocket)
+		_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
+	})
 
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)

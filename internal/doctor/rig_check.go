@@ -2074,5 +2074,6 @@ func RigChecks() []Check {
 		NewBeadsConfigValidCheck(),
 		NewBeadsRedirectCheck(),
 		NewTestutilSymlinkCheck(),
+		NewOrphanedTmuxSocketsCheck(),
 	}
 }
