@@ -252,11 +252,26 @@ func buildPolecatInventoryItemFromEvidenceWithBD(rigName, polecatName string, fi
 	if fields != nil && !activeWorkEvidence.BlocksCleanup && item.Issue == "" {
 		partialSpawnWithoutHook := computePartialSpawnWithoutDurableHook(bd, fields, rigName, polecatName, item.Issue)
 		input.PartialSpawnWithoutDurableHook = partialSpawnWithoutHook
+		// When partial spawn is detected with unknown/missing cleanup_status,
+		// we can safely ignore the status (same as check-recovery's edge case logic).
+		// This reduces disagreement between list and check-recovery displays.
+		if partialSpawnWithoutHook && (item.CleanupStatus == "" || item.CleanupStatus == string(polecat.CleanupUnknown)) {
+			input.IgnoreCleanupStatus = true
+		}
 	}
 
 	input.State = item.State
 	applyMQIndexToWorkstateInput(&input, fields, mq)
 	item.Disposition = polecat.DecideWorkstate(input)
+
+	// Mirror check-recovery's gt-ve9o fix: display the cleanup status the verdict
+	// actually decided on, not the raw stale/unknown value. When IgnoreCleanupStatus
+	// is true, show CleanupClean instead of the stale raw string, so list's display
+	// doesn't contradict its own verdict.
+	if input.IgnoreCleanupStatus {
+		item.CleanupStatus = string(polecat.CleanupClean)
+	}
+
 	return item
 }
 
