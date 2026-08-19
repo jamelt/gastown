@@ -94,29 +94,138 @@ type SafetyCheckResult struct {
 	ActiveMR      string
 	OpenMR        string
 	GitState      *GitState
+
+	// Fields below let dry-run display render from an already-computed result
+	// instead of re-running the bd/git queries checkPolecatSafety just made.
+	HasAgentBead        bool
+	HasPolecatInfo      bool
+	HasBranchInfo       bool
+	GitCheckFailed      bool
+	ActiveMRBlocked     bool
+	ActiveMRBlockReason string
+}
+
+// safetyCheckContext holds rig-scoped data batch-fetched once so a scan over
+// many polecats in the same rig doesn't reissue the same expensive Dolt
+// queries per polecat. nil means "no shared context" — checkPolecatSafety
+// falls back to its normal per-call bd queries.
+type safetyCheckContext struct {
+	agentBeads     map[string]*beads.Issue
+	openMRByBranch map[string]*beads.Issue
+}
+
+// newSafetyCheckContext batch-fetches agent beads and open merge requests for
+// a rig once. This is what makes `gt polecat nuke <rig> --all --dry-run`
+// bounded on large/recovery-heavy rigs: without it, checkPolecatSafety issued
+// a full agent-bead lookup and a full merge-request list scan per polecat,
+// so total Dolt round trips grew with polecat count (gt-j2lu).
+//
+// Returns nil (callers fall back to per-polecat live queries) if either batch
+// query fails. Safety-check correctness matters more than the optimization —
+// a partially-populated context could silently misreport an existing open MR
+// or hooked agent bead as absent, which would be an unsafe false-negative on
+// a destructive operation.
+func newSafetyCheckContext(bd *beads.Beads) *safetyCheckContext {
+	agents, err := bd.ListAgentBeads()
+	if err != nil {
+		return nil
+	}
+	mrs, err := bd.ListMergeRequests(beads.ListOptions{Status: "all", Label: "gt:merge-request"})
+	if err != nil {
+		return nil
+	}
+	return &safetyCheckContext{
+		agentBeads:     agents,
+		openMRByBranch: indexOpenMRsByBranch(mrs),
+	}
+}
+
+// buildSafetyCheckContexts builds one safetyCheckContext per distinct rig
+// referenced by targets, so a safety scan issues O(rigs) batch queries
+// instead of O(polecats) individual ones.
+func buildSafetyCheckContexts(targets []polecatTarget) map[string]*safetyCheckContext {
+	ctxByRig := make(map[string]*safetyCheckContext, len(targets))
+	for _, t := range targets {
+		if _, ok := ctxByRig[t.r.Path]; ok {
+			continue
+		}
+		ctxByRig[t.r.Path] = newSafetyCheckContext(beads.New(t.r.Path))
+	}
+	return ctxByRig
+}
+
+// indexOpenMRsByBranch mirrors Beads.FindMRForBranch's matching rules (skip
+// closed MRs, key on the "branch:" field) so a batch lookup returns the same
+// answer as the per-call query it replaces.
+func indexOpenMRsByBranch(issues []*beads.Issue) map[string]*beads.Issue {
+	byBranch := make(map[string]*beads.Issue, len(issues))
+	for _, issue := range issues {
+		if issue.Status == "closed" {
+			continue
+		}
+		fields := beads.ParseMRFields(issue)
+		if fields == nil || fields.Branch == "" {
+			continue
+		}
+		if _, exists := byBranch[fields.Branch]; !exists {
+			byBranch[fields.Branch] = issue
+		}
+	}
+	return byBranch
+}
+
+// lookupAgentBead resolves an agent bead either from the shared batch context
+// or, when sharedCtx is nil, via a live bd call.
+func lookupAgentBead(bd *beads.Beads, sharedCtx *safetyCheckContext, agentBeadID string) (*beads.Issue, *beads.AgentFields, error) {
+	if sharedCtx == nil {
+		return bd.GetAgentBead(agentBeadID)
+	}
+	issue, ok := sharedCtx.agentBeads[agentBeadID]
+	if !ok {
+		return nil, nil, nil
+	}
+	return issue, parsePolecatAgentFields(issue), nil
+}
+
+// lookupOpenMRForBranch resolves the open MR for a branch either from the
+// shared batch context or, when sharedCtx is nil, via a live bd call.
+func lookupOpenMRForBranch(bd *beads.Beads, sharedCtx *safetyCheckContext, branch string) (*beads.Issue, error) {
+	if sharedCtx == nil {
+		return bd.FindMRForBranch(branch)
+	}
+	return sharedCtx.openMRByBranch[branch], nil
 }
 
 // checkPolecatSafety performs safety checks before destructive operations.
+// sharedCtx may be nil, in which case each check queries bd live; pass a
+// context built by newSafetyCheckContext to reuse batch-fetched rig data
+// across many calls (see buildSafetyCheckContexts).
 // Returns nil if the polecat is safe to operate on, or a SafetyCheckResult with reasons if blocked.
-func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
+func checkPolecatSafety(target polecatTarget, sharedCtx *safetyCheckContext) *SafetyCheckResult {
 	result := &SafetyCheckResult{
 		Polecat: fmt.Sprintf("%s/%s", target.rigName, target.polecatName),
 	}
 
 	// Get polecat info for branch name
 	polecatInfo, infoErr := target.mgr.Get(target.polecatName)
+	result.HasPolecatInfo = infoErr == nil && polecatInfo != nil
+	if result.HasPolecatInfo {
+		result.HasBranchInfo = polecatInfo.Branch != ""
+	}
 
 	// Check 1: Unpushed commits via cleanup_status or git state
 	bd := beads.New(target.r.Path)
 	agentBeadID := polecatBeadIDForRig(target.r, target.rigName, target.polecatName)
-	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
+	agentIssue, fields, err := lookupAgentBead(bd, sharedCtx, agentBeadID)
 
 	if err != nil || fields == nil {
 		// No agent bead - fall back to git check
+		result.HasAgentBead = false
 		if infoErr == nil && polecatInfo != nil {
 			gitState, gitErr := getGitState(polecatInfo.ClonePath)
 			result.GitState = gitState
 			if gitErr != nil {
+				result.GitCheckFailed = true
 				result.Reasons = append(result.Reasons, "cannot check git state")
 			} else if !gitState.Clean {
 				if gitState.DetachedHead {
@@ -133,6 +242,7 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			}
 		}
 	} else {
+		result.HasAgentBead = true
 		currentIssue := ""
 		if infoErr == nil && polecatInfo != nil {
 			currentIssue = polecatInfo.Issue
@@ -223,14 +333,16 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		if fields.ActiveMR != "" {
 			result.ActiveMR = fields.ActiveMR
 			if blocker := activeMRAssessment.Reason; activeMRAssessment.Pending && blocker != "" {
+				result.ActiveMRBlocked = true
+				result.ActiveMRBlockReason = blocker
 				result.Reasons = append(result.Reasons, blocker)
 			}
 		}
 	}
 
 	// Check 2: Open MR beads for this branch
-	if infoErr == nil && polecatInfo != nil && polecatInfo.Branch != "" {
-		mr, mrErr := bd.FindMRForBranch(polecatInfo.Branch)
+	if result.HasBranchInfo {
+		mr, mrErr := lookupOpenMRForBranch(bd, sharedCtx, polecatInfo.Branch)
 		if mrErr != nil {
 			result.Reasons = append(result.Reasons, fmt.Sprintf("open_mr_lookup_error: %v", mrErr))
 		} else if mr != nil {
@@ -285,83 +397,67 @@ func formatSafetyCheckBlockers(blocked []*SafetyCheckResult) string {
 	return strings.Join(parts, " | ")
 }
 
-// displayDryRunSafetyCheck shows safety check status for dry-run mode. It returns true when a normal nuke would refuse.
-func displayDryRunSafetyCheck(target polecatTarget) bool {
+// displayDryRunSafetyCheck shows safety check status for dry-run mode,
+// rendered entirely from an already-computed result. It returns true when a
+// normal nuke would refuse.
+//
+// This takes a *SafetyCheckResult instead of a polecatTarget so a bulk
+// `--all` dry-run scan can compute checkPolecatSafety once per polecat and
+// reuse it here, instead of recomputing the same bd/git queries a second
+// time purely for display (gt-j2lu).
+func displayDryRunSafetyCheck(result *SafetyCheckResult) bool {
 	fmt.Printf("\n  Safety checks:\n")
-	result := checkPolecatSafety(target)
-	polecatInfo, infoErr := target.mgr.Get(target.polecatName)
-	bd := beads.New(target.r.Path)
-	agentBeadID := polecatBeadIDForRig(target.r, target.rigName, target.polecatName)
-	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
 
 	// Check 1: cleanup status or fallback git state
-	if err != nil || fields == nil {
-		if infoErr == nil && polecatInfo != nil {
-			gitState, gitErr := getGitState(polecatInfo.ClonePath)
-			if gitErr != nil {
-				fmt.Printf("    - Git state: %s\n", style.Warning.Render("cannot check"))
-			} else if gitState.Clean {
-				fmt.Printf("    - Git state: %s\n", style.Success.Render("clean"))
-			} else {
-				fmt.Printf("    - Git state: %s\n", style.Error.Render("dirty"))
-			}
-		} else {
+	if !result.HasAgentBead {
+		switch {
+		case !result.HasPolecatInfo:
 			fmt.Printf("    - Git state: %s\n", style.Dim.Render("unknown (no polecat info)"))
+		case result.GitCheckFailed:
+			fmt.Printf("    - Git state: %s\n", style.Warning.Render("cannot check"))
+		case result.GitState != nil && result.GitState.Clean:
+			fmt.Printf("    - Git state: %s\n", style.Success.Render("clean"))
+		default:
+			fmt.Printf("    - Git state: %s\n", style.Error.Render("dirty"))
 		}
 		fmt.Printf("    - Hook: %s\n", style.Dim.Render("unknown (no agent bead)"))
 	} else {
-		cleanupStatus := polecat.CleanupStatus(fields.CleanupStatus)
-		if cleanupStatus.IsSafe() {
-			fmt.Printf("    - Cleanup status: %s\n", style.Success.Render(string(cleanupStatus)))
-		} else if cleanupStatus.RequiresRecovery() {
-			fmt.Printf("    - Cleanup status: %s\n", style.Error.Render(string(cleanupStatus)))
+		if result.CleanupStatus.IsSafe() {
+			fmt.Printf("    - Cleanup status: %s\n", style.Success.Render(string(result.CleanupStatus)))
+		} else if result.CleanupStatus.RequiresRecovery() {
+			fmt.Printf("    - Cleanup status: %s\n", style.Error.Render(string(result.CleanupStatus)))
 		} else {
-			statusText := string(cleanupStatus)
+			statusText := string(result.CleanupStatus)
 			if statusText == "" {
 				statusText = "<missing>"
 			}
 			fmt.Printf("    - Cleanup status: %s\n", style.Warning.Render(statusText))
 		}
 
-		hookBead := agentIssue.HookBead
-		if hookBead == "" {
-			hookBead = fields.HookBead
-		}
-		if hookBead != "" {
-			hookedIssue, err := bd.Show(hookBead)
-			if err == nil && hookedIssue != nil && hookedIssue.Status == "closed" {
-				fmt.Printf("    - Hook: %s (%s, closed - stale)\n", style.Warning.Render("stale"), hookBead)
-			} else {
-				fmt.Printf("    - Hook: %s (%s)\n", style.Error.Render("has work"), hookBead)
-			}
-		} else {
+		if result.HookBead == "" {
 			fmt.Printf("    - Hook: %s\n", style.Success.Render("empty"))
+		} else if result.HookStale {
+			fmt.Printf("    - Hook: %s (%s, closed - stale)\n", style.Warning.Render("stale"), result.HookBead)
+		} else {
+			fmt.Printf("    - Hook: %s (%s)\n", style.Error.Render("has work"), result.HookBead)
 		}
 
-		if fields.ActiveMR != "" {
-			sourceHint := agentSourceIssueHint("", fields)
-			gitSafe := false
-			if infoErr == nil && polecatInfo != nil {
-				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
-			}
-			if blocker := activeMRBlocker(bd, fields.ActiveMR, sourceHint, true, gitSafe); blocker != "" {
-				fmt.Printf("    - Active MR: %s (%s)\n", style.Error.Render("blocked"), blocker)
+		if result.ActiveMR != "" {
+			if result.ActiveMRBlocked {
+				fmt.Printf("    - Active MR: %s (%s)\n", style.Error.Render("blocked"), result.ActiveMRBlockReason)
 			} else {
-				fmt.Printf("    - Active MR: %s (%s)\n", style.Success.Render("terminal"), fields.ActiveMR)
+				fmt.Printf("    - Active MR: %s (%s)\n", style.Success.Render("terminal"), result.ActiveMR)
 			}
 		}
 	}
 
 	// Check 2: Open MR
-	if infoErr == nil && polecatInfo != nil && polecatInfo.Branch != "" {
-		mr, mrErr := bd.FindMRForBranch(polecatInfo.Branch)
-		if mrErr == nil && mr != nil {
-			fmt.Printf("    - Open MR: %s (%s)\n", style.Error.Render("yes"), mr.ID)
-		} else {
-			fmt.Printf("    - Open MR: %s\n", style.Success.Render("none"))
-		}
-	} else {
+	if !result.HasBranchInfo {
 		fmt.Printf("    - Open MR: %s\n", style.Dim.Render("unknown (no branch info)"))
+	} else if result.OpenMR != "" {
+		fmt.Printf("    - Open MR: %s (%s)\n", style.Error.Render("yes"), result.OpenMR)
+	} else {
+		fmt.Printf("    - Open MR: %s\n", style.Success.Render("none"))
 	}
 
 	return result.Blocked
