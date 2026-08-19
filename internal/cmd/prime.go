@@ -1206,7 +1206,7 @@ func acquireIdentityLock(ctx RoleContext) error {
 	}
 
 	// Create lock for this worker directory
-	l := lock.New(ctx.WorkDir)
+	l := lock.New(filepath.Join(ctx.WorkDir, ".runtime", "agent.lock"))
 
 	// Determine session ID from environment or context
 	sessionID := os.Getenv("TMUX_PANE")

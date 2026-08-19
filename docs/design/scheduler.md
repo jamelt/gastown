@@ -426,7 +426,7 @@ Convoys and the scheduler are complementary but distinct mechanisms. Convoys tra
 | **Schedule idempotency** | Skip if open sling context already exists for work bead |
 | **Work bead pristine** | Scheduler never modifies work bead description or labels |
 | **Cross-rig guard** | Reject if bead prefix doesn't match target rig (unless `--force`) |
-| **Dispatch serialization** | `flock(scheduler-dispatch.lock)` prevents double-dispatch |
+| **Dispatch serialization** | `scheduler-dispatch.lock` (PID/hostname/acquired-at metadata via `internal/lock`) prevents double-dispatch; a dead-PID holder is reclaimed automatically on the next attempt instead of wedging dispatch |
 | **Atomic scheduling** | Single `bd create --ephemeral` — no two-step write, no rollback |
 | **Formula pre-cooking** | `bd cook` at schedule time catches bad protos before daemon dispatch loop |
 | **Fresh state on save** | Dispatch re-reads state before saving to avoid clobbering concurrent pause |
