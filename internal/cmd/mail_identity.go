@@ -194,7 +194,8 @@ func verifiedSenderFromSession() (string, bool) {
 	return addr, true
 }
 
-// detectSenderFromCwd is the legacy cwd-based detection for edge cases.
+// detectSenderFromCwd is the cwd-based detection, using segment-relative parsing.
+// It unifies detectSenderFromCwd (mail_identity.go) and detectRole (role.go).
 func detectSenderFromCwd() string {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -207,62 +208,60 @@ func detectSenderFromCwd() string {
 		return fromFile
 	}
 
-	// If in a rig's polecats directory, extract address (format: rig/polecats/name)
-	if strings.Contains(cwd, "/polecats/") {
-		parts := strings.Split(cwd, "/polecats/")
-		if len(parts) >= 2 {
-			rigPath := parts[0]
-			polecatPath := strings.Split(parts[1], "/")[0]
-			rigName := filepath.Base(rigPath)
-			return fmt.Sprintf("%s/polecats/%s", rigName, polecatPath)
-		}
+	// Try to detect role from cwd using segment-relative parsing
+	// (safer than substring matching, and consistent with role.go's detectRole).
+	// If townRoot cannot be found, we default to "overseer" rather than
+	// falling back to substring matching (per gt-7yy6 design).
+	townRoot, err := workspace.FindFromCwd()
+	if err == nil && townRoot != "" {
+		return roleInfoToSenderAddress(detectRole(cwd, townRoot))
 	}
 
-	// If in deacon's dogs directory, extract address (format: deacon/dogs/name)
-	if strings.Contains(cwd, "/deacon/dogs/") {
-		parts := strings.Split(cwd, "/deacon/dogs/")
-		if len(parts) >= 2 {
-			dogName := strings.Split(parts[1], "/")[0]
-			return fmt.Sprintf("deacon/dogs/%s", dogName)
-		}
-	}
-
-	// If in a rig's crew directory, extract address (format: rig/crew/name)
-	if strings.Contains(cwd, "/crew/") {
-		parts := strings.Split(cwd, "/crew/")
-		if len(parts) >= 2 {
-			rigPath := parts[0]
-			crewName := strings.Split(parts[1], "/")[0]
-			rigName := filepath.Base(rigPath)
-			return fmt.Sprintf("%s/crew/%s", rigName, crewName)
-		}
-	}
-
-	// If in a rig's refinery directory, extract address (format: rig/refinery)
-	if strings.Contains(cwd, "/refinery") {
-		parts := strings.Split(cwd, "/refinery")
-		if len(parts) >= 1 {
-			rigName := filepath.Base(parts[0])
-			return fmt.Sprintf("%s/refinery", rigName)
-		}
-	}
-
-	// If in a rig's witness directory, extract address (format: rig/witness)
-	if strings.Contains(cwd, "/witness") {
-		parts := strings.Split(cwd, "/witness")
-		if len(parts) >= 1 {
-			rigName := filepath.Base(parts[0])
-			return fmt.Sprintf("%s/witness", rigName)
-		}
-	}
-
-	// If in the town's mayor directory
-	if strings.Contains(cwd, "/mayor") {
-		return "mayor"
-	}
-
-	// Default to overseer (human)
+	// No townRoot found and no .gt-agent file - default to overseer (human)
 	return "overseer"
+}
+
+// roleInfoToSenderAddress converts a detected RoleInfo (from detectRole) into
+// the string address format used by mail sending (e.g., "rig/polecats/name", "mayor/", etc.).
+// This is the unified conversion point for role -> sender address.
+func roleInfoToSenderAddress(info RoleInfo) string {
+	switch info.Role {
+	case RoleMayor:
+		// Town-level mayor has trailing slash; rig-level mayor is also just "mayor/"
+		return "mayor/"
+	case RoleDeacon:
+		return "deacon/"
+	case RoleBoot:
+		return "deacon/dogs/boot"
+	case RoleDog:
+		if info.Polecat != "" {
+			return fmt.Sprintf("deacon/dogs/%s", info.Polecat)
+		}
+		return "deacon/dogs"
+	case RoleWitness:
+		if info.Rig != "" {
+			return fmt.Sprintf("%s/witness", info.Rig)
+		}
+		return "witness"
+	case RoleRefinery:
+		if info.Rig != "" {
+			return fmt.Sprintf("%s/refinery", info.Rig)
+		}
+		return "refinery"
+	case RolePolecat:
+		if info.Rig != "" && info.Polecat != "" {
+			return fmt.Sprintf("%s/polecats/%s", info.Rig, info.Polecat)
+		}
+		return "polecat"
+	case RoleCrew:
+		if info.Rig != "" && info.Polecat != "" {
+			return fmt.Sprintf("%s/crew/%s", info.Rig, info.Polecat)
+		}
+		return "crew"
+	default:
+		// RoleUnknown or unknown role
+		return "overseer"
+	}
 }
 
 type agentIdentityFile struct {
