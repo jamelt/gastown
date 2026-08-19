@@ -728,6 +728,9 @@ func wakeRigAgents(rigName string) {
 			fmt.Fprintf(os.Stderr, "Warning: daemon is not running. Polecat may not auto-start.\n")
 			fmt.Fprintf(os.Stderr, "  Start with: gt daemon start\n")
 		}
+		// Initialize tmux socket before nudging so that tmux commands use the
+		// correct town socket instead of the default fallback (gt-p2f6)
+		_ = session.InitRegistry(townRoot)
 	}
 
 	// Immediate delivery to witness: send directly to tmux pane.
@@ -765,6 +768,9 @@ func nudgeWitness(rigName, message string) {
 			"source=polecat",
 			"message=" + message,
 		})
+		// Initialize tmux socket before nudging so that tmux commands use the
+		// correct town socket instead of the default fallback (gt-p2f6)
+		_ = session.InitRegistry(townRoot)
 	}
 
 	t := tmux.NewTmux()
@@ -800,6 +806,9 @@ func nudgeRefinery(rigName, message string) {
 			"source=sling",
 			"message=" + message,
 		})
+		// Initialize tmux socket before nudging so that tmux commands use the
+		// correct town socket instead of the default fallback (gt-p2f6)
+		_ = session.InitRegistry(townRoot)
 	}
 
 	t := tmux.NewTmux()
