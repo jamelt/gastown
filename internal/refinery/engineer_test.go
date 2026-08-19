@@ -1551,8 +1551,8 @@ exit 0
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	e := NewEngineer(&rig.Rig{Name: "testrig", Path: rigDir})
-	e.notifyConvoyCompletion(townRoot, "hq-cv-ref", "Refinery Duplicate Guard", "Owner: mayor/")
-	e.notifyConvoyCompletion(townRoot, "hq-cv-ref", "Refinery Duplicate Guard", "Owner: mayor/")
+	e.notifyConvoyCompletion(townRoot, "hq-cv-ref", "Refinery Duplicate Guard")
+	e.notifyConvoyCompletion(townRoot, "hq-cv-ref", "Refinery Duplicate Guard")
 
 	data, err := os.ReadFile(mailLogPath)
 	if err != nil {
