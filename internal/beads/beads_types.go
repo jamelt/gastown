@@ -379,6 +379,30 @@ func ensureDatabaseInitialized(beadsDir string) error {
 	// No database found — need to initialize.
 	prefix := detectPrefix(beadsDir)
 
+	// Refuse to silently mint a new database whose prefix is already claimed
+	// by a different rig. detectPrefix() falls back to a generic default
+	// ("gt") for directories with no route or rigs.json entry, which
+	// previously let stray/misnamed directories auto-create databases that
+	// collided with an existing rig's prefix and mint duplicate bead IDs for
+	// it (gt-czpm).
+	if prefix != "" {
+		resolvedBeadsDir := ResolveBeadsDir(beadsDir)
+		if townRoot := FindTownRoot(filepath.Dir(resolvedBeadsDir)); townRoot != "" {
+			// Use the full path relative to townRoot (e.g. "myrig/mayor/rig"),
+			// not just the immediate parent's basename: canonical rig
+			// databases live at <rig>/mayor/rig/.beads, whose basename is
+			// always literally "rig" (see detectPrefix's own routes-path
+			// comment above). CheckPrefixAvailable takes only the first path
+			// segment, so the relative path still resolves to the correct
+			// rig name for both that layout and flat "<rig>/.beads" layouts.
+			if newRig, err := filepath.Rel(townRoot, filepath.Dir(resolvedBeadsDir)); err == nil {
+				if err := CheckPrefixAvailable(townRoot, prefix+"-", newRig); err != nil {
+					return fmt.Errorf("refusing to auto-initialize database: %w", err)
+				}
+			}
+		}
+	}
+
 	// bd init must run from the parent directory (not inside .beads/).
 	// Use --server to match all production callers (rig/manager.go, doctor/rig_check.go, cmd/install.go).
 	parentDir := filepath.Dir(beadsDir)
