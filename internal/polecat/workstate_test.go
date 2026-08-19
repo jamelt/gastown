@@ -10,7 +10,7 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 	}{
 		{
 			name: "clean idle is reusable and safe",
-			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "main"},
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "main", SessionRunning: true},
 			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, ReuseStatus: "idle-clean"},
 		},
 		{
@@ -28,7 +28,7 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 			// argument. The GitCheckFailed case immediately below still fails closed,
 			// which is where the real fail-closed guarantee lives.
 			name: "missing legacy cleanup with clean git defers to git and is reusable",
-			in:   WorkstateInput{State: StateIdle, CleanupStatus: ""},
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: "", SessionRunning: true},
 			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, CountsTowardCapacity: false, ReuseStatus: "idle-clean"},
 		},
 		{
@@ -63,7 +63,7 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 		},
 		{
 			name: "mr submission makes mq submitted",
-			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", MQCheckRequired: true, HasSubmittableWork: true, MRSubmitted: true},
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", MQCheckRequired: true, HasSubmittableWork: true, MRSubmitted: true, SessionRunning: true},
 			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, MQStatus: "submitted", ReuseStatus: "idle-preserved"},
 		},
 		{
@@ -103,7 +103,7 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 		},
 		{
 			name: "terminal active mr does not block when gatherer omits blocker",
-			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, ActiveMR: "gt-mr-closed"},
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, ActiveMR: "gt-mr-closed", SessionRunning: true},
 			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, ReuseStatus: "idle-clean"},
 		},
 		{
@@ -123,7 +123,7 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 		},
 		{
 			name: "done without mr and clean cleanup is reusable and safe",
-			in:   WorkstateInput{State: StateDone, CleanupStatus: CleanupClean},
+			in:   WorkstateInput{State: StateDone, CleanupStatus: CleanupClean, SessionRunning: true},
 			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, ReuseStatus: "idle-clean"},
 		},
 		{

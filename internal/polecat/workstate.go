@@ -37,6 +37,7 @@ type WorkstateInput struct {
 	AssignedBeadTerminal           bool
 	MRSubmitted                    bool
 	MQLookupFailed                 bool
+	SessionRunning                 bool
 }
 
 // WorkstateDisposition is the canonical polecat lifecycle decision. It is pure
@@ -227,6 +228,16 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 			d.Blockers = append(d.Blockers, "mq_status=not_submitted")
 			return d
 		}
+	}
+
+	if !in.SessionRunning {
+		d.Verdict = WorkstateVerdictNeedsRecovery
+		d.Reason = "no-active-session"
+		d.NeedsRecovery = true
+		d.CountsTowardCapacity = true
+		d.ReuseStatus = "idle-cold-worktree"
+		d.Blockers = append(d.Blockers, "session_running=false")
+		return d
 	}
 
 	d.Reusable = true
