@@ -244,6 +244,23 @@ problem in a different database or of a different type. Example:
 
 **Exit criteria:** Report generated, anomalies escalated (deduplicated) if any."""
 
+[[steps]]
+id = "return-to-kennel"
+title = "Return to kennel"
+needs = ["report"]
+description = """
+Return to available pool (MANDATORY — this formula does not otherwise change
+dog state):
+```bash
+gt dog done
+```
+This atomically clears your work assignment and returns you to idle. It is
+idempotent — safe to run even if state is already idle. Without this
+command you remain shown as "working" until a patrol force-clears you,
+which is the exact lifecycle regression this formula must not reproduce.
+
+**Exit criteria:** `gt dog status` shows this dog idle with no work."""
+
 [vars]
 [vars.max_age]
 description = "Max wisp age before reaping (e.g., '24h')"
