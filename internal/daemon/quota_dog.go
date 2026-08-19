@@ -11,6 +11,12 @@ const (
 	defaultQuotaDogInterval = 5 * time.Minute
 	// quotaDogTimeout is the maximum time allowed for a single rotation cycle.
 	quotaDogTimeout = 2 * time.Minute
+	// quotaDogFailureEscalationThreshold is the number of consecutive failures
+	// of a single quota_dog action before its log level escalates from
+	// Warning to Error, surfacing a permanently broken action (e.g. no
+	// accounts configured) instead of letting it stay silent in daily
+	// "(non-fatal)" log noise.
+	quotaDogFailureEscalationThreshold = 3
 )
 
 // QuotaDogConfig holds configuration for the quota_dog patrol.
@@ -61,13 +67,19 @@ func (d *Daemon) runQuotaDog() {
 
 		if err != nil {
 			stderrStr := stderr.String()
-			if stderrStr != "" {
-				d.logger.Printf("quota_dog: %s failed (non-fatal): %v: %s", action, err, stderrStr)
+			if stderrStr == "" {
+				stderrStr = err.Error()
+			}
+			d.recordQuotaDogFailure(action)
+			failures := d.getQuotaDogFailures(action)
+			if failures >= quotaDogFailureEscalationThreshold {
+				d.logger.Printf("quota_dog: Error: %s repeatedly failing (%d consecutive failures, non-fatal): %s", action, failures, stderrStr)
 			} else {
-				d.logger.Printf("quota_dog: %s failed (non-fatal): %v", action, err)
+				d.logger.Printf("quota_dog: Warning: %s failed (%d consecutive failure(s), non-fatal): %s", action, failures, stderrStr)
 			}
 			continue
 		}
+		d.resetQuotaDogFailures(action)
 
 		outStr := stdout.String()
 		if outStr != "" && outStr != "[]\n" && outStr != "[]" {
@@ -76,6 +88,30 @@ func (d *Daemon) runQuotaDog() {
 			d.logger.Printf("quota_dog: %s found no actionable sessions", action)
 		}
 	}
+}
+
+// recordQuotaDogFailure increments the consecutive failure counter for a quota_dog action.
+func (d *Daemon) recordQuotaDogFailure(action string) {
+	if d.quotaDogFailures == nil {
+		d.quotaDogFailures = make(map[string]int)
+	}
+	d.quotaDogFailures[action]++
+}
+
+// getQuotaDogFailures returns the consecutive failure count for a quota_dog action.
+func (d *Daemon) getQuotaDogFailures(action string) int {
+	if d.quotaDogFailures == nil {
+		return 0
+	}
+	return d.quotaDogFailures[action]
+}
+
+// resetQuotaDogFailures clears the failure counter for a quota_dog action after it succeeds.
+func (d *Daemon) resetQuotaDogFailures(action string) {
+	if d.quotaDogFailures == nil {
+		return
+	}
+	delete(d.quotaDogFailures, action)
 }
 
 func quotaDogActions() []string {
