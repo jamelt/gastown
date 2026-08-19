@@ -28,6 +28,88 @@ func (f *fakeRebaseGit) AbortRebase() error {
 	return nil
 }
 
+// fakePreVerifiedGit drives preVerifiedFields without a real git repo.
+type fakePreVerifiedGit struct {
+	baseRef    string
+	baseSHA    string
+	baseErr    error
+	ancestor   bool
+	ancestErr  error
+	ancestorOf [2]string // records the (ancestor, descendant) args of IsAncestor
+}
+
+func (f *fakePreVerifiedGit) CleanBaseRef(remote, defaultBranch, target string) string {
+	return f.baseRef
+}
+
+func (f *fakePreVerifiedGit) Rev(ref string) (string, error) {
+	return f.baseSHA, f.baseErr
+}
+
+func (f *fakePreVerifiedGit) IsAncestor(ancestor, descendant string) (bool, error) {
+	f.ancestorOf = [2]string{ancestor, descendant}
+	return f.ancestor, f.ancestErr
+}
+
+// TestPreVerifiedFields verifies that the pre-verification attestation is only
+// recorded when the submitted commit is actually based on the recorded target
+// base (gt-fi6e). An unrebased/behind branch must fall back to full gates.
+func TestPreVerifiedFields(t *testing.T) {
+	const base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	t.Run("records attestation when commit is based on target", func(t *testing.T) {
+		g := &fakePreVerifiedGit{baseRef: "origin/main", baseSHA: base, ancestor: true}
+		lines, skip := preVerifiedFields(g, "main", "main", commit, "2026-08-19T00:00:00Z")
+		if skip != "" {
+			t.Fatalf("expected attestation, got skip reason %q", skip)
+		}
+		if !strings.Contains(lines, "pre_verified: true") ||
+			!strings.Contains(lines, "pre_verified_at: 2026-08-19T00:00:00Z") ||
+			!strings.Contains(lines, "pre_verified_base: "+base) {
+			t.Fatalf("attestation lines missing expected fields: %q", lines)
+		}
+		if g.ancestorOf != [2]string{base, commit} {
+			t.Fatalf("IsAncestor called with %v, want ancestor=base descendant=commit", g.ancestorOf)
+		}
+	})
+
+	t.Run("refuses attestation when commit is not based on target", func(t *testing.T) {
+		g := &fakePreVerifiedGit{baseRef: "origin/main", baseSHA: base, ancestor: false}
+		lines, skip := preVerifiedFields(g, "main", "main", commit, "2026-08-19T00:00:00Z")
+		if lines != "" {
+			t.Fatalf("expected no attestation, got lines %q", lines)
+		}
+		if !strings.Contains(skip, "not based on target") {
+			t.Fatalf("skip reason %q should explain the branch was not rebased", skip)
+		}
+	})
+
+	t.Run("refuses attestation when commit SHA is unknown", func(t *testing.T) {
+		g := &fakePreVerifiedGit{baseRef: "origin/main", baseSHA: base, ancestor: true}
+		lines, skip := preVerifiedFields(g, "main", "main", "", "2026-08-19T00:00:00Z")
+		if lines != "" || skip == "" {
+			t.Fatalf("expected skip for empty commit, got lines=%q skip=%q", lines, skip)
+		}
+	})
+
+	t.Run("refuses attestation when base cannot be resolved", func(t *testing.T) {
+		g := &fakePreVerifiedGit{baseRef: "origin/main", baseErr: errors.New("bad ref")}
+		lines, skip := preVerifiedFields(g, "main", "main", commit, "2026-08-19T00:00:00Z")
+		if lines != "" || skip == "" {
+			t.Fatalf("expected skip when base unresolved, got lines=%q skip=%q", lines, skip)
+		}
+	})
+
+	t.Run("refuses attestation when ancestry check errors", func(t *testing.T) {
+		g := &fakePreVerifiedGit{baseRef: "origin/main", baseSHA: base, ancestErr: errors.New("object missing")}
+		lines, skip := preVerifiedFields(g, "main", "main", commit, "2026-08-19T00:00:00Z")
+		if lines != "" || skip == "" {
+			t.Fatalf("expected skip when ancestry errors, got lines=%q skip=%q", lines, skip)
+		}
+	})
+}
+
 // TestAutoRebaseOnTarget_GatingDecisions verifies the skip/rebase decision
 // matrix (gh#3400). The behavior under test is the *decision*, not the actual
 // git mechanics — those are exercised separately below against a real repo.
