@@ -922,11 +922,20 @@ func detectCloneRoot() (string, error) {
 
 // detectActor returns the current agent's actor string for event logging.
 func detectActor() string {
-	roleInfo, err := GetRole()
-	if err != nil {
-		return fallbackActor()
+	if roleInfo, err := GetRole(); err == nil && roleInfo.Role != RoleUnknown {
+		return roleInfo.ActorString()
 	}
-	return roleInfo.ActorString()
+	// Role could not be resolved from the cwd — either a neutral location like
+	// the town root (detectRole() returns RoleUnknown there by design) or a
+	// daemon process with no role-home directory. ActorString() would render
+	// RoleUnknown as the bare, uninformative literal "unknown" (gt-kins).
+	// Prefer the explicitly-declared beads actor: BD_ACTOR is "daemon" for the
+	// scheduler daemon's feed/dispatch cycles and "gastown/witness" for a
+	// witness-triggered dispatch — the same provenance gt escalate trusts.
+	if actor := strings.TrimSpace(os.Getenv("BD_ACTOR")); actor != "" {
+		return actor
+	}
+	return fallbackActor()
 }
 
 // osHostname is a seam over os.Hostname so tests can exercise the
