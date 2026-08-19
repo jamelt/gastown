@@ -101,6 +101,9 @@ check-install-path:
 
 install: check-up-to-date build
 	@mkdir -p $(INSTALL_DIR)
+	@if [ -L $(INSTALL_DIR)/$(BINARY) ]; then \
+		echo "Note: $(INSTALL_DIR)/$(BINARY) was a symlink to $$(readlink $(INSTALL_DIR)/$(BINARY)); replacing it with a regular file. Anything else still pointed at that symlink target (a systemd unit, another script) will now diverge from this install."; \
+	fi
 	@rm -f $(INSTALL_DIR)/$(BINARY)
 	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
 	@# Nuke any stale go-install binaries that shadow the canonical location
@@ -132,6 +135,9 @@ install: check-up-to-date build
 # the new binary on their next natural cycle/handoff.
 safe-install: check-up-to-date check-forward-only build
 	@mkdir -p $(INSTALL_DIR)
+	@if [ -L $(INSTALL_DIR)/$(BINARY) ]; then \
+		echo "Note: $(INSTALL_DIR)/$(BINARY) was a symlink to $$(readlink $(INSTALL_DIR)/$(BINARY)); replacing it with a regular file. Anything else still pointed at that symlink target (a systemd unit, another script) will now diverge from this install."; \
+	fi
 	@# Atomic-ish replace: copy to temp then move (move is atomic on same filesystem)
 	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY).new
 	@mv $(INSTALL_DIR)/$(BINARY).new $(INSTALL_DIR)/$(BINARY)

@@ -518,6 +518,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
 
+	// Log which binary is actually running, at the resolved filesystem path.
+	// Unlike state.json (overwritten on every restart), the log is append-only,
+	// so this is what answers "which build handled this incident" after the
+	// fact when a host has more than one gt binary on disk (gt-5nzu).
+	binaryPath, pathErr := os.Executable()
+	if pathErr != nil {
+		binaryPath = fmt.Sprintf("unknown (%v)", pathErr)
+	}
+	commitDisplay := "dev build"
+	if state.BinaryCommit != "" {
+		commitDisplay = version.ShortCommit(state.BinaryCommit)
+	}
+	d.logger.Printf("Daemon binary: %s (commit %s)", binaryPath, commitDisplay)
+
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, daemonSignals()...)
