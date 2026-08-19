@@ -47,7 +47,11 @@ elif [ "$(json_field "$STALE_JSON" safe_to_rebuild False)" != "True" ]; then
 elif [ ! -d "$RIG_ROOT" ]; then
   log "Rig root $RIG_ROOT does not exist. Skipping."
 else
-  DIRTY=$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null)
+  # .beads/config.yaml and .beads.gate.lock are machine-local runtime
+  # artifacts, not source changes, and are always present in the canonical
+  # checkout (gt-svqh) — ignore them so a genuinely clean tree isn't treated
+  # as dirty.
+  DIRTY=$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null | grep -vE '^.. \.beads/config\.yaml$|^.. \.beads\.gate\.lock$' || true)
   BRANCH=$(git -C "$RIG_ROOT" branch --show-current 2>/dev/null)
 
   if [ -n "$DIRTY" ]; then
