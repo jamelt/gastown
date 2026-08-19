@@ -51,8 +51,14 @@ skipped, and why — is logged.
 
 Feed only acts when the scheduler is in deferred-dispatch mode
 (scheduler.max_polecats > 0); in direct-dispatch mode there is no queue to
-feed. Feed does not survey town-level (hq-*) beads: scheduleBead only
-targets rigs, so town-level ready work is out of scope for now.
+feed. Feed surveys only rig databases, never the town-level (hq-*) store —
+not as a temporary gap but by construction: dispatch ends in spawning a
+rig-scoped polecat, and town beads have no owning rig or polecat pool, so a
+fed town context could never be dispatched (it would just fail every cycle
+until it circuit-breaks). Genuine engineering work misfiled in the town
+database is surfaced instead by 'gt doctor' (the town-unfed-work check),
+whose remedy is to route each bead to its owning rig with 'gt bead move' or
+close it if it is coordination-only.
 
   gt scheduler feed              # Feed eligible ready beads
   gt scheduler feed --dry-run    # Preview without scheduling
