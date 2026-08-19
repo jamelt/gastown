@@ -253,14 +253,6 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if (slingResumeBranch != "" || slingResumePR != 0) && slingBaseBranch != "" {
 		return fmt.Errorf("--base-branch cannot be combined with --branch or --pr (resume implies starting on the existing branch)")
 	}
-	if slingResumePR != 0 {
-		resolved, err := resolvePRBranch(slingResumePR)
-		if err != nil {
-			return fmt.Errorf("resolving --pr %d: %w", slingResumePR, err)
-		}
-		slingResumeBranch = resolved
-		fmt.Printf("%s --pr %d resolved to branch %s\n", style.Dim.Render("→"), slingResumePR, resolved)
-	}
 
 	// Disable Dolt auto-commit for all bd commands run during sling (gt-u6n6a).
 	// Under concurrent load (batch slinging), auto-commits from individual bd writes
@@ -335,6 +327,24 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			args = redirected
 		}
 		applyWorkflowStepAgentOverride(args)
+	}
+
+	// Resolve --pr against the target rig's own repo, not the caller's cwd
+	// (gt-vln3). `gh pr view` resolves the PR through whatever git remote is
+	// in its working directory, so running it from town root or an unrelated
+	// rig fails with "no git remotes found" even though the target rig has a
+	// perfectly good remote.
+	if slingResumePR != 0 {
+		if len(args) < 2 {
+			return fmt.Errorf("--pr requires a target rig argument (e.g., gt sling %s <rig> --pr %d)", args[0], slingResumePR)
+		}
+		rigName := strings.SplitN(args[len(args)-1], "/", 2)[0]
+		resolved, err := resolvePRBranch(townRoot, rigName, slingResumePR)
+		if err != nil {
+			return fmt.Errorf("resolving --pr %d: %w", slingResumePR, err)
+		}
+		slingResumeBranch = resolved
+		fmt.Printf("%s --pr %d resolved to branch %s\n", style.Dim.Render("→"), slingResumePR, resolved)
 	}
 
 	// Config-driven dispatch mode: check scheduler.max_polecats
@@ -1422,23 +1432,26 @@ func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
 	return nil, fmt.Errorf("timed out acquiring assignee sling lock for %s after %ds (another sling may be stuck)", targetAgent, maxAttempts*retryInterval/1000)
 }
 
-// resolvePRBranch resolves a GitHub PR number to its head branch name via `gh pr view`.
-// Used by `gt sling --pr <number>` to convert the PR number into a branch name that
-// the polecat worktree can check out.
-func resolvePRBranch(prNumber int) (string, error) {
-	cmd := exec.Command("gh", "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "headRefName", "-q", ".headRefName")
-	out, err := cmd.Output()
+// resolvePRBranch resolves a GitHub PR number to its head branch name, looked up
+// against the target rig's own repo rather than the caller's cwd (gt-vln3). `gh`
+// resolves the PR's GitHub repo from a git remote, so this must go through a
+// clone of the target rig, not town root or an unrelated worktree. Used by
+// `gt sling --pr <number>` to convert the PR number into a branch name that the
+// polecat worktree can check out.
+func resolvePRBranch(townRoot, rigName string, prNumber int) (string, error) {
+	rigPath := filepath.Join(townRoot, rigName)
+	g, err := getRigGit(rigPath)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
-			return "", fmt.Errorf("gh pr view: %s", strings.TrimSpace(string(exitErr.Stderr)))
-		}
-		return "", fmt.Errorf("gh pr view: %w", err)
+		return "", fmt.Errorf("rig %s has no repo to resolve PRs against: %w", rigName, err)
 	}
-	branch := strings.TrimSpace(string(out))
-	if branch == "" {
+	pr, err := g.LookupPullRequest(git.PullRequestRef{Number: prNumber})
+	if err != nil {
+		return "", fmt.Errorf("rig %s: %w", rigName, err)
+	}
+	if pr.HeadRefName == "" {
 		return "", fmt.Errorf("PR #%d has no headRefName (does it exist?)", prNumber)
 	}
-	return branch, nil
+	return pr.HeadRefName, nil
 }
 
 // rollbackSlingArtifacts cleans up artifacts left by a partial sling when session start fails.
