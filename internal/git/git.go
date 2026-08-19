@@ -202,9 +202,9 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	}
 
 	var cmd *exec.Cmd
+	var ctx context.Context
 	var cancel context.CancelFunc
 	if timeout > 0 {
-		var ctx context.Context
 		ctx, cancel = context.WithTimeout(context.Background(), timeout)
 		cmd = exec.CommandContext(ctx, "git", args...)
 	} else {
@@ -230,11 +230,14 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		if timeout > 0 {
-			// Check if the context's deadline was exceeded
-			if errors.Is(err, context.DeadlineExceeded) {
-				return "", fmt.Errorf("git %s timed out after %v in %s (remote may be unreachable)", args[0], timeout, g.workDir)
-			}
+		// Check the context directly rather than errors.Is(err,
+		// context.DeadlineExceeded): util.SetProcessGroup's Cancel hook
+		// SIGKILLs the process group, which is a non-success exit, and per
+		// os/exec's documented Cancel semantics Go does not substitute
+		// ctx.Err() into the returned error for a non-success exit — only
+		// ctx.Err() itself reliably reports the timeout in that case.
+		if ctx != nil && ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("git %s timed out after %v in %s (remote may be unreachable)", args[0], timeout, g.workDir)
 		}
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}
