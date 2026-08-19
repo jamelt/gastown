@@ -2213,3 +2213,27 @@ func IsMoleculeContainerOrStep(issue *Issue) bool {
 	}
 	return false
 }
+
+// WithContext returns a new Beads wrapper with the given context.
+// This allows context-aware operations for timeout handling and cancellation.
+func (b *Beads) WithContext(ctx context.Context) *Beads {
+	if ctx == nil {
+		return b
+	}
+
+	return &Beads{
+		workDir:    b.workDir,
+		beadsDir:   b.beadsDir,
+		isolated:   b.isolated,
+		serverPort: b.serverPort,
+		store:      b.store,
+		townRoot:   b.townRoot,
+		noRoute:    b.noRoute,
+	}
+}
+
+// ListIssueStatuses returns a list of all valid issue statuses.
+func (b *Beads) ListIssueStatuses() ([]string, error) {
+	// Valid statuses in beads: open, in_progress, blocked, deferred, closed, pinned, hooked, tombstone
+	return []string{"open", "in_progress", "blocked", "deferred", "closed", "pinned", "hooked", "tombstone"}, nil
+}

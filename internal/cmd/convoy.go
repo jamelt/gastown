@@ -531,7 +531,13 @@ func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) 
 
 func bdDepListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, error) {
 	beadsDir := beads.ResolveBeadsDir(dir)
-	townRoot := beads.FindTownRoot(dir)
+
+	// Find town root for readBeadsRuntimeConfig
+	townRoot, err := workspace.FindFromCwd(dir)
+	if err != nil {
+		townRoot = "" // Use empty string if town root cannot be determined
+	}
+
 	cfg, ok := readBeadsRuntimeConfig(beadsDir, townRoot)
 	if !ok || cfg.Database == "" || cfg.Port == 0 {
 		return nil, fmt.Errorf("missing server metadata for %s", beadsDir)
