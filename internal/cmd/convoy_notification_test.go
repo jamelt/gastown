@@ -202,12 +202,17 @@ exit 0
 		t.Fatalf("read order log: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
+	// The convoy-completion claim (update + its JSONL export mirror) is made
+	// atomically BEFORE any notification is sent — see
+	// internal/convoy.ClaimCompletionNotification. This ordering, not the
+	// mail-then-update ordering used before that fix, is what makes the
+	// claim safe under concurrent callers (CLI, deacon sweep, refinery).
 	want := strings.Join([]string{
 		"close",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-		"mail",
 		"update",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
+		"mail",
 	}, "\n")
 	if got != want {
 		t.Fatalf("operation order mismatch:\n got:\n%s\nwant:\n%s", got, want)
@@ -279,10 +284,14 @@ exit 0
 		t.Fatalf("read order log: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
+	// The claim (update + JSONL export mirror) happens before mail is sent;
+	// the mirror export intentionally fails in this test and that failure
+	// must not block the claim or the notification — see claimUnlocked in
+	// internal/convoy/completion.go.
 	want := strings.Join([]string{
-		"mail",
 		"update",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
+		"mail",
 	}, "\n")
 	if got != want {
 		t.Fatalf("operation order mismatch:\n got:\n%s\nwant:\n%s", got, want)
@@ -379,9 +388,9 @@ exit 0
 		"close",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-		"mail",
 		"update",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
+		"mail",
 	}, "\n")
 	if got != want {
 		t.Fatalf("operation order mismatch:\n got:\n%s\nwant:\n%s", got, want)
