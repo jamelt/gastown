@@ -29,7 +29,7 @@ This is infrastructure work. You:
 Cross-rig work requires multi-rig worktrees. Dogs have these, polecats don't.
 The Deacon detects the closure, but the propagation needs rig access."""
 formula = "mol-dep-propagate"
-version = 1
+version = 2
 
 [squash]
 trigger = "on_complete"
@@ -197,10 +197,18 @@ Ready for next assignment."
 The propagation creates implicit feed entries (dependency updates).
 No explicit entry needed.
 
-**3. Return to kennel:**
-Dog returns to available state in the pool.
+**3. Return to kennel (MANDATORY — the mail above is a notification, not a
+state change):**
+```bash
+gt dog done
+```
+This atomically clears your work assignment and returns you to idle. It is
+idempotent — safe to run even if state is already idle. Sending the
+DOG_DONE mail alone does NOT change `gt dog status`; without this command
+you remain shown as "working" until a patrol force-clears you.
 
-**Exit criteria:** Deacon notified, dog ready for next work or retirement."""
+**Exit criteria:** Deacon notified AND `gt dog status` shows this dog idle
+with no work — verify with `gt dog status` before exiting if in doubt."""
 
 [vars]
 [vars.resolved_issue]
