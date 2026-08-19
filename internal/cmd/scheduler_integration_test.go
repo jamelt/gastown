@@ -1666,6 +1666,82 @@ func TestSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
 	}
 }
 
+// TestSchedulerActualDispatchMatchesDryRunAtFreeCapacityOne is a regression
+// test for gt-airx: at the free-capacity=1 / batch=1 boundary, a real
+// (non-dry-run) dispatch must send the exact bead `--dry-run` predicted.
+// Both paths share buildSchedulerDispatchPlan, so this pins that contract at
+// the exact edge the bug report hit (free=1, one ready bead, batch=1).
+func TestSchedulerActualDispatchMatchesDryRunAtFreeCapacityOne(t *testing.T) {
+	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
+	configureScheduler(t, hqPath, 1, 1) // max_polecats=1 -> free capacity=1; batch_size=1 pins the batch to a single bead
+
+	beadID := createTestBead(t, rigPath, "Free-capacity-one dispatch test")
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	ctxBead, err := rigBeads.CreateSlingContext("dispatch: "+beadID, beadID, &capacity.SlingContextFields{
+		Version:     1,
+		WorkBeadID:  beadID,
+		TargetRig:   "testrig",
+		HookRawBead: true,
+		EnqueuedAt:  "2026-01-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("CreateSlingContext: %v", err)
+	}
+
+	// Dry-run: exercises the exact plan-building function the real dispatch
+	// below also calls (cleanup=false, same as dispatchScheduledWork's dry-run branch).
+	dryPlan, err := buildSchedulerDispatchPlan(hqPath, 1, false)
+	if err != nil {
+		t.Fatalf("buildSchedulerDispatchPlan (dry-run): %v", err)
+	}
+	if dryPlan.Capacity.Free != 1 {
+		t.Fatalf("dry-run capacity.Free = %d, want 1", dryPlan.Capacity.Free)
+	}
+	validated := validateDryRunDispatchPlan(hqPath, dryPlan.Plan)
+	if len(validated.ToDispatch) != 1 || validated.ToDispatch[0].WorkBeadID != beadID {
+		t.Fatalf("dry-run plan = %+v, want exactly %s dispatchable", validated, beadID)
+	}
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "freecap1",
+			ClonePath:   rigPath,
+			Pane:        "test-pane", // StartSession becomes a no-op.
+		}, nil
+	}
+
+	// Real dispatch: must actually send the same bead the dry-run predicted,
+	// not silently no-op (gt-airx).
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork (real): %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want 1 (same bead dry-run predicted)", dispatched)
+	}
+
+	issue, err := rigBeads.Show(beadID)
+	if err != nil {
+		t.Fatalf("rig bead show after dispatch: %v", err)
+	}
+	if issue.Status != "hooked" || issue.Assignee != "testrig/polecats/freecap1" {
+		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked testrig/polecats/freecap1", issue.Status, issue.Assignee)
+	}
+
+	openContexts, err := rigBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range openContexts {
+		if ctx.ID == ctxBead.ID {
+			t.Fatalf("sling context %s still open after successful dispatch", ctxBead.ID)
+		}
+	}
+}
+
 func TestSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
 	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
 
