@@ -43,6 +43,12 @@ type MayorStatus struct {
 	Tmux    *tmux.SessionInfo
 	ACPPid  int
 	Running bool // Deprecated: use Active
+
+	// AgentAlive is only meaningful when Tmux != nil. A tmux session can
+	// exist (and thus be Active) with its agent process dead or exited to a
+	// bare shell — AgentAlive distinguishes that zombie state from a
+	// genuinely healthy session (gt-gd7j).
+	AgentAlive bool
 }
 
 // Manager handles mayor lifecycle operations.
@@ -64,6 +70,10 @@ func (m *Manager) CombinedStatus() (*MayorStatus, error) {
 			status.Tmux = info
 			status.Active = true
 			status.Mode = ModeTMUX
+			// Session existing doesn't mean the agent process is alive —
+			// check separately so callers can tell a healthy session from
+			// a zombie one (gt-gd7j).
+			status.AgentAlive = tmux.NewTmux().IsAgentAlive(m.SessionName())
 		}
 	}
 

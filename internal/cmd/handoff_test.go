@@ -460,6 +460,83 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	})
 }
 
+// TestBuildRestartCommandWithOpts_WorkDirOverride guards against gt-gd7j: a
+// respawn-pane command whose embedded `cd` targets a different directory
+// than tmux's own -c flag leaves the pane running `cd <dir> && exec ...`
+// against a directory tmux never set up, which fails silently and kills the
+// pane. WorkDirOverride is how respawnSessionPane keeps the two in sync when
+// the pane's real working directory has been deleted.
+func TestBuildRestartCommandWithOpts_WorkDirOverride(t *testing.T) {
+	setupHandoffTestRegistry(t)
+
+	origCwd, _ := os.Getwd()
+	origGTAgent := os.Getenv("GT_AGENT")
+	origTownRoot := os.Getenv("GT_TOWN_ROOT")
+	origRoot := os.Getenv("GT_ROOT")
+
+	townRoot := t.TempDir()
+
+	t.Cleanup(func() {
+		_ = os.Chdir(origCwd)
+		_ = os.Setenv("GT_AGENT", origGTAgent)
+		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
+		_ = os.Setenv("GT_ROOT", origRoot)
+	})
+	rigPath := filepath.Join(townRoot, "gastown")
+	crewDir := filepath.Join(rigPath, "crew", "bear")
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
+		t.Fatalf("mkdir crew dir: %v", err)
+	}
+
+	townSettings := config.NewTownSettings()
+	townSettings.DefaultAgent = "claude"
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), config.NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	_ = os.Setenv("GT_AGENT", "")
+	_ = os.Setenv("GT_TOWN_ROOT", "")
+	_ = os.Setenv("GT_ROOT", "")
+	_ = os.Chdir(crewDir)
+
+	// Use exact "cd <dir> && " boundaries — townRoot is itself a path prefix
+	// of crewDir, so a plain substring check would pass even if the override
+	// silently failed to take effect.
+	crewCdPrefix := "cd " + crewDir + " && "
+	townRootCdPrefix := "cd " + townRoot + " && "
+
+	defaultCmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{})
+	if err != nil {
+		t.Fatalf("buildRestartCommandWithOpts: %v", err)
+	}
+	if !strings.Contains(defaultCmd, crewCdPrefix) {
+		t.Fatalf("expected default command to cd into the crew dir %q, got: %q", crewDir, defaultCmd)
+	}
+
+	overrideCmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+		WorkDirOverride: townRoot,
+	})
+	if err != nil {
+		t.Fatalf("buildRestartCommandWithOpts with override: %v", err)
+	}
+	if !strings.Contains(overrideCmd, townRootCdPrefix) {
+		t.Errorf("expected overridden command to cd into townRoot %q, got: %q", townRoot, overrideCmd)
+	}
+	if strings.Contains(overrideCmd, crewCdPrefix) {
+		t.Errorf("overridden command should not still cd into the stale crew dir %q, got: %q", crewDir, overrideCmd)
+	}
+}
+
 func TestDetectTownRootFromCwd_EnvFallback(t *testing.T) {
 	// Save original env vars and restore after test
 	origTownRoot := os.Getenv("GT_TOWN_ROOT")
