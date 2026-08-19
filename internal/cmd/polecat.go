@@ -1078,6 +1078,12 @@ type recoveryStatusOptions struct {
 	// polecat-lifecycle.md), and that workflow must not regress just because
 	// nuke's gate now shares the reuse/list classifier.
 	TreatStateAsIdle bool
+	// SharedCtx, when non-nil, resolves the agent-bead lookup from a
+	// batch-fetched rig context instead of a live bd call — see
+	// safetyCheckContext / buildSafetyCheckContexts (gt-j2lu). This is what
+	// makes `gt polecat nuke <rig> --all --dry-run` bounded on
+	// large/recovery-heavy rigs.
+	SharedCtx *safetyCheckContext
 }
 
 // computePolecatRecoveryStatus gathers the same lifecycle, git, and
@@ -1104,7 +1110,7 @@ func computePolecatRecoveryStatus(mgr *polecat.Manager, r *rig.Rig, rigName, pol
 	rigPath := r.Path
 	bd := beads.New(rigPath)
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
-	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
+	agentIssue, fields, err := lookupAgentBead(bd, opts.SharedCtx, agentBeadID)
 
 	status := RecoveryStatus{
 		Rig:     rigName,

@@ -981,11 +981,8 @@ func TestLookupOpenMRForBranchUsesSharedContext(t *testing.T) {
 
 func TestDisplayDryRunSafetyCheckMissingCleanupStatus(t *testing.T) {
 	result := &SafetyCheckResult{
-		HasAgentBead:   true,
-		HasPolecatInfo: true,
-		HasBranchInfo:  true,
-		CleanupStatus:  "",
-		HookBead:       "",
+		CleanupStatus: "",
+		HookBead:      "",
 	}
 
 	out := captureStdout(t, func() {
@@ -994,8 +991,8 @@ func TestDisplayDryRunSafetyCheckMissingCleanupStatus(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(out, "<missing>") {
-		t.Errorf("displayDryRunSafetyCheck() output missing '<missing>' cleanup status marker: %q", out)
+	if !strings.Contains(out, "unknown (no agent bead)") {
+		t.Errorf("displayDryRunSafetyCheck() output missing unknown cleanup status marker: %q", out)
 	}
 	if !strings.Contains(out, "Hook") || !strings.Contains(out, "empty") {
 		t.Errorf("displayDryRunSafetyCheck() output missing empty hook line: %q", out)
@@ -1004,13 +1001,10 @@ func TestDisplayDryRunSafetyCheckMissingCleanupStatus(t *testing.T) {
 
 func TestDisplayDryRunSafetyCheckActiveHook(t *testing.T) {
 	result := &SafetyCheckResult{
-		Blocked:        true,
-		HasAgentBead:   true,
-		HasPolecatInfo: true,
-		HasBranchInfo:  true,
-		CleanupStatus:  polecat.CleanupClean,
-		HookBead:       "gt-abc123",
-		HookStale:      false,
+		Blocked:       true,
+		CleanupStatus: polecat.CleanupClean,
+		HookBead:      "gt-abc123",
+		HookStale:     false,
 	}
 
 	out := captureStdout(t, func() {
@@ -1026,12 +1020,9 @@ func TestDisplayDryRunSafetyCheckActiveHook(t *testing.T) {
 
 func TestDisplayDryRunSafetyCheckStaleHookNotBlocking(t *testing.T) {
 	result := &SafetyCheckResult{
-		HasAgentBead:   true,
-		HasPolecatInfo: true,
-		HasBranchInfo:  true,
-		CleanupStatus:  polecat.CleanupClean,
-		HookBead:       "gt-closed",
-		HookStale:      true,
+		CleanupStatus: polecat.CleanupClean,
+		HookBead:      "gt-closed",
+		HookStale:     true,
 	}
 
 	out := captureStdout(t, func() {
