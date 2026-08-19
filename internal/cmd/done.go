@@ -95,6 +95,31 @@ func shouldUpdateAgentStateOnDone(pushFailed, mrFailed bool) bool {
 	return !pushFailed && !mrFailed
 }
 
+// mrInvisibleReason reports why a freshly-submitted MR bead would be invisible
+// to the Refinery given the two detected invisibility signals, or "" when the
+// MR is refinery-visible. gt done must treat a non-empty reason as a failed
+// submission (gt-29cb): the source bead stays open and the polecat session is
+// preserved so the stranded work is recoverable, instead of being silently
+// closed over an MR the Refinery will never merge.
+//
+//   - localBeadsDir: the beads dir has no shared-beads redirect, so the MR bead
+//     was written to a database the Refinery never reads (run 'gt polecat repair').
+//   - prefixErr: rig-prefix routing landed the bead in the wrong rig's database
+//     despite the requested Rig, so that rig's Refinery cannot find it.
+//
+// Both signals are pure structural checks (path and prefix comparisons), not
+// database reads, so this is safe to evaluate immediately after MR creation
+// without eventual-consistency risk.
+func mrInvisibleReason(mrID, rigName, resolvedBeads string, localBeadsDir bool, prefixErr error) string {
+	if localBeadsDir {
+		return fmt.Sprintf("MR bead %s written to local beads dir %s with no shared-beads redirect — invisible to the Refinery (run 'gt polecat repair')", mrID, resolvedBeads)
+	}
+	if prefixErr != nil {
+		return fmt.Sprintf("MR bead %s landed in the wrong database for rig %q: %v — the Refinery will not find it (check 'gt mq list %s')", mrID, rigName, prefixErr, rigName)
+	}
+	return ""
+}
+
 func shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy string, pushFailed, mrFailed bool) bool {
 	if exitType != ExitCompleted || pushFailed || mrFailed {
 		return false
@@ -1422,12 +1447,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 		// Initialize beads and validate the source before any remote mutation.
-		// Without a redirect, MR beads are invisible to the Refinery.
+		// Whether the MR bead will be refinery-visible (a local unredirected
+		// beads dir, or wrong-rig routing) is enforced once at afterMR below,
+		// so it covers every MR-resolution path and fails loud instead of
+		// closing the source bead over an invisible MR (gt-29cb).
 		resolvedBeads := beads.ResolveBeadsDir(cwd)
-		if beads.IsLocalBeadsDir(cwd, resolvedBeads) {
-			fmt.Fprintf(os.Stderr, "WARNING: beads resolved to local dir %s (no shared-beads redirect)\n", resolvedBeads)
-			fmt.Fprintf(os.Stderr, "  MR beads written here will be invisible to the Refinery — run 'gt polecat repair' to fix\n")
-		}
 		bd := beads.NewWithBeadsDir(cwd, resolvedBeads)
 		if attachmentFields := beads.ParseAttachmentFields(sourceIssueForNoMerge); attachmentFields != nil && strings.EqualFold(strings.TrimSpace(attachmentFields.MergeStrategy), "local") {
 			fmt.Printf("%s Local merge strategy: skipping push and merge queue\n", style.Bold.Render("→"))
@@ -1938,13 +1962,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				goto notifyWitness
 			}
 
-			// gt-gpy: Validate that the MR bead landed in the rig's database.
-			// If the source bead has a cross-rig prefix (e.g., hq-), the routing
-			// could still resolve to the wrong database despite Rig: rigName.
-			// This is a warning-only guard — mrFailed is NOT set on mismatch.
-			if prefixErr := beads.ValidateRigPrefix(townRoot, rigName, mrID); prefixErr != nil {
-				style.PrintWarning("MR bead prefix mismatch: %v\nThe refinery may not find this MR — check 'gt mq list %s'", prefixErr, rigName)
-			}
+			// gt-gpy/gt-29cb: whether this MR bead landed somewhere the Refinery
+			// can actually find it (rig-prefix routing, local beads dir) is
+			// enforced at afterMR below for every MR-resolution path, not just
+			// this create branch — see mrInvisibleReason.
 
 			// GH#3032: Supersede older open MRs for the same source issue.
 			// When a polecat re-submits after fixing a gate failure, the old MR
@@ -2002,6 +2023,22 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 	afterMR:
+		// gt-29cb: an MR bead the Refinery cannot see is a failed submission,
+		// not a completion. Left unflagged, gt done would close the source bead
+		// and retire the session while the work never reaches the queue. Route
+		// both invisibility modes through mrFailed — the same channel every
+		// other MR failure in this path uses — so the source bead stays open,
+		// the session is preserved, and the Witness is notified. This runs for
+		// all three MR-resolution paths (create, existing, checkpoint resume),
+		// and re-checks on every resumed gt done.
+		if reason := mrInvisibleReason(mrID, rigName, resolvedBeads,
+			beads.IsLocalBeadsDir(cwd, resolvedBeads),
+			beads.ValidateRigPrefix(townRoot, rigName, mrID)); reason != "" {
+			mrFailed = true
+			doneErrors = append(doneErrors, reason)
+			style.PrintWarning("%s\nBranch is pushed, but the MR is not visible to the Refinery — source bead stays open for recovery; Witness notified.", reason)
+			goto notifyWitness
+		}
 		fmt.Printf("  Source: %s\n", branch)
 		fmt.Printf("  Target: %s\n", target)
 		fmt.Printf("  Issue: %s\n", issueID)
@@ -2022,7 +2059,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 notifyWitness:
 	// Nudge refinery — MR bead is already on main (transaction-based shared main).
-	if shouldNudgeRefinery(exitType, mrID) {
+	if shouldNudgeRefinery(exitType, mrID, mrFailed) {
 		nudgeRefinery(rigName, "MERGE_READY received - check inbox for pending work")
 	}
 
@@ -2272,8 +2309,13 @@ func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, remote, b
 // never emit MQ_SUBMIT, or the refinery wakes from backoff to find an empty
 // merge queue (gh#3885). The exitType check is defensive: it holds the
 // invariant even if a future code path populates mrID outside COMPLETED.
-func shouldNudgeRefinery(exitType, mrID string) bool {
-	return exitType == ExitCompleted && mrID != ""
+//
+// mrFailed suppresses the nudge on paths that set an mrID before diverting to
+// notifyWitness with a failed/invisible submission (the read-back failure at
+// GH#1945 and the refinery-invisible MR at gt-29cb): waking the refinery to
+// look for an MR it can never find is a pointless no-op.
+func shouldNudgeRefinery(exitType, mrID string, mrFailed bool) bool {
+	return exitType == ExitCompleted && mrID != "" && !mrFailed
 }
 
 // setDoneIntentLabel writes a done-intent:<type>:<unix-ts> label on the agent bead
