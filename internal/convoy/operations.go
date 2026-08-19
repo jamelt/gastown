@@ -185,6 +185,28 @@ var blockingDepTypes = map[string]bool{
 	"merge-blocks":       true,
 }
 
+// hardProhibitionLabels are gates that require human approval before dispatch.
+// Matches the list in internal/cmd/scheduler_feed.go. Issues with these labels
+// cannot be automatically dispatched and cannot be progressed by the daemon.
+var hardProhibitionLabels = map[string]bool{
+	"human":          true,
+	"gt:needs-human": true,
+	"risk:money":     true,
+	"area:security":  true,
+}
+
+// isIssueGated checks if an issue has hard-prohibition labels that require
+// fresh human approval before dispatch. Gated issues cannot be automatically
+// dispatched and are considered permanently undispatchable by the daemon.
+func isIssueGated(labels []string) bool {
+	for _, label := range labels {
+		if hardProhibitionLabels[label] {
+			return true
+		}
+	}
+	return false
+}
+
 // isIssueBlocked checks if an issue has unclosed blocking dependencies.
 // Returns true if any blocks, conditional-blocks, waits-for, or merge-blocks
 // dependency targets an issue that is not closed/tombstone.
@@ -604,6 +626,48 @@ func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot s
 			}
 		}
 	}
+}
+
+// allTrackedIssuesGated checks if all open tracked issues of a convoy are
+// permanently gated (have hard-prohibition labels requiring human approval).
+// Returns true only if:
+// - The convoy has at least one tracked issue
+// - All open tracked issues have hard-prohibition labels
+// - No tracked issues are closed/tombstone
+//
+// This is used by the daemon to detect when a convoy cannot make progress
+// and should stop polling (gt-ivj2).
+func allTrackedIssuesGated(ctx context.Context, store beadsdk.Storage, convoyID string) bool {
+	deps, err := store.GetDependenciesWithMetadata(ctx, convoyID)
+	if err != nil || len(deps) == 0 {
+		return false // No tracked issues = not all gated
+	}
+
+	var hasOpenIssue bool
+	for _, d := range deps {
+		if string(d.DependencyType) != "tracks" {
+			continue
+		}
+		status := string(d.Status)
+		// Skip closed/tombstone issues
+		if status == "closed" || status == "tombstone" {
+			continue
+		}
+		// Found an open issue
+		hasOpenIssue = true
+		// Check if it's gated
+		labels := d.Labels
+		if labels == nil {
+			labels = []string{}
+		}
+		if !isIssueGated(labels) {
+			// Found an open issue that's NOT gated → not all gated
+			return false
+		}
+	}
+
+	// Return true only if we found at least one open gated issue
+	return hasOpenIssue
 }
 
 // dispatchIssue dispatches an issue to a rig via gt sling.

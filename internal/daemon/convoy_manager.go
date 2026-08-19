@@ -520,9 +520,20 @@ func (m *ConvoyManager) scan() {
 			m.closeEmptyConvoy(c.ID)
 		} else {
 			// Tracked issues exist but none are ready. This could mean:
-			// (a) all tracked issues are closed → convoy should auto-close
-			// (b) issues are blocked/in-progress → needs agent review
-			// Run convoy check to handle case (a); it's a no-op for (b).
+			// (a) all tracked issues are gated → convoy parked (gt-ivj2)
+			// (b) all tracked issues are closed → convoy should auto-close
+			// (c) issues are blocked/in-progress → needs agent review
+			// Skip polling convoys where all tracked issues are permanently gated.
+			m.storesMu.Lock()
+			hqStore := m.stores["hq"]
+			m.storesMu.Unlock()
+
+			if hqStore != nil && m.allTrackedIssuesGated(c.ID, hqStore) {
+				m.logger("Convoy %s: parked (all %d tracked issues are gated — require human approval)", c.ID, c.TrackedCount)
+				continue
+			}
+
+			// Run convoy check to handle case (b); it's a no-op for (c).
 			m.logger("Convoy %s: %d tracked issues, 0 ready — checking completion", c.ID, c.TrackedCount)
 			m.checkConvoyCompletion(c.ID)
 		}
@@ -620,6 +631,10 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 // the (convoy, issue) pair is marked blocked (feedFirstReady stops retrying
 // it) and a single escalation is sent so a human or the mayor can break the
 // deadlock (e.g. clear a stale hook). See gt-vcp1.
+//
+// Permanent gate errors (e.g. "fresh human approval required") are treated
+// specially: they circuit-break immediately on the first occurrence rather than
+// waiting for maxConsecutiveSlingFailures attempts. See gt-ivj2.
 func (m *ConvoyManager) recordSlingFailure(convoyID, issueID, failKey, errMsg string) {
 	rec := m.slingFailures[failKey]
 	if rec == nil {
@@ -633,7 +648,11 @@ func (m *ConvoyManager) recordSlingFailure(convoyID, issueID, failKey, errMsg st
 		rec.count = 1
 	}
 
-	if rec.count < maxConsecutiveSlingFailures {
+	// Recognize permanent gate errors immediately (gt-ivj2)
+	isGateError := strings.Contains(errMsg, "fresh human approval")
+	shouldCircuitBreak := isGateError || rec.count >= maxConsecutiveSlingFailures
+
+	if !shouldCircuitBreak {
 		m.logger("Convoy %s: sling %s failed: %s", convoyID, issueID, errMsg)
 		return
 	}
@@ -642,8 +661,13 @@ func (m *ConvoyManager) recordSlingFailure(convoyID, issueID, failKey, errMsg st
 		return
 	}
 	rec.blocked = true
-	m.logger("Convoy %s: sling %s circuit-broken after %d consecutive identical failures (%s) — escalating, will not retry until state changes",
-		convoyID, issueID, rec.count, errMsg)
+	if isGateError {
+		m.logger("Convoy %s: sling %s circuit-broken (permanent gate: %s) — escalating, will not retry until gate clears",
+			convoyID, issueID, errMsg)
+	} else {
+		m.logger("Convoy %s: sling %s circuit-broken after %d consecutive identical failures (%s) — escalating, will not retry until state changes",
+			convoyID, issueID, rec.count, errMsg)
+	}
 	m.escalateSlingDeadlock(convoyID, issueID, errMsg)
 }
 
@@ -683,6 +707,52 @@ func (m *ConvoyManager) checkConvoyCompletion(convoyID string) {
 	if err := cmd.Run(); err != nil {
 		m.logger("Convoy %s: completion check failed: %s", convoyID, util.FirstLine(stderr.String()))
 	}
+}
+
+// allTrackedIssuesGated checks if all open tracked issues of a convoy are
+// permanently gated (have hard-prohibition labels requiring human approval).
+// Returns true only if the convoy has at least one open tracked issue and
+// all of them are gated. Used to detect parked convoys (gt-ivj2).
+func (m *ConvoyManager) allTrackedIssuesGated(convoyID string, store beadsdk.Storage) bool {
+	deps, err := store.GetDependenciesWithMetadata(m.ctx, convoyID)
+	if err != nil || len(deps) == 0 {
+		return false // No tracked issues = not all gated
+	}
+
+	var hasOpenIssue bool
+	for _, d := range deps {
+		if string(d.DependencyType) != "tracks" {
+			continue
+		}
+		status := string(d.Status)
+		// Skip closed/tombstone issues
+		if status == "closed" || status == "tombstone" {
+			continue
+		}
+		// Found an open issue
+		hasOpenIssue = true
+		// Check if it's gated
+		if !m.isIssueGated(d.Labels) {
+			// Found an open issue that's NOT gated → not all gated
+			return false
+		}
+	}
+
+	// Return true only if we found at least one open gated issue
+	return hasOpenIssue
+}
+
+// isIssueGated checks if an issue has hard-prohibition labels that require
+// fresh human approval before dispatch. Matches labels in
+// internal/cmd/scheduler_feed.go:hardProhibitionLabels.
+func (m *ConvoyManager) isIssueGated(labels []string) bool {
+	for _, label := range labels {
+		switch label {
+		case "human", "gt:needs-human", "risk:money", "area:security":
+			return true
+		}
+	}
+	return false
 }
 
 // closeEmptyConvoy runs gt convoy check to auto-close an empty convoy.
