@@ -1,0 +1,124 @@
+PR Sheriff independent re-verification — PR #4054 (bead gt-pr-4054-sheriff-review)
+Generated: 2026-08-19T11:32:21Z
+All commands run against a freshly-created detached git worktree on upstream/main
+(HEAD 649b832b7 at time of run), NOT against this review branch's own fork checkout.
+
+=== gh pr view 4054 --repo gastownhall/gastown ===
+$ gh pr view 4054 --repo gastownhall/gastown --json number,title,state,author,mergeable,mergeStateStatus,baseRefName,headRefName,isDraft,labels,additions,deletions,changedFiles,url,createdAt,updatedAt
+{"additions":1398,"author":{"login":"esciara","name":"Emmanuel Sciara"},"baseRefName":"main","changedFiles":19,"createdAt":"2026-05-17T23:53:07Z","deletions":144,"headRefName":"issue-hunter/4045-gt-is-not-fork-aware-at-runtime-refinery","isDraft":false,"labels":[{"name":"kind/bug"},{"name":"status/accepted"},{"name":"priority/p2"}],"mergeStateStatus":"UNKNOWN","mergeable":"UNKNOWN","number":4054,"state":"CLOSED","title":"fix: gt is not fork-aware at runtime: refinery start / crew context / no persistent refinery-off for rigs with upstream_url","updatedAt":"2026-07-09T12:39:46Z","url":"https://github.com/gastownhall/gastown/pull/4054"}
+
+=== gh pr view 4054 close comment (last of 3) ===
+[Bella-Giraffety] at 2026-07-09T12:39:45Z:
+Closed as superseded by replacement PR #4452, merged as 55576cd6ec07d13b7a58a4fe53dbb88d322ae5d8. Original contribution attribution was preserved in the squash merge with Co-authored-by: Emmanuel Sciara <emmanuel.sciara@gmail.com>.
+
+=== gh pr view 4452 --repo gastownhall/gastown ===
+$ gh pr view 4452 --repo gastownhall/gastown --json number,title,state,author,mergedAt,mergeStateStatus,baseRefName,headRefName,isDraft,labels,url,createdAt,updatedAt,mergedBy
+{"author":{"login":"Bella-Giraffety"},"baseRefName":"main","createdAt":"2026-07-08T22:16:14Z","headRefName":"polecat/mirelurk/gt-s5nz+mrcjk3k0","isDraft":false,"labels":[{"name":"kind/bug"},{"name":"priority/p2"},{"name":"status/merge-ready"}],"mergeStateStatus":"UNKNOWN","mergedAt":"2026-07-09T12:39:13Z","mergedBy":{"login":"Bella-Giraffety"},"number":4452,"state":"MERGED","title":"fix: make gt fork-aware at runtime","updatedAt":"2026-07-09T12:39:13Z","url":"https://github.com/gastownhall/gastown/pull/4452"}
+
+=== gh pr checks 4452 --repo gastownhall/gastown ===
+Integration Tests	pass	11m39s
+Lint	pass	57s
+Reject go.mod replace directives	pass	6s
+Reject issues.jsonl	pass	5s
+Test	pass	13m42s
+Windows Smoke Test	pass	8m41s
+remove-label	pass	3s
+
+=== git merge-base --is-ancestor 55576cd6e upstream/main ===
+$ git merge-base --is-ancestor 55576cd6e upstream/main && echo "PASS: 55576cd6e is ancestor of upstream/main"
+PASS: 55576cd6e is ancestor of upstream/main
+$ git log upstream/main --oneline | grep -n 55576cd6e
+57:55576cd6e fix: make gt fork-aware at runtime
+
+=== git show 55576cd6e (message) ===
+fix: make gt fork-aware at runtime
+
+Merge cleanup-first replacement for PR #4054.
+
+Refs: https://github.com/gastownhall/gastown/pull/4054
+Replacement: https://github.com/gastownhall/gastown/pull/4452
+
+Co-authored-by: Emmanuel Sciara <emmanuel.sciara@gmail.com>
+Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+
+=== git show upstream/main:internal/refinery/manager.go | grep fork-guard symbols ===
+35:	ErrForkRig        = errors.New("refinery disabled for fork-backed rig")
+38:// ForkRigError reports that refinery startup is disabled because the rig has
+39:// an upstream_url and must use the fork/PR workflow instead of local MQ merge.
+40:type ForkRigError struct {
+144:// StartAllowingForkRig starts the refinery even when the rig has upstream_url.
+146:func (m *Manager) StartAllowingForkRig(foreground bool, agentOverride string) error {
+150:func (m *Manager) start(foreground bool, agentOverride string, allowForkRig bool) error {
+159:	if !allowForkRig {
+160:		if err := m.blockForkRigStart(t); err != nil {
+337:// ForkRigStartError returns ErrForkRig when the rig config has upstream_url.
+339:func (m *Manager) ForkRigStartError() error {
+341:	if err != nil || cfg == nil || strings.TrimSpace(cfg.UpstreamURL) == "" {
+347:// BlockForkRigStart applies the fork-rig startup guard and kills any leftover
+349:func (m *Manager) BlockForkRigStart() error {
+353:func (m *Manager) blockForkRigStart(t *tmux.Tmux) error {
+
+=== focused regression tests, CGO_ENABLED=0, fresh detached worktree on upstream/main ===
+$ go test ./internal/refinery -run 'TestManager_Start(ForkRigDoesNotCreateSession|AllowingForkRigStillHonorsSafetyStop|SafetyStopped)' -count=1 -v
+--- PASS: TestManager_StartSafetyStoppedDoesNotCreateSession (0.01s)
+--- PASS: TestManager_StartSafetyStoppedKillsLeftoverSession (0.01s)
+--- PASS: TestManager_StartForkRigDoesNotCreateSession (0.00s)
+--- PASS: TestManager_StartAllowingForkRigStillHonorsSafetyStop (0.01s)
+PASS
+ok  	github.com/steveyegge/gastown/internal/refinery	0.319s
+
+$ go test ./internal/templates -run 'TestRenderRole_(PolecatForkRigUsesPRWorkflow|CrewForkRigUsesPRWorkflow)' -count=1 -v
+--- PASS: TestRenderRole_PolecatForkRigUsesPRWorkflow (0.00s)
+--- PASS: TestRenderRole_CrewForkRigUsesPRWorkflow (0.00s)
+PASS
+ok  	github.com/steveyegge/gastown/internal/templates	0.007s
+
+$ go test ./internal/daemon -run 'TestEnsureRefineryRunning(ForkRigDoesNotSpawn|SafetyStoppedDoesNotSpawn)' -count=1 -v
+--- PASS: TestEnsureRefineryRunningSafetyStoppedDoesNotSpawn (0.01s)
+--- PASS: TestEnsureRefineryRunningForkRigDoesNotSpawn (0.01s)
+PASS
+ok  	github.com/steveyegge/gastown/internal/daemon	0.389s
+(note: Dolt container unavailable in this sandbox -- Dolt-dependent daemon tests skip; the two fork/safety-stop tests above do not depend on Dolt and ran/passed directly)
+
+$ go test ./internal/cmd -run 'Test(Refinery(Start|Restart)ForceFlag|UpStartRefinerySkipsForkRig|OutputAutonomousDirectiveForkRigAvoidsMergeQueueGuidance|OutputMoleculeWorkflowForkRigOverridesFormulaMergeQueueReminder)' -count=1 -v
+--- PASS: TestOutputAutonomousDirectiveForkRigAvoidsMergeQueueGuidance (0.00s)
+--- PASS: TestOutputMoleculeWorkflowForkRigOverridesFormulaMergeQueueReminder (0.00s)
+--- PASS: TestRefineryStartForceFlag (0.00s)
+--- PASS: TestRefineryRestartForceFlag (0.00s)
+--- PASS: TestUpStartRefinerySkipsForkRig (0.18s)
+PASS
+ok  	github.com/steveyegge/gastown/internal/cmd	0.498s
+
+TOTAL: 12/12 targeted tests pass, 0 fail.
+
+=== build ===
+$ CGO_ENABLED=0 go build ./cmd/gt
+(exit 0, no output)
+
+=== related GitHub issue search ===
+$ gh issue list --repo gastownhall/gastown --search "fork-aware" --state all --json number,title,state,url
+  #4045 OPEN   "gt is not fork-aware at runtime: refinery start / crew context / no persistent refinery-off for rigs with upstream_url"
+  #3994 CLOSED "docs: document fork-based rig setup ..."
+  (others unrelated -- different subsystems)
+
+$ gh issue view 4045 --repo gastownhall/gastown --json comments
+comments: [] (zero comments -- never actioned)
+
+$ gh issue list --repo gastownhall/gastown --search "refinery_disabled OR \"persistent refinery\"" --state open --json number,title,url
+  #4045 (same issue)
+  #4540 "gt agents resolve --role X --rig Y returns a town-issues bead..." -- distinct subsystem
+  #3946 "Regression of #3676? gt sling to polecat fails..." -- distinct subsystem
+
+=== branch-hygiene merge-gate (not applicable this pass; re-read from replacement-build time) ===
+$ cat pr-sheriff-evidence/gt-s5nz-pr4054-replacement/merge-gate-check.txt
+command: gt-pr-sheriff-check --evidence pr-sheriff-evidence/gt-s5nz-pr4054-replacement/evidence.json --merge-gate
+exit_code: 0
+stdout:
+PR Sheriff: PASS
+merge_path_allowed: true
+verdict: merge_replacement
+gates: 12 pass, 2 not_applicable, 0 waived, 0 fail
+
+=== worktree cleanup ===
+$ git worktree remove <scratch-worktree-path> --force
+(no output — clean removal)
