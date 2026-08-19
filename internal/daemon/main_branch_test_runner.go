@@ -174,7 +174,7 @@ func (d *Daemon) runMainBranchTests() {
 	if len(failures) > 0 {
 		msg := fmt.Sprintf("main branch test failures:\n%s", strings.Join(failures, "\n"))
 		d.logger.Printf("main_branch_test: escalating %d failure(s)", len(failures))
-		d.escalate("main_branch_test", msg)
+		d.escalate("main_branch_test", msg, "main-branch-test:failures")
 	}
 
 	d.logger.Printf("main_branch_test: patrol cycle complete (%d tested, %d failed)", tested, failed)
