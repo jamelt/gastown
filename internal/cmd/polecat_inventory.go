@@ -39,6 +39,18 @@ type polecatActiveWorkEvidence struct {
 	AssignedIssue        string
 }
 
+// agentSourceIssueHint returns the source work issue ID for an agent, if any.
+// It returns the current HookBead if assigned, otherwise the LastSourceIssue if available.
+func agentSourceIssueHint(hint string, fields *beads.AgentFields) string {
+	if fields == nil {
+		return ""
+	}
+	if fields.HookBead != "" {
+		return fields.HookBead
+	}
+	return fields.LastSourceIssue
+}
+
 func newPolecatSessionSet(sessionNames []string) polecatSessionSet {
 	sessions := make(polecatSessionSet, len(sessionNames))
 	for _, sessionName := range sessionNames {
