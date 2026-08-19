@@ -2818,3 +2818,48 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 		t.Errorf("action = %q, should not archive when work is not merged", z.Action)
 	}
 }
+
+// TestHandleZombieRestart_InvalidatesCleanupStatusBeforeRestart is part of
+// gt-h6u4: a confirmed-dead session's persisted cleanup_status must be
+// invalidated before restart, since it may be stale relative to whatever the
+// dead session actually left behind and gt polecat list / gt scheduler
+// status trust it between witness patrol sweeps.
+//
+// Not parallel: overrides package-level vars.
+func TestHandleZombieRestart_InvalidatesCleanupStatusBeforeRestart(t *testing.T) {
+	oldVerify := verifyBranchAlreadyMerged
+	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+
+	oldInvalidate := invalidateZombieCleanupStatus
+	var invalidated bool
+	var gotRig, gotPolecat, gotSnapshot string
+	invalidateZombieCleanupStatus = func(townRoot, workDir, rigName, polecatName, snapshotCleanupStatus string) {
+		invalidated = true
+		gotRig, gotPolecat, gotSnapshot = rigName, polecatName, snapshotCleanupStatus
+	}
+	t.Cleanup(func() { invalidateZombieCleanupStatus = oldInvalidate })
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	z := &ZombieResult{PolecatName: "scavenger", HookBead: "ma-poc.4"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "scavenger", "ma-poc.4", "clean", z)
+
+	if !invalidated {
+		t.Fatal("cleanup_status was never invalidated")
+	}
+	if gotRig != "testrig" || gotPolecat != "scavenger" {
+		t.Errorf("invalidateZombieCleanupStatus(rig=%q, polecat=%q), want (testrig, scavenger)", gotRig, gotPolecat)
+	}
+	// The snapshot value passed through must be the one handleZombieRestart
+	// read, not a hardcoded guess — this is what lets the write no-op if a
+	// concurrent restart's fresh self-report has already moved it on.
+	if gotSnapshot != "clean" {
+		t.Errorf("invalidateZombieCleanupStatus snapshot = %q, want %q", gotSnapshot, "clean")
+	}
+}

@@ -509,14 +509,20 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			activeWork = nil
 		}
 
+		fieldsByName := make(map[string]*beads.AgentFields, len(polecatNames))
+		for _, name := range polecatNames {
+			agentBeadID := polecatBeadIDForRig(r, r.Name, name)
+			fieldsByName[name] = parsePolecatAgentFields(agents[agentBeadID])
+		}
+		mqIndex := buildPolecatMQIndex(bd, fieldsByName)
+
 		// Track known polecat names from filesystem for zombie detection
 		knownNames := make(map[string]bool)
 		for _, name := range polecatNames {
-			agentBeadID := polecatBeadIDForRig(r, r.Name, name)
-			fields := parsePolecatAgentFields(agents[agentBeadID])
-			item := buildPolecatInventoryItem(r.Name, name, fields, activeWork[name], sessions)
+			fields := fieldsByName[name]
+			item := buildPolecatInventoryItem(r.Name, name, fields, activeWork[name], sessions, mqIndex)
 			if activeWorkErr != nil {
-				item = buildPolecatInventoryItemFromEvidence(r.Name, name, fields, polecatActiveWorkLookupError(activeWorkErr), sessions)
+				item = buildPolecatInventoryItemFromEvidence(r.Name, name, fields, polecatActiveWorkLookupError(activeWorkErr), sessions, mqIndex)
 			}
 			disposition := item.Disposition
 			state := effectivePolecatState(PolecatListItem{

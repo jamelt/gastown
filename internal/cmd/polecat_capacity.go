@@ -222,11 +222,14 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 			return snapshot, fmt.Errorf("listing active polecat work for %s capacity: %w", rigName, err)
 		}
 		prefix := beads.GetPrefixForRig(townRoot, rigName)
+		fieldsByName := make(map[string]*beads.AgentFields, len(polecatNames))
 		for _, name := range polecatNames {
 			agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, name)
-			issue := agents[agentID]
-			fields := parsePolecatAgentFields(issue)
-			applyAgentFieldsToCapacitySnapshot(&snapshot, rigName, name, fields, activeWork[name], sessions)
+			fieldsByName[name] = parsePolecatAgentFields(agents[agentID])
+		}
+		mqIndex := buildPolecatMQIndex(rigBeads, fieldsByName)
+		for _, name := range polecatNames {
+			applyAgentFieldsToCapacitySnapshot(&snapshot, rigName, name, fieldsByName[name], activeWork[name], sessions, mqIndex)
 		}
 	}
 
@@ -262,8 +265,8 @@ func listPolecatDirectoryNames(rigPath string) ([]string, error) {
 	return names, nil
 }
 
-func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) {
-	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions)
+func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet, mq polecatMQIndex) {
+	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions, mq)
 	applyWorkstateDispositionToCapacitySnapshot(snapshot, item.State, item.Disposition)
 }
 

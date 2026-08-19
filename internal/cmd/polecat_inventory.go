@@ -73,11 +73,109 @@ func polecatSessionKey(rigName, polecatName string) string {
 	return rigName + polecatSessionKeySep + polecatName
 }
 
-func buildPolecatInventoryItem(rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) polecatInventoryItem {
-	return buildPolecatInventoryItemFromEvidence(rigName, polecatName, fields, assessPolecatAssignedIssueWork(activeWork), sessions)
+// polecatMQIndex batches the merge-request and source-issue lookups that
+// check-recovery makes per-polecat (FindMRForBranchAny, bd.Show) into two
+// bulk fetches per rig, so gt polecat list / gt scheduler status can populate
+// WorkstateInput's MQ fields without an O(N) per-polecat fan-out (gt-h6u4).
+type polecatMQIndex struct {
+	mrByBranch   map[string]*beads.Issue
+	sourceIssues map[string]*beads.Issue
+	lookupFailed bool
 }
 
-func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *beads.AgentFields, activeWorkEvidence polecatActiveWorkEvidence, sessions polecatSessionSet) polecatInventoryItem {
+// polecatMQIndexSource is the subset of *beads.Beads that buildPolecatMQIndex
+// needs. It lets tests fake the batched MR/source-issue lookups without a
+// real bd binary, mirroring mrFinder/issueShower elsewhere in this package.
+type polecatMQIndexSource interface {
+	ListMergeRequests(opts beads.ListOptions) ([]*beads.Issue, error)
+	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
+}
+
+// buildPolecatMQIndex fetches all of a rig's merge-request beads once and all
+// referenced source issues once (via ShowMultiple), instead of the per-polecat
+// FindMRForBranchAny/bd.Show calls check-recovery uses. A fetch failure is
+// recorded on the index (not returned as an error) so callers degrade the
+// affected polecats to mq-lookup-failed/NEEDS_RECOVERY rather than aborting
+// the whole inventory listing.
+func buildPolecatMQIndex(bd polecatMQIndexSource, fieldsByName map[string]*beads.AgentFields) polecatMQIndex {
+	idx := polecatMQIndex{mrByBranch: map[string]*beads.Issue{}, sourceIssues: map[string]*beads.Issue{}}
+	if bd == nil {
+		idx.lookupFailed = true
+		return idx
+	}
+
+	mrs, err := bd.ListMergeRequests(beads.ListOptions{Status: "all", Label: "gt:merge-request"})
+	if err != nil {
+		idx.lookupFailed = true
+	}
+	for _, mr := range mrs {
+		mrFields := beads.ParseMRFields(mr)
+		if mrFields == nil || mrFields.Branch == "" {
+			continue
+		}
+		if existing, ok := idx.mrByBranch[mrFields.Branch]; !ok || mr.CreatedAt > existing.CreatedAt {
+			idx.mrByBranch[mrFields.Branch] = mr
+		}
+	}
+
+	var sourceIDs []string
+	seen := make(map[string]bool)
+	for _, fields := range fieldsByName {
+		sourceID := agentSourceIssueHint("", fields)
+		if sourceID != "" && !seen[sourceID] {
+			seen[sourceID] = true
+			sourceIDs = append(sourceIDs, sourceID)
+		}
+	}
+	if len(sourceIDs) > 0 {
+		issues, err := bd.ShowMultiple(sourceIDs)
+		if err != nil {
+			idx.lookupFailed = true
+		}
+		idx.sourceIssues = issues
+	}
+	return idx
+}
+
+// applyMQIndexToWorkstateInput populates the merge-queue fields of a
+// WorkstateInput from the batched polecatMQIndex instead of check-recovery's
+// live per-polecat FindMRForBranchAny/bd.Show calls, so gt polecat list and
+// gt scheduler status can reach NEEDS_MQ_SUBMIT (previously structurally
+// unreachable — MQCheckRequired was never set) without a per-polecat
+// fan-out (gt-h6u4).
+//
+// HasSubmittableWork is a conservative approximation from persisted/batched
+// signals only — it does not run check-recovery's live git-diff check
+// (hasSubmittableWorkForRecovery), which would need a live git-check fan-out
+// across every polecat and was reviewed and rejected as a perf regression on
+// the scheduler's heartbeat path. The approximation only ever biases toward
+// "needs a check" (NEEDS_MQ_SUBMIT), never toward falsely claiming reusable.
+func applyMQIndexToWorkstateInput(input *polecat.WorkstateInput, fields *beads.AgentFields, mq polecatMQIndex) {
+	branch := strings.TrimSpace(input.Branch)
+	if branch == "" {
+		return
+	}
+	input.MQCheckRequired = true
+	if mq.lookupFailed {
+		input.MQLookupFailed = true
+		return
+	}
+	if sourceIssue := mq.sourceIssues[agentSourceIssueHint("", fields)]; sourceIssue != nil {
+		input.AssignedBeadTerminal = beads.IssueStatus(sourceIssue.Status).IsTerminal()
+		if attachment := beads.ParseAttachmentFields(sourceIssue); attachment != nil {
+			input.MQNotRequired = attachment.NoMerge || attachment.ReviewOnly ||
+				strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local")
+		}
+	}
+	_, input.MRSubmitted = mq.mrByBranch[branch]
+	input.HasSubmittableWork = !input.PushFailed && !input.MRSubmitted && !input.AssignedBeadTerminal
+}
+
+func buildPolecatInventoryItem(rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet, mq polecatMQIndex) polecatInventoryItem {
+	return buildPolecatInventoryItemFromEvidence(rigName, polecatName, fields, assessPolecatAssignedIssueWork(activeWork), sessions, mq)
+}
+
+func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *beads.AgentFields, activeWorkEvidence polecatActiveWorkEvidence, sessions polecatSessionSet, mq polecatMQIndex) polecatInventoryItem {
 	sessionName, running := sessions.lookup(rigName, polecatName)
 	item := polecatInventoryItem{
 		Rig:            rigName,
@@ -134,6 +232,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	}
 
 	input.State = item.State
+	applyMQIndexToWorkstateInput(&input, fields, mq)
 	item.Disposition = polecat.DecideWorkstate(input)
 	return item
 }
