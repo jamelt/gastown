@@ -1717,9 +1717,12 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 		return true // Can't determine session = treat as ready
 	}
 
-	// Check if tmux session exists
-	checkCmd := tmux.BuildCommand("has-session", "-t", sessionName)
-	if err := checkCmd.Run(); err != nil {
+	// Check if tmux session exists using HasSession() which includes exact-match anchor
+	exists, err := tmux.NewTmux().HasSession(sessionName)
+	if err != nil {
+		return true // Error checking session = treat as ready
+	}
+	if !exists {
 		// Session doesn't exist = orphaned molecule or dead worker
 		// This is the key fix: issues with in_progress/hooked status but
 		// dead workers are now correctly detected as stranded
