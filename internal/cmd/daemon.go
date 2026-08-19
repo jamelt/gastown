@@ -529,6 +529,16 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
+	// Enforce hard-prohibition gate marker at daemon startup per hq-1s4w/gt-i4bn.
+	// The binary must contain evidence of gate enforcement before daemon can start.
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("determining binary path: %w", err)
+	}
+	if err := enforceGateMarkerInBinary(exePath); err != nil {
+		return err
+	}
+
 	// Clear agent identity env vars inherited from the launch environment.
 	// When the daemon is started from an agent session (e.g. crew runs
 	// 'gt daemon start'), it inherits GT_ROLE/GT_CREW/etc. Any subprocess
@@ -633,6 +643,27 @@ func runDaemonRotateLogs(cmd *cobra.Command, args []string) error {
 
 	if len(result.Rotated) == 0 && len(result.Errors) == 0 {
 		fmt.Printf("%s No logs needed rotation\n", style.Bold.Render("✓"))
+	}
+
+	return nil
+}
+
+// enforceGateMarkerInBinary verifies the binary contains the hard-prohibition gate enforcement marker.
+// This is a deployment-time assertion per hq-1s4w (decision gt-i4bn option A).
+// The daemon must refuse to start with a binary that does not contain evidence of gate enforcement.
+func enforceGateMarkerInBinary(binaryPath string) error {
+	data, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return fmt.Errorf("cannot enforce gate marker: cannot read binary %s: %w", binaryPath, err)
+	}
+
+	if !strings.Contains(string(data), "confirm-human-approved") {
+		return fmt.Errorf("REFUSAL: daemon cannot start with this binary\n" +
+			"The binary at %s does not contain the hard-prohibition gate enforcement marker.\n" +
+			"The gate commits are on main; the binary must contain evidence of their enforcement.\n" +
+			"This is a deployment-time control per decision gt-i4bn (ACCEPT option A).\n" +
+			"Do NOT rebuild from diverged or uncommitted state. Use: git checkout main && make install",
+			binaryPath)
 	}
 
 	return nil

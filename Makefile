@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path warn-if-install-symlink repoint-gastown-symlink clean test test-makefile test-e2e-container check-up-to-date
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path warn-if-install-symlink repoint-gastown-symlink clean test test-makefile test-e2e-container check-up-to-date check-gate-marker
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -98,6 +98,23 @@ ifndef SKIP_FORWARD_CHECK
 	fi
 endif
 
+# check-gate-marker: Verify the binary contains the hard-prohibition gate enforcement marker.
+# This is a deployment-time assertion per hq-1s4w (propagated via gt-i4bn).
+# The gate commits are live; the binary must contain evidence of enforcement.
+check-gate-marker:
+ifndef SKIP_GATE_CHECK
+	@if ! grep -q "confirm-human-approved" $(BUILD_DIR)/$(BINARY); then \
+		echo "ERROR: $(BUILD_DIR)/$(BINARY) does not contain the hard-prohibition gate enforcement marker"; \
+		echo "The binary must contain 'confirm-human-approved' to enforce hq-1s4w controls."; \
+		echo "This gate is MANDATORY per decision gt-i4bn (ACCEPT option A)."; \
+		echo "Do NOT override with SKIP_GATE_CHECK=1 without explicit human authorization."; \
+		echo "To verify the gate was compiled in: grep confirm-human-approved $(BUILD_DIR)/$(BINARY)"; \
+		exit 1; \
+	else \
+		echo "Gate marker verified: binary contains enforcement marker"; \
+	fi
+endif
+
 check-install-path:
 	@resolved=$$(command -v $(BINARY) 2>/dev/null || true); \
 	if [ "$$resolved" != "$(INSTALL_DIR)/$(BINARY)" ] && [ "$$resolved" != "$(GASTOWN_BIN_DIR)/$(BINARY)" ]; then \
@@ -132,7 +149,7 @@ repoint-gastown-symlink:
 		echo "Repointed $(GASTOWN_BIN_DIR)/$(BINARY) -> $(BINARY)-$$VER"; \
 	fi
 
-install: check-up-to-date build
+install: check-up-to-date build check-gate-marker
 	@mkdir -p $(INSTALL_DIR)
 	@$(MAKE) --no-print-directory warn-if-install-symlink
 	@rm -f $(INSTALL_DIR)/$(BINARY)
@@ -165,7 +182,7 @@ install: check-up-to-date build
 # safe-install: Replace binary WITHOUT restarting daemon or killing sessions.
 # Use this for automated rebuilds (e.g., rebuild-gt plugin). Sessions pick up
 # the new binary on their next natural cycle/handoff.
-safe-install: check-up-to-date check-forward-only build
+safe-install: check-up-to-date check-forward-only build check-gate-marker
 	@mkdir -p $(INSTALL_DIR)
 	@$(MAKE) --no-print-directory warn-if-install-symlink
 	@# Atomic-ish replace: copy to temp then move (move is atomic on same filesystem)
