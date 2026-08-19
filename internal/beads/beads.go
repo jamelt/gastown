@@ -2198,3 +2198,18 @@ func ProvisionPrimeMDForWorktree(worktreePath string) error {
 	// Provision PRIME.md in the target directory
 	return ProvisionPrimeMD(beadsDir)
 }
+
+// IsMoleculeContainerOrStep reports whether an issue is a molecule (wisp) container or step (both internal types).
+func IsMoleculeContainerOrStep(issue *Issue) bool {
+	if issue == nil {
+		return false
+	}
+	issueID := strings.ToLower(strings.TrimSpace(issue.ID))
+	if strings.HasPrefix(issueID, "gt-wisp-") {
+		return true
+	}
+	if strings.HasPrefix(issueID, "mol-") {
+		return true
+	}
+	return false
+}

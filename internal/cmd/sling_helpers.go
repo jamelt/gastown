@@ -446,6 +446,7 @@ func buildSlingFieldUpdates(
 	attachedFormula string,
 	noMerge bool,
 	reviewOnly bool,
+	mode string,
 	formulaVars string,
 	convoyID string,
 	mergeStrategy string,
@@ -459,6 +460,7 @@ func buildSlingFieldUpdates(
 		AttachedFormula:  attachedFormula,
 		NoMerge:          noMerge,
 		ReviewOnly:       reviewOnly,
+		Mode:             mode,
 		ConvoyID:         convoyID,
 		MergeStrategy:    mergeStrategy,
 		ConvoyOwned:      convoyOwned,
@@ -878,8 +880,9 @@ func isPolecatTarget(target string) bool {
 
 // FormulaOnBeadResult contains the result of instantiating a formula on a bead.
 type FormulaOnBeadResult struct {
-	WispRootID string // The wisp root ID (compound root after bonding)
-	BeadToHook string // The bead ID to hook (BASE bead, not wisp - lifecycle fix)
+	WispRootID  string   // The wisp root ID (compound root after bonding)
+	BeadToHook  string   // The bead ID to hook (BASE bead, not wisp - lifecycle fix)
+	FormulaVars []string // The instantiated formula variables
 }
 
 // InstantiateFormulaOnBead creates a wisp from a formula, bonds it to a bead.
