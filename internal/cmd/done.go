@@ -104,6 +104,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// Crew, deacons, witnesses etc. don't use gt done - they persist across tasks.
 	// Polecat sessions end with gt done — the session is cleaned up, but the
 	// polecat's persistent identity (agent bead, CV chain) survives across assignments.
+	//
+	// CRITICAL: Must use raw os.Getenv("BD_ACTOR") here, NOT claimedActor().
+	// This is a fail-closed access control check: if BD_ACTOR is not set, the caller
+	// has no identity and we must error. claimedActor() would provide a cwd-derived
+	// fallback, turning a hard failure into a silently-permitted call from an
+	// unidentified context. See gt-hax3 for the security rationale.
 	actor := os.Getenv("BD_ACTOR")
 	if actor == "" {
 		return fmt.Errorf("gt done requires BD_ACTOR to be set (caller identity unknown)")

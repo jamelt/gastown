@@ -326,3 +326,27 @@ func identityFromAgentFile(parsed agentIdentityFile) string {
 
 	return ""
 }
+
+// claimedActor returns the claimed actor/sender identity for audit/display purposes.
+// It tries BD_ACTOR first (direct env var), then falls back to detectSender() cwd-based detection.
+//
+// WARNING: This returns an UNVERIFIED, spoofable, self-reported claim.
+// For security-sensitive contexts requiring verified identity, use:
+// - detectSenderVerified() - verifies sender identity against tmux session ancestry
+// - verifiedSenderFromSession() - requires explicit session authentication
+//
+// This is safe for:
+// - Display/attribution fields (CreatedBy, FiledBy, etc.)
+// - Non-security audit logging
+// - Self-exclusion filters (skip self in broadcasts)
+//
+// This is NOT safe for:
+// - Access control decisions
+// - State mutation (subscribe/unsubscribe operations)
+// - Cross-check anti-spoofing invariants
+func claimedActor() string {
+	if actor := os.Getenv("BD_ACTOR"); actor != "" {
+		return actor
+	}
+	return detectSender()
+}

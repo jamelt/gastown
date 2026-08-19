@@ -58,7 +58,7 @@ func runBroadcast(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get sender identity to exclude self
-	sender := os.Getenv("BD_ACTOR")
+	sender := claimedActor()
 
 	// Filter to target agents
 	var targets []*AgentSession

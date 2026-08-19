@@ -47,10 +47,7 @@ func mutateTrackingRelationViaStore(townRoot, trackerID, issueID string, add boo
 	defer cleanup()
 
 	targetID := trackingDependsOnID(townRoot, issueID)
-	actor := os.Getenv("BD_ACTOR")
-	if actor == "" {
-		actor = detectSender()
-	}
+	actor := claimedActor()
 
 	if add {
 		dep := &beadsdk.Dependency{
