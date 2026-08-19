@@ -46,27 +46,67 @@ func TestFeedSkipReason(t *testing.T) {
 			skip:  true,
 		},
 		{
+			name:  "hq-cv- ID prefix is skipped even without type/label",
+			issue: &beads.Issue{ID: "hq-cv-abc123", Title: "A convoy without a synced label", Status: "open"},
+			want:  "epic/convoy container, not dispatchable work",
+			skip:  true,
+		},
+		{
 			name:  "human decision title is skipped",
 			issue: &beads.Issue{ID: "gt-6", Title: "Human decision for opencode feature", Status: "open"},
-			want:  "requires human decision",
+			want:  "title indicates human decision required",
 			skip:  true,
 		},
 		{
 			name:  "human decision description phrase is skipped",
 			issue: &beads.Issue{ID: "gt-7", Title: "Route selection", Status: "open", Description: "This requires human approval before proceeding."},
-			want:  "requires human decision",
+			want:  "description indicates human decision required",
 			skip:  true,
 		},
 		{
 			name:  "gt:needs-human label is skipped",
 			issue: &beads.Issue{ID: "gt-8", Title: "Some task", Status: "open", Labels: []string{"gt:needs-human"}},
-			want:  "requires human decision",
+			want:  "gt:needs-human label",
 			skip:  true,
 		},
 		{
 			name:  "mismatched platform label is skipped",
 			issue: &beads.Issue{ID: "gt-9", Title: "macOS gate capture", Status: "open", Labels: []string{"gt:platform:darwin"}},
 			skip:  true, // exact reason string depends on runtime.GOOS, checked separately below
+		},
+		{
+			name:  "blocked status is skipped even without a dependency edge",
+			issue: &beads.Issue{ID: "gt-10", Title: "Some task", Status: "blocked"},
+			want:  "status: blocked",
+			skip:  true,
+		},
+		// Regression fixtures harvested from the live trader queue 2026-08-19
+		// by the mayor (mail hq-wisp-m1p25, bead comments on gt-j3xq). These
+		// are the concrete counterexamples that motivated gating on labels
+		// instead of title/description keywords. Labels here simulate the
+		// batch bd-show fetch runSchedulerFeed does before calling this
+		// function — bd ready --json itself never populates Labels.
+		{
+			name: "trader-obs-d9: credentials bead with innocuous title must NOT be fed",
+			issue: &beads.Issue{
+				ID:          "trader-obs-d9",
+				Title:       "Put deploy-only pager secrets in the normal recoverable secret store",
+				Description: "Back up the ops webhook secret and watchdog ping URL wherever other deploy credentials are custodied.",
+				Status:      "open",
+				Labels:      []string{"area:observability", "area:security", "human", "program:observability", "source:D9"},
+			},
+			skip: true, // reason is one of the matched labels; map iteration order isn't fixed, so not asserted exactly
+		},
+		{
+			name: "trader-lt8e: alarming title but genuinely safe UI bead MUST be fed",
+			issue: &beads.Issue{
+				ID:          "trader-lt8e",
+				Title:       "Repair legacy production acknowledgement migration cleanup",
+				Description: "Clean up the stale trader.production-confirm.acknowledged localStorage key in useEnvironmentStore. Verify with a vitest run.",
+				Status:      "open",
+				Labels:      []string{"area:testing", "area:ui"},
+			},
+			skip: false,
 		},
 	}
 
@@ -80,6 +120,45 @@ func TestFeedSkipReason(t *testing.T) {
 				t.Fatalf("feedSkipReason(%+v) reason = %q, want %q", tc.issue, reason, tc.want)
 			}
 		})
+	}
+}
+
+// TestEffectiveIssueForFeedAppliesBatchLabels guards the exact wiring bug
+// the mayor caught in ab117c05 (mail hq-wisp-m1p25): bd ready --json never
+// populates Labels, so feedSkipReason's hard-prohibition checks are a
+// silent no-op unless the batch bd-show fetch is actually overlaid before
+// the eligibility check runs.
+func TestEffectiveIssueForFeedAppliesBatchLabels(t *testing.T) {
+	readyIssue := &beads.Issue{
+		ID:     "trader-obs-d9",
+		Title:  "Put deploy-only pager secrets in the normal recoverable secret store",
+		Status: "open",
+		// Labels intentionally empty: this is what bd ready --json actually
+		// returns for every issue, credentials beads included.
+	}
+
+	// Without the overlay, the label the whole check depends on is invisible.
+	if reason, skip := feedSkipReason(readyIssue); skip {
+		t.Fatalf("expected the un-overlaid ready issue (no labels, as bd ready returns) to be fed, got skip=true reason=%q", reason)
+	}
+
+	labelsByID := map[string]beadStatusInfo{
+		"trader-obs-d9": {Labels: []string{"area:observability", "area:security", "human", "program:observability", "source:D9"}},
+	}
+	effective := effectiveIssueForFeed(readyIssue, labelsByID)
+	if len(effective.Labels) == 0 {
+		t.Fatal("effectiveIssueForFeed did not apply the batch-fetched labels")
+	}
+	if reason, skip := feedSkipReason(effective); !skip {
+		t.Fatalf("expected the label-overlaid credentials bead to be skipped, got fed (reason=%q)", reason)
+	}
+
+	// A bead with no batch-fetch entry (e.g. the bd show call failed) must
+	// fall back to whatever bd ready returned rather than panicking or
+	// wiping out data that was present.
+	fallback := effectiveIssueForFeed(readyIssue, nil)
+	if fallback.ID != readyIssue.ID {
+		t.Fatalf("effectiveIssueForFeed with no batch entry = %+v, want unchanged issue", fallback)
 	}
 }
 
@@ -107,6 +186,9 @@ func TestIsEpicOrConvoyIssue(t *testing.T) {
 	}
 	if !isEpicOrConvoyIssue(&beads.Issue{Labels: []string{"gt:epic"}}) {
 		t.Error("expected gt:epic label to be detected")
+	}
+	if !isEpicOrConvoyIssue(&beads.Issue{ID: "hq-cv-xyz"}) {
+		t.Error("expected hq-cv- ID prefix to be detected")
 	}
 	if isEpicOrConvoyIssue(&beads.Issue{Type: "task"}) {
 		t.Error("expected ordinary task to not be detected as epic/convoy")
