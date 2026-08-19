@@ -109,9 +109,11 @@ func claimUnlocked(townRoot, convoyID string) (bool, *beads.ConvoyFields, error)
 
 // NotifyCompletion sends the full convoy-complete notification set for a
 // convoy that has already been claimed via ClaimCompletionNotification: mail
-// to the convoy's owner/notify addresses, nudges to nudge-watchers, a
-// mayor/ mail if not already covered by the above, and — if the town has
-// convoy.notify_on_complete enabled — a push into the active Mayor session.
+// to the convoy's owner/notify/watcher addresses, nudges to nudge-watchers,
+// and — if the town has convoy.notify_on_complete enabled — a push into the
+// active Mayor session. The Mayor is not mailed unless it explicitly
+// subscribed via owner/notify/watchers (gt convoy watch); use --nudge to
+// subscribe without adding a permanent inbox entry.
 //
 // closedBy, if non-empty, is appended as a "Closed by: <closedBy>" line so
 // automated closers (e.g. the refinery) are attributed in the notification.
@@ -128,9 +130,7 @@ func NotifyCompletion(townRoot, convoyID, title, closedBy string, fields *beads.
 		body += fmt.Sprintf("\n\nClosed by: %s", closedBy)
 	}
 
-	notifiedAddrs := make(map[string]bool)
 	for _, addr := range fields.NotificationAddresses() {
-		notifiedAddrs[addr] = true
 		sendConvoyMail(townRoot, addr, fmt.Sprintf("🚚 Convoy landed: %s", title), body, convoyID, warnf)
 	}
 
@@ -138,14 +138,6 @@ func NotifyCompletion(townRoot, convoyID, title, closedBy string, fields *beads.
 		sendConvoyNudge(townRoot, addr,
 			fmt.Sprintf("🚚 Convoy landed: %s — Convoy %s has completed. All tracked issues are now closed.", title, convoyID),
 			convoyID, warnf)
-	}
-
-	if !notifiedAddrs["mayor/"] {
-		mayorBody := fmt.Sprintf("Convoy %s has completed. All tracked issues are now closed.", convoyID)
-		if closedBy != "" {
-			mayorBody += fmt.Sprintf("\n\nClosed by: %s", closedBy)
-		}
-		sendConvoyMail(townRoot, "mayor/", fmt.Sprintf("Convoy complete: %s", title), mayorBody, convoyID, warnf)
 	}
 
 	notifyMayorSession(townRoot, convoyID, title, warnf)

@@ -93,14 +93,14 @@ exit 0
 		t.Fatalf("read mail log: %v", err)
 	}
 	log := string(data)
-	if got := strings.Count(log, "mail send"); got != 2 {
-		t.Fatalf("mail sends = %d, want 2; log:\n%s", got, string(data))
+	if got := strings.Count(log, "mail send"); got != 1 {
+		t.Fatalf("mail sends = %d, want 1; log:\n%s", got, string(data))
 	}
-	if got := strings.Count(log, "--from convoy/hq-cv-dup"); got != 2 {
-		t.Fatalf("mail sends with convoy sender = %d, want 2; log:\n%s", got, log)
+	if got := strings.Count(log, "--from convoy/hq-cv-dup"); got != 1 {
+		t.Fatalf("mail sends with convoy sender = %d, want 1; log:\n%s", got, log)
 	}
-	if got := strings.Count(log, "--no-notify"); got != 2 {
-		t.Fatalf("mail sends with --no-notify = %d, want 2; log:\n%s", got, log)
+	if got := strings.Count(log, "--no-notify"); got != 1 {
+		t.Fatalf("mail sends with --no-notify = %d, want 1; log:\n%s", got, log)
 	}
 	nudgeData, err := os.ReadFile(nudgeLogPath)
 	if err != nil {
