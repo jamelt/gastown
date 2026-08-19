@@ -1,0 +1,146 @@
+formula = "mol-expeditor-propagate-decision"
+description = """
+Complete the transaction after a human responds to an Expeditor decision card.
+
+The poured workflow validates authority, maps impact, applies only the recorded
+ruling to canonical Beads requirements, invalidates stale packet versions,
+verifies propagation, closes the human gate, and surfaces newly unblocked work.
+It never edits product code or infers a missing human decision.
+"""
+type = "workflow"
+version = 1
+pour = true
+agent = "claude-opus-5"
+
+[vars]
+[vars.decision_id]
+description = "Decision bead containing DECISION_CARD and HUMAN_DECISION comments"
+required = true
+
+[vars.response_selector]
+description = "Which human decision to apply"
+default = "latest valid HUMAN_DECISION v1 comment"
+
+[vars.notify_target]
+description = "Routine notification target after verified propagation"
+default = "mayor"
+
+[[steps]]
+id = "validate-ruling"
+title = "Validate recorded human authority and ruling"
+description = """
+Validate the decision transaction on **{{decision_id}}** before changing any
+downstream state.
+
+1. Read the decision bead, DECISION_CARD, council provenance, comments, labels,
+   dependencies, and affected-work references.
+2. Select the latest `HUMAN_DECISION v1` comment whose `decision_card_version` matches the posted `DECISION_CARD`. Treat any earlier record as superseded unless a `RECORD_CORRECTION` explicitly overrides it.
+3. Require a `HUMAN_DECISION v1` record naming action, selected option or exact
+   adjustment, rationale (or explicit not-provided), approver, timestamp, and
+   decision-card version.
+4. Confirm the action is one of ACCEPT, ADJUST, REJECT, RETURN_TO_COUNCIL.
+5. Confirm the approver is authorized for this decision. Do not infer authority.
+
+For RETURN_TO_COUNCIL, do not propagate or close the gate. Add a
+`DECISION_VALIDATION v1` comment with state `RETURN_REQUIRED`, exact feedback,
+owner `Expeditor`, and next action `rerun council with prior_feedback`, then end
+the workflow as blocked.
+
+For missing, ambiguous, conflicting, or unauthorized responses, add a
+`DECISION_VALIDATION v1` comment with state `INVALID`, the exact blocker, owner,
+and next action. Make no other mutation and stop.
+
+For a valid actionable ruling, add `DECISION_VALIDATION v1` with state `VALID`,
+the exact authoritative ruling, provenance, and a checksum-like verbatim excerpt
+that later steps can compare. Move the gate label from `gate:pending` to
+`gate:answered` when those labels exist.
+"""
+acceptance = "{{decision_id}} has a DECISION_VALIDATION v1 comment; actionable work proceeds only for an authorized, unambiguous HUMAN_DECISION v1 record, and invalid or returned decisions leave the gate open without downstream mutation."
+
+[[steps]]
+id = "map-impact"
+title = "Map every requirement, packet, and dependency affected by the ruling"
+needs = ["validate-ruling"]
+description = """
+Read the valid `DECISION_VALIDATION v1` record on **{{decision_id}}**. If it is
+not VALID, stop without mutation.
+
+Build a complete impact map from explicit decision references, parent/child
+links, dependency edges, decision labels, packet-version markers, comments, and
+targeted search. Identify:
+
+- the canonical requirement bead and exact authoritative field(s) to change;
+- every active bead whose description, acceptance criteria, constraints, or
+  verification assumes an affected option;
+- every WORK_PACKET version that becomes stale;
+- blocked dependents that may become ready;
+- active workers who must receive changed constraints;
+- unknown ownership or inaccessible scope.
+
+Post one `DECISION_IMPACT_MAP v1` comment to {{decision_id}} listing every item,
+planned mutation, stale packet, evidence reference, owner, and verification
+query. State `COMPLETE` only when coverage is defensible. If scope is uncertain
+or an item cannot be accessed safely, state `BLOCKED`, name the gap and owner,
+and stop. Partial impact maps are not eligible for propagation.
+"""
+acceptance = "{{decision_id}} has a DECISION_IMPACT_MAP v1 comment with COMPLETE status, canonical requirement, exhaustive affected-item list, stale packet versions, planned mutations, owners, and verification queries; otherwise no propagation occurs."
+
+[[steps]]
+id = "apply-ruling"
+title = "Apply the ruling and invalidate stale work packets"
+needs = ["map-impact"]
+description = """
+Apply only the exact valid human ruling recorded on **{{decision_id}}**, using the
+COMPLETE `DECISION_IMPACT_MAP v1` as the mutation allowlist.
+
+1. Re-read every target immediately before modification to detect intervening
+   changes. If reality differs from the impact map, stop and refresh the map.
+2. Update authoritative descriptions, acceptance criteria, constraints, and
+   verification instructions only where the ruling requires it. Preserve all
+   unrelated intent and history.
+3. Add a `DECISION_APPLIED v1` comment to each affected bead with decision ID,
+   card version, old assumption/version, new authoritative text, and source
+   human-decision reference.
+4. Mark every affected old packet `SUPERSEDED` and `shape:superseded`; identify
+   the replacement packet version or the owner/next action that will produce it.
+5. Do not close implementation beads, dispatch workers, or claim that code has
+   changed. This workflow changes the work contract, not the implementation.
+6. Post `DECISION_PROPAGATED v1` to {{decision_id}} with every mutation and
+   evidence reference. Move the gate label to `gate:propagating` if available.
+
+If any allowlisted mutation fails or conflicts, stop, leave the gate open, and
+record `DECISION_PROPAGATED v1` with state `BLOCKED`, completed mutations,
+remaining mutations, owner, and exact recovery action. Never conceal partial
+propagation.
+"""
+acceptance = "Every allowlisted item has a DECISION_APPLIED v1 evidence comment and exact requirement update, every stale packet is explicitly superseded, and {{decision_id}} has a DECISION_PROPAGATED v1 manifest with no unreported partial mutation."
+
+[[steps]]
+id = "verify-close-unblock"
+title = "Verify propagation, close the gate, and surface ready work"
+needs = ["apply-ruling"]
+description = """
+Verify the entire transaction for **{{decision_id}}**. Do not trust the prior
+step's completion claim without rereading state.
+
+1. Compare the current canonical requirement and every allowlisted bead against
+   the exact HUMAN_DECISION and DECISION_IMPACT_MAP.
+2. Run the recorded verification queries and targeted searches for superseded
+   option text, constraints, decision-card versions, and packet versions.
+3. Confirm every active affected item points to the new authoritative decision
+   and every stale packet is visibly SUPERSEDED.
+4. Confirm no remaining mutation is blocked or inaccessible.
+5. Add `DECISION_CLOSED v1` to {{decision_id}} with approver, decision timestamp,
+   propagation evidence, verification performed, affected items, superseded and
+   replacement packets, newly ready dependencies, and any non-blocking risk.
+6. Move the label to `gate:propagated` and close the decision/gate bead with a
+   reason that references `DECISION_CLOSED v1`.
+7. Let Beads dependency resolution expose eligible work. Inspect newly ready
+   items; do not assign them. Nudge `{{notify_target}}` and any active affected
+   workers with `state -> blocker -> recommendation -> owner -> next action`.
+
+If any stale reference or unverified mutation remains, add a blocked
+`DECISION_CLOSED v1` attempt, keep the gate open, and name the exact owner and
+next action. A human reply alone is never sufficient to close the gate.
+"""
+acceptance = "The canonical requirement and all active affected items match the authorized ruling, no stale active reference remains, superseded packets are marked, a DECISION_CLOSED v1 audit exists, the gate is labeled propagated and closed, eligible dependencies are visible, and the Mayor/affected workers are nudged without the workflow assigning work."
