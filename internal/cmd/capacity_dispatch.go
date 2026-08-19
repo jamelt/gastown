@@ -935,12 +935,64 @@ func recordDispatchFailure(contextBeads *beads.Beads, b capacity.PendingBead, di
 			style.Warning.Render("⚠"), b.ID, err)
 	}
 
+	// gt-c2lp: surface the REASON on every failure, not only at circuit-break.
+	// Previously the first two failures were silent and the visible log line was
+	// "Dispatched 0, failed 3 (reason: batch)" — a capacity-shaped message for a
+	// cause that had nothing to do with capacity. Operators and agents chased
+	// capacity for hours while the real reason sat in a context bead nobody reads.
+	fmt.Printf("  %s dispatch_failed bead=%s context=%s attempt=%d/%d: %v\n",
+		style.Warning.Render("⚠"), b.WorkBeadID, b.ID, b.Context.DispatchFailures, maxDispatchFailures, dispatchErr)
+
+	// gt-c2lp: a respawn-limit block is an operator-actionable condition, not a
+	// transient dispatch error — it stays latched until someone runs
+	// `gt sling respawn-reset`. The witness recovery path already escalates this
+	// to the Mayor (handlers.go, SPAWN_BLOCKED); the scheduler path did not, so
+	// every production occurrence was silent. Zero SPAWN_BLOCKED messages had
+	// ever been sent despite the limit firing repeatedly.
+	if isRespawnLimitError(dispatchErr) {
+		notifySpawnBlocked(b, dispatchErr)
+	}
+
 	if b.Context.DispatchFailures >= maxDispatchFailures {
 		if err := contextBeads.CloseSlingContext(b.ID, "circuit-broken"); err != nil {
 			fmt.Printf("  %s Failed to close circuit-broken context %s: %v\n",
 				style.Warning.Render("⚠"), b.ID, err)
 		}
 		fmt.Print(circuitBrokenMessage(b.ID, b.WorkBeadID, b.Context.DispatchFailures, b.Context.LastFailure))
+	}
+}
+
+// isRespawnLimitError reports whether a dispatch failure is the per-bead respawn
+// guard rather than a transient error. Matched on the message because the guard
+// returns a formatted error rather than a sentinel (internal/cmd/polecat_spawn.go);
+// a sentinel would be better and is worth doing when that path is next touched.
+func isRespawnLimitError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "respawn limit reached")
+}
+
+// notifySpawnBlocked escalates a respawn-limit block to the Mayor, mirroring the
+// witness recovery path so both callers alert identically. Best-effort: dispatch
+// must continue even if the notification fails, and a failed notification is
+// logged rather than swallowed so the silence itself is visible.
+func notifySpawnBlocked(b capacity.PendingBead, dispatchErr error) {
+	subject := fmt.Sprintf("SPAWN_BLOCKED %s (respawn limit reached)", b.WorkBeadID)
+	body := fmt.Sprintf(`Bead %s hit the respawn limit during SCHEDULER dispatch and will not be re-dispatched.
+
+Target rig: %s
+Context:    %s
+Error:      %v
+
+This is latched state, not a transient failure: it persists until someone runs
+  gt sling respawn-reset %s
+and it will re-latch immediately if the underlying cause is unfixed. Verify the
+bead actually dispatches after a reset — a successful reset command is not
+evidence that the bead recovered.`,
+		b.WorkBeadID, b.TargetRig, b.ID, dispatchErr, b.WorkBeadID)
+
+	cmd := exec.Command("gt", "mail", "send", "mayor/", "--subject", subject, "--body", body)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s could not send SPAWN_BLOCKED notification for %s: %v\n",
+			style.Warning.Render("⚠"), b.WorkBeadID, err)
 	}
 }
 
