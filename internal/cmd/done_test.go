@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1927,6 +1928,114 @@ func TestHookedBeadCloseSkipsOnEscalated(t *testing.T) {
 				t.Errorf("shouldClose for exitType=%q isWorkflowStep=%v = %v, want %v", tt.exitType, tt.isWorkflowStep, shouldClose, tt.wantClose)
 			}
 		})
+	}
+}
+
+// TestDoneEscalatedNeverIssuesCloseOnHookedBead is an end-to-end regression
+// test for gt-mvlg: it runs updateAgentStateOnDone against a real (stubbed)
+// bd binary and asserts that ExitEscalated issues ZERO `bd close` calls on
+// the hooked bead — the exact mechanism that, pre-fix, cascaded to release
+// gated dependents. This complements TestHookedBeadCloseSkipsOnEscalated
+// (which only checks the guard's boolean formula) by exercising the real
+// function end-to-end, the same way TestDoneCloseDescendantsNoMoleculeAttached
+// verifies the COMPLETED case.
+func TestDoneEscalatedNeverIssuesCloseOnHookedBead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script bd stub not supported on Windows")
+	}
+
+	townRoot := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "locks"), 0755); err != nil {
+		t.Fatalf("mkdir .beads/locks: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0755); err != nil {
+		t.Fatalf("mkdir gastown: %v", err)
+	}
+	routes := strings.Join([]string{
+		`{"prefix":"gt-","path":"gastown"}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	closesLog := filepath.Join(townRoot, "closes.log")
+
+	// Simulates the reported incident: a hooked bead gated on human approval,
+	// with a dependent bead blocked on it. No attached_molecule (a plain
+	// gated work bead, not a workflow step).
+	bdScript := fmt.Sprintf(`#!/bin/sh
+while [ "$1" = "--allow-stale" ]; do shift; done
+cmd="$1"
+shift || true
+case "$cmd" in
+  show)
+    beadID="$1"
+    case "$beadID" in
+      gt-gastown-polecat-nux)
+        echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
+        ;;
+      gt-base-123)
+        echo '[{"id":"gt-base-123","title":"Gated migration bead","status":"hooked","description":"must stay BLOCKED pending operator approval"}]'
+        ;;
+    esac
+    ;;
+  list)
+    echo '[]'
+    ;;
+  close)
+    for arg in "$@"; do
+      case "$arg" in --*) continue ;; esac
+      echo "$arg" >> "%s"
+    done
+    ;;
+  agent|update|slot)
+    exit 0
+    ;;
+esac
+exit 0
+`, closesLog)
+
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GT_ROLE", "polecat")
+	t.Setenv("GT_RIG", "gastown")
+	t.Setenv("GT_POLECAT", "nux")
+	t.Setenv("GT_CREW", "")
+	t.Setenv("TMUX_PANE", "")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(filepath.Join(townRoot, "gastown")); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitEscalated, "gt-base-123")
+
+	// The gated bead must never be closed on ESCALATED. Since bd close is
+	// what cascades to unblock dependents, zero close calls here means the
+	// dependent stays blocked (the acceptance criteria's core assertion).
+	if closesBytes, err := os.ReadFile(closesLog); err == nil {
+		t.Errorf("expected NO bd close calls on ESCALATED, but got:\n%s", string(closesBytes))
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error reading closes log: %v", err)
 	}
 }
 
