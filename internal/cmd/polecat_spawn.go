@@ -63,6 +63,33 @@ type SlingSpawnOptions struct {
 	SkipAdmission bool   // Caller already holds a polecat admission reservation
 }
 
+// clearRespawnOnSuccess zeroes a bead's respawn counter after a polecat has been
+// successfully spawned or reused.
+//
+// RecordBeadRespawn increments before the spawn is attempted, so the counter
+// measures "times this bead was dispatched", not "times this bead failed".
+// Nothing cleared it except the manual `gt sling respawn-reset` CLI, which made
+// the limit latch on three dispatches regardless of outcome:
+//
+//   - a bead that dispatched successfully three times was blocked forever;
+//   - during any unrelated outage (2026-08-19: a full polecat-directory cap)
+//     every queued bead burned its three attempts against a condition that had
+//     nothing to do with the task, then stayed locked after the outage cleared;
+//   - resetting by hand only bought three more attempts before it re-latched,
+//     which is exactly what was observed after resetting 23 beads.
+//
+// The guard itself is correct and worth keeping — a task that repeatedly kills
+// its polecat should stop being re-dispatched. Clearing on success restores that
+// intended meaning: consecutive failures latch, a success resets the streak.
+func clearRespawnOnSuccess(townRoot, hookBead string) {
+	if hookBead == "" {
+		return
+	}
+	if err := witness.ResetBeadRespawnCount(townRoot, hookBead); err != nil {
+		style.PrintWarning("could not clear respawn counter for %s: %v", hookBead, err)
+	}
+}
+
 func effectivePolecatDirCap(configured int) int {
 	if configured < minPolecatDirsPerRig {
 		return minPolecatDirsPerRig
@@ -174,6 +201,10 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		}
 		witness.RecordBeadRespawn(townRoot, opts.HookBead)
 	}
+	// The counter above is incremented BEFORE the spawn is attempted, so it counts
+	// dispatch ATTEMPTS, not failures. clearRespawnOnSuccess must therefore be
+	// called on every successful return, or a bead latches after three dispatches
+	// even when all three succeeded — see clearRespawnOnSuccess.
 
 	if reclaimed, err := reclaimBrokenIdlePolecatForSling(polecatMgr); err != nil {
 		style.PrintWarning("could not reclaim broken idle polecat before allocation: %v", err)
@@ -260,6 +291,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 				effectiveBranch = opts.ResumeBranch
 			}
 
+			clearRespawnOnSuccess(townRoot, opts.HookBead)
 			return &SpawnedPolecatInfo{
 				RigName:     rigName,
 				PolecatName: polecatName,
@@ -371,6 +403,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		effectiveBranch = opts.ResumeBranch
 	}
 
+	clearRespawnOnSuccess(townRoot, opts.HookBead)
 	return &SpawnedPolecatInfo{
 		RigName:     rigName,
 		PolecatName: polecatName,
