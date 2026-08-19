@@ -1,0 +1,71 @@
+{
+  "bead": "gt-pr-4189-sheriff-review",
+  "subject": "gastownhall/gastown PR #4189",
+  "pr_url": "https://github.com/gastownhall/gastown/pull/4189",
+  "run_at": "2026-08-19T11:40:00Z",
+  "mode": "confirmed_prior_disposition",
+  "no_refinery_mq_route_used_for_pr4189_disposition": true,
+  "sheriff_code_changed": false,
+  "verdict": "confirmed_resolved_no_action",
+  "merge_path_allowed": false,
+  "reason_merge_path_not_applicable": "PR #4189 already closed as superseded; replacement PR #4424 already merged. No merge action available or needed on #4189 itself.",
+  "current_head_verified": "cb71d2d4b14b1b89553da867383dd8335d3f6ca4",
+  "upstream_main_at_review": "649b832b7672bc7a2dbef26f5983aba6198b819b",
+  "research_legs": [
+    {"id": "R01", "finding": "PR #4189 is CLOSED (not merged), superseded by replacement PR #4424 merged at cb71d2d4b14b1b89553da867383dd8335d3f6ca4, per Bella-Giraffety's 2026-07-07 close comment."},
+    {"id": "R02", "finding": "#4189's own CI was red at review time (Test/Lint/Integration Tests = FAILURE); the contributor's own comment attributes this to pre-existing unrelated failures (lint failures in unrelated files, baseline routing/config test expectations) and notes a full `go test ./...` did not complete cleanly locally either."},
+    {"id": "R03", "finding": "#4189's original scope: 3-file, +113/-2 diff, fix scoped entirely to internal/cmd/convoy.go plus 2 test files (a per-consumer fix for the convoy stranded readiness path only)."},
+    {"id": "R04", "finding": "Replacement PR #4424 ('Fix dependency relation type decoding'), MERGED 2026-07-07 at cb71d2d4b1..., authored by Bella-Giraffety, branch sheriff/pr-4189-gt-7yhu-dependency-relation-type, +169/-0, 2 files — moved the fix to the shared internal/beads.IssueDep JSON boundary instead of convoy.go's local per-consumer decode, per its own body."},
+    {"id": "R05", "finding": "#4424's own PR body states a full prior PR-Sheriff cycle already ran for this exact fix: '15/15 independent research legs complete. 5/5 pre-implementation reviews approved the exact plan. 5/5 post-implementation reviews approved final head 6c7eab4ee3a8148d6d5d440912fb040b0821b111', under bead gt-7yhu, a separate dispatch from this bead (created 2026-07-02, before the replacement landed)."},
+    {"id": "R06", "finding": "bd search '4189' surfaces 7 issues: gt-7yhu (replacement, closed, produced #4424), gt-qwlt (chrome, closed, review-only post-MQ-rejection recovery pass), gt-yubw (synth, closed, carry-forward attempt), gt-u6kh (thunder, closed, initial review), gt-pr-4189-sheriff-review (this bead), hq-j6p (ci-failure tracker, closed stale by reaper), gt-pr-sheriff-4189 (mayor dispatch, closed)."},
+    {"id": "R07", "finding": "gt-7yhu close_reason: 'Merged replacement PR #4424 at cb71d2d4b14b1b89553da867383dd8335d3f6ca4 and closed original PR #4189 as superseded with attribution/provenance noted.' — matches the GitHub PR state and comment trail independently confirmed in R01/R04."},
+    {"id": "R08", "finding": "gt-qwlt (chrome) close_reason: 'no-changes: review-only PR Sheriff report persisted; merge_path_allowed=false for preserved head; no MQ/refinery; preserved branch not destroyed' — an intermediate recovery pass after an MQ rejection that deliberately deferred rather than force-merging a contaminated branch, consistent with cleanup-first policy and preceding the eventual clean #4424 replacement."},
+    {"id": "R09", "finding": "gt-u6kh (thunder) close_reason: 'PR Sheriff review complete: defer_human_review, merge_path_allowed=false; no code changes, no refinery/MQ; follow-up hq-gnhbn remains for any carry-forward.' — an initial review pass that correctly deferred rather than merging directly, consistent with the eventual chain of custody to #4424."},
+    {"id": "R10", "finding": "git merge-base --is-ancestor cb71d2d4b14b1b89553da867383dd8335d3f6ca4 upstream/main exits 0 — the merge commit is a real, current ancestor of upstream/main (649b832b7), not just an API-reported field."},
+    {"id": "R11", "finding": "Content check: internal/beads/beads.go:364 IssueDep.UnmarshalJSON decodes dependency_type authoritative, falls back to relation `type` via knownDependencyRelation() at line 387, keeping issue_type separate — matches #4424's stated approach exactly, and is a shared-boundary fix (benefits all beads.Issue.Dependencies consumers) rather than #4189's original per-consumer convoy.go-only patch."},
+    {"id": "R12", "finding": "Wiring check: internal/cmd/convoy.go issueToDetails() builds issueDependency{DependencyType: dep.DependencyType} directly from issue.Dependencies (issue is *beads.Issue from client.Show()), i.e. already decoded through the fixed UnmarshalJSON. The convoy.go:2600 struct with its own dependency_type JSON tag is convoy's own output-facing struct for `gt convoy stranded --json`, not a second independent input decode path. Confirms the shared-boundary fix is actually wired into the convoy stranded readiness path, not orphaned in the beads package only."},
+    {"id": "R13", "finding": "All test commands #4424's body cites were independently run against current upstream/main and pass: internal/beads targeted run (14/14 tests incl. subtests), internal/cmd targeted run (7/7 tests incl. subtests, none Dolt-dependent), internal/refinery targeted run (7/7 subtests) — 28 tests total, 0 failures. git diff --check on the merge commit is clean. go build ./cmd/gt succeeds."},
+    {"id": "R14", "finding": "gh issue search on gastownhall/gastown for 'convoy stranded blocked dependency' and 'dependency_type' (state=all) both return zero results — no GitHub issue independently references this bug."},
+    {"id": "R15", "finding": "PR #4189's own body contains no 'Fixes #NNN'/'Closes #NNN' linkage to any GitHub issue, confirmed by reading the body text. Unlike the PR #4061 precedent (which had an originating issue #3779 left open), this bug had no originating tracked issue, so no GitHub issue disposition is owed here."}
+  ],
+  "pre_implementation_reviews": [
+    {"id": "P01", "lens": "cleanup-first/policy", "verdict": "approve", "note": "Confirming an already-completed disposition that itself replaced a per-consumer patch (convoy.go-only) with a consolidated shared-boundary fix (internal/beads) is the cleanup-first outcome; no new bandaid, no duplicate replacement PR needed."},
+    {"id": "P02", "lens": "correctness", "verdict": "approve", "note": "Do not trust #4424's self-reported PR-Sheriff evidence or the GitHub close comment at face value; independently confirmed via git-level ancestry, source inspection of both the decode point and its call site, and a live test run against current upstream/main."},
+    {"id": "P03", "lens": "scope/authority", "verdict": "approve", "note": "Sheriff has authority to confirm a prior maintainer disposition without a new merge action; PR #4189 offers nothing further to merge since it was never the shipped fix and its replacement is already merged."},
+    {"id": "P04", "lens": "technical/wiring risk", "verdict": "approve", "note": "The specific risk in a 'shared-boundary fix' claim is whether the consuming code path (convoy.go) actually reads through the fixed decoder rather than parsing its own separate JSON. Verified true (R12) rather than assumed from #4424's body text alone."},
+    {"id": "P05", "lens": "evidence-completeness / issue linkage", "verdict": "approve", "note": "Independently searched GitHub issues beyond PR #4189's own text, since it lacks a Closes# linkage (unlike #4061's #3779). Found none open or closed referencing this bug, so no required_actions beyond confirming the disposition."}
+  ],
+  "post_implementation_reviews": "not_applicable — sheriff_code_changed is false; this pass made no code change, replacement PR, or cherry-pick. The 5-review tier is conditional on Sheriff-authored code changes per this bead's own acceptance criteria.",
+  "checker_reference": "checker.txt (this directory) — raw gh/git/bd/go command output backing R01-R15",
+  "related_github_issues_disposition": [],
+  "related_github_issues_disposition_note": "No open or closed GitHub issue independently references this bug (R14), and PR #4189's body has no Closes#/Fixes# linkage (R15). No related-issue action is owed for this PR, unlike the #4061 precedent.",
+  "prior_attempt_disposition": [
+    {"bead": "gt-u6kh", "assignee": "gastown/polecats/thunder", "outcome": "Initial review; correctly deferred to human/fixup (merge_path_allowed=false) rather than merging as-is or requesting contributor changes; filed follow-up hq-gnhbn."},
+    {"bead": "gt-qwlt", "assignee": "gastown/polecats/chrome", "outcome": "Intermediate recovery pass after an MQ rejection of a preserved branch; correctly deferred again (merge_path_allowed=false), left the preserved branch intact rather than destroying it."},
+    {"bead": "gt-7yhu", "assignee": "unattributed sheriff pass (branch authored by Bella-Giraffety)", "outcome": "Built clean replacement PR #4424 moving the fix to the shared internal/beads decode boundary; merged with full green CI; preserved attribution; closed #4189 as superseded."}
+  ],
+  "verification_run": {
+    "merge_ancestry_check": "git merge-base --is-ancestor cb71d2d4b14b1b89553da867383dd8335d3f6ca4 upstream/main -> exit 0",
+    "tests_run": [
+      "internal/beads: TestIssueDepUnmarshal* (5 tests), TestUnresolvedBlockingDependencyIDs (7 subtests), TestHasUnresolvedBlockersFallsBackToListFields, TestListMergeRequestsHydratesWispMRBlockers",
+      "internal/cmd: TestIssueDetailsIsBlocked (5 subtests), TestFindStrandedConvoys_StuckConvoy, TestGetTrackedIssues_FallsBackToShowTrackedDependencies",
+      "internal/refinery: TestEngineerFirstOpenBlockerUsesDependencySemantics (7 subtests)"
+    ],
+    "tests_result": "28/28 tests (incl. subtests) PASS, run against current upstream/main-based worktree (649b832b7)",
+    "build_result": "go build ./cmd/gt -> exit 0 on same checkout",
+    "diff_check_result": "git diff --check on merge commit cb71d2d4b1 -> clean"
+  },
+  "implementation": {
+    "code_changed_by_sheriff": false,
+    "replacement_pr_authored_by_sheriff": false,
+    "note": "PR #4189 was already fully resolved by a prior Sheriff pass (gt-7yhu, producing merged PR #4424) before this review bead was dispatched. This pass performs independent re-verification only."
+  },
+  "branch_hygiene_gate": {
+    "applicable": false,
+    "reason": "No new replacement branch/PR authored by Sheriff in this pass."
+  },
+  "final_verdict": "confirmed_resolved_no_action",
+  "required_actions": [
+    "None for PR #4189 — fully resolved. No related GitHub issue requires closure (R14/R15)."
+  ]
+}
