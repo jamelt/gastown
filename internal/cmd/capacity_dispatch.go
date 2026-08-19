@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // crossRigEscalationDebounce is the minimum interval between cross-rig prefix
@@ -62,10 +64,22 @@ func resetCrossRigEscalationStateForTest() {
 
 // fireCrossRigEscalation invokes `gt escalate` with a MEDIUM severity. Best
 // effort — escalation failure is logged but does not block the dispatch path.
+// Bounded (gt-vyik): `gt escalate` can itself block on an unbounded SMTP/HTTP
+// notification call, and this runs from Validate, before Execute — an
+// unbounded escalation subprocess here would wedge the whole dispatch cycle,
+// not just this one bead's notification.
 var fireCrossRigEscalation = func(rig, prefix, beadID string) {
 	msg := fmt.Sprintf("cross-rig dispatch refused: rig=%s prefix=%s bead=%s — see gt-el4", rig, prefix, beadID)
-	cmd := exec.Command("gt", "escalate", "--severity", "medium", "--reason", "cross-rig-prefix", msg)
+	timeout := resolveBdCmdTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", "escalate", "--severity", "medium", "--reason", "cross-rig-prefix", msg)
+	util.SetProcessGroup(cmd)
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr, "%s cross-rig escalation timed out after %v\n", style.Warning.Render("⚠"), timeout)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "%s cross-rig escalation failed: %v\n", style.Warning.Render("⚠"), err)
 	}
 }
