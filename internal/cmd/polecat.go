@@ -1249,15 +1249,7 @@ func computePolecatRecoveryStatus(mgr *polecat.Manager, r *rig.Rig, rigName, pol
 			status.Diagnostics = append(status.Diagnostics, "legacy_cleanup_status=<missing> evidence="+legacyCleanupReadOnlyProvenance)
 		}
 	}
-	// Display the cleanup status the verdict actually decided on, not the raw
-	// stale/unknown stored value the IgnoreCleanupStatus overlays above just
-	// overrode -- otherwise the printed "Cleanup Status" can contradict a
-	// SAFE_TO_NUKE verdict computed from the same evidence one line below.
-	if input.IgnoreCleanupStatus {
-		status.CleanupStatus = polecat.CleanupClean
-	} else {
-		status.CleanupStatus = input.CleanupStatus
-	}
+	status.CleanupStatus = displayedCleanupStatus(input)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
@@ -1441,6 +1433,18 @@ func cleanupStatusBlocker(status polecat.CleanupStatus) string {
 	default:
 		return fmt.Sprintf("cleanup_status=%s", status)
 	}
+}
+
+// displayedCleanupStatus is the cleanup status check-recovery prints. It must
+// match the value the verdict was actually decided on: when IgnoreCleanupStatus
+// is set, DecideWorkstate already treated the raw stored value as stale and
+// superseded by live evidence, so a raw/stale display (e.g. "unknown") next
+// to a verdict like SAFE_TO_NUKE would contradict the verdict it sits beside.
+func displayedCleanupStatus(input polecat.WorkstateInput) polecat.CleanupStatus {
+	if input.IgnoreCleanupStatus {
+		return polecat.CleanupClean
+	}
+	return input.CleanupStatus
 }
 
 func cleanupStatusBlockerForRecovery(status polecat.CleanupStatus, partialSpawnWithoutHook bool) string {
