@@ -224,6 +224,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewTmuxGlobalEnvCheck())
 	d.Register(doctor.NewBootHealthCheck())
 	d.Register(doctor.NewTownBeadsConfigCheck())
+	d.Register(doctor.NewDoltConfigCheck())
 	d.Register(doctor.NewCustomTypesCheck())
 	d.Register(doctor.NewCustomStatusesCheck())
 	d.Register(doctor.NewFormulaCheck())

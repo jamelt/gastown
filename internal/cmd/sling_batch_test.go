@@ -664,6 +664,9 @@ func TestResolveRigFromBeadIDs_UnmappedPrefix_Errors(t *testing.T) {
 	if !strings.Contains(errMsg, "not mapped") {
 		t.Errorf("error should mention prefix is not mapped, got: %s", errMsg)
 	}
+	if !strings.Contains(errMsg, "--repo") {
+		t.Errorf("error should mention explicit --repo routing, got: %s", errMsg)
+	}
 }
 
 // TestResolveRigFromBeadIDs_TownLevelPrefix_Errors verifies that a bead with

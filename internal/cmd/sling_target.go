@@ -17,26 +17,16 @@ var spawnPolecatForSling = SpawnPolecatForSling
 // resolveTargetAgentFn is a seam for tests. Production uses resolveTargetAgent.
 var resolveTargetAgentFn = resolveTargetAgent
 
-// resolveTargetAgentID converts a target spec to an agent ID (and the tmux
-// session name it was derived from) without requiring a live tmux pane.
-// Callers that only need the agent identity — e.g. unsling, which releases a
-// hook by bead/agent record — must work even when the target's tmux session
-// is dead. resolveTargetAgent builds on this for callers that also need the
-// live pane and working directory.
-func resolveTargetAgentID(target string) (agentID string, sessionName string, err error) {
-	sessionName, err = resolveRoleToSession(target)
-	if err != nil {
-		return "", "", err
-	}
-	return sessionToAgentID(sessionName), sessionName, nil
-}
-
 // resolveTargetAgent converts a target spec to agent ID, pane, and hook root.
 func resolveTargetAgent(target string) (agentID string, pane string, hookRoot string, err error) {
-	agentID, sessionName, err := resolveTargetAgentID(target)
+	// First resolve to session name
+	sessionName, err := resolveRoleToSession(target)
 	if err != nil {
 		return "", "", "", err
 	}
+
+	// Convert session name to agent ID format (this doesn't require tmux)
+	agentID = sessionToAgentID(sessionName)
 
 	// Get the pane for that session
 	pane, err = getSessionPane(sessionName)
@@ -126,19 +116,18 @@ func resolveSelfTarget() (agentID string, pane string, hookRoot string, err erro
 
 // ResolveTargetOptions controls target resolution behavior.
 type ResolveTargetOptions struct {
-	DryRun               bool
-	Force                bool
-	Create               bool
-	Account              string
-	Agent                string
-	NoBoot               bool
-	HookBead             string // Bead ID to set atomically during polecat spawn (empty = skip)
-	BeadID               string // For cross-rig guard checks (empty = skip guard)
-	TownRoot             string
-	WorkDesc             string // Description for dog dispatch (defaults to HookBead if empty)
-	BaseBranch           string // Override base branch for polecat worktree
-	ResumeBranch         string // Existing branch to resume (e.g. PR head); mutually exclusive with BaseBranch
-	SkipPolecatAdmission bool   // Caller already holds a capacity reservation
+	DryRun       bool
+	Force        bool
+	Create       bool
+	Account      string
+	Agent        string
+	NoBoot       bool
+	HookBead     string // Bead ID to set atomically during polecat spawn (empty = skip)
+	BeadID       string // For cross-rig guard checks (empty = skip guard)
+	TownRoot     string
+	WorkDesc     string // Description for dog dispatch (defaults to HookBead if empty)
+	BaseBranch   string // Override base branch for polecat worktree
+	ResumeBranch string // Existing branch to resume (e.g. PR head); mutually exclusive with BaseBranch
 }
 
 // ResolvedTarget holds the results of target resolution.
@@ -234,9 +223,6 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 				return nil, err
 			}
 		}
-		if err := verifyRigDoltLineage(townRoot, rigName); err != nil {
-			return nil, err
-		}
 		if opts.DryRun {
 			fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
 			result.Agent = fmt.Sprintf("%s/polecats/<new>", rigName)
@@ -245,15 +231,13 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		}
 		fmt.Printf("Target is rig '%s', spawning fresh polecat...\n", rigName)
 		spawnOpts := SlingSpawnOptions{
-			TownRoot:      opts.TownRoot,
-			Force:         opts.Force,
-			Account:       opts.Account,
-			Create:        opts.Create,
-			HookBead:      opts.HookBead,
-			Agent:         opts.Agent,
-			BaseBranch:    opts.BaseBranch,
-			ResumeBranch:  opts.ResumeBranch,
-			SkipAdmission: opts.SkipPolecatAdmission,
+			Force:        opts.Force,
+			Account:      opts.Account,
+			Create:       opts.Create,
+			HookBead:     opts.HookBead,
+			Agent:        opts.Agent,
+			BaseBranch:   opts.BaseBranch,
+			ResumeBranch: opts.ResumeBranch,
 		}
 		spawnInfo, err := spawnPolecatForSling(rigName, spawnOpts)
 		if err != nil {
@@ -287,15 +271,13 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			}
 			fmt.Printf("Target polecat has no active session, spawning fresh polecat in rig '%s'...\n", rigName)
 			spawnOpts := SlingSpawnOptions{
-				TownRoot:      opts.TownRoot,
-				Force:         opts.Force,
-				Account:       opts.Account,
-				Create:        opts.Create,
-				HookBead:      opts.HookBead,
-				Agent:         opts.Agent,
-				BaseBranch:    opts.BaseBranch,
-				ResumeBranch:  opts.ResumeBranch,
-				SkipAdmission: opts.SkipPolecatAdmission,
+				Force:        opts.Force,
+				Account:      opts.Account,
+				Create:       opts.Create,
+				HookBead:     opts.HookBead,
+				Agent:        opts.Agent,
+				BaseBranch:   opts.BaseBranch,
+				ResumeBranch: opts.ResumeBranch,
 			}
 			spawnInfo, spawnErr := spawnPolecatForSling(rigName, spawnOpts)
 			if spawnErr != nil {
@@ -324,12 +306,6 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 	result.Agent = agentID
 	result.Pane = pane
 	result.WorkDir = workDir
-	// Detect self-sling by pane: a named target (e.g. "deacon") that resolves to
-	// the caller's own tmux pane should not inject the ack prompt — the caller is
-	// already running and knows about the hook (GH#3839).
-	if pane != "" && pane == os.Getenv("TMUX_PANE") {
-		result.IsSelfSling = true
-	}
 	return result, nil
 }
 

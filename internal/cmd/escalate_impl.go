@@ -47,14 +47,6 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid severity '%s': must be critical, high, medium, or low", escalateSeverity)
 	}
 
-	// Require a reason: an escalation with no content beyond its title cannot
-	// be acted on by its recipient. Checked here rather than via cobra's
-	// MarkFlagRequired("reason") because --stdin is an alternate way to
-	// populate escalateReason that flag-level requiredness can't see.
-	if strings.TrimSpace(escalateReason) == "" {
-		return fmt.Errorf("escalation reason is required: pass --reason/-r or --stdin (an escalation with no reason cannot be acted on)")
-	}
-
 	// Find workspace
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -102,20 +94,19 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("checking escalation fingerprint: %w", err)
 		}
-		if suppress, existing, reason := suppressDuplicateEscalation(matches, severity, escalationConfig.GetStaleThreshold()); suppress {
+		if len(matches) > 0 {
+			existing := matches[0]
 			if escalateJSON {
 				result := map[string]interface{}{
 					"id":          existing.ID,
 					"status":      "duplicate_suppressed",
 					"fingerprint": fingerprintLabel,
-					"reason":      reason,
 				}
 				out, _ := json.MarshalIndent(result, "", "  ")
 				fmt.Println(string(out))
 			} else {
 				fmt.Printf("%s Duplicate escalation suppressed: %s\n", style.Bold.Render("✓"), existing.ID)
 				fmt.Printf("  Fingerprint: %s\n", fingerprintLabel)
-				fmt.Printf("  Reason: %s\n", reason)
 			}
 			return nil
 		}
@@ -264,81 +255,6 @@ func escalationFingerprintLabel(raw string) string {
 	return fmt.Sprintf("escalation-fp:%x", sum[:6])
 }
 
-// Suppression tuning for closed fingerprint matches (gt-9bzd). A non-closed
-// match always suppresses outright — the condition is still being tracked.
-// A closed match suppresses only inside a severity-scaled window so a
-// still-recurring condition eventually pages again instead of going silent
-// forever once its predecessor happened to get closed:
-//   - critical never gets more than a same-cycle floor, since it must not
-//     silence a human-paging severity.
-//   - high gets a short flat window.
-//   - medium/low back off exponentially per prior closure, capped so the
-//     shift is always well-defined. The shift is derived from how many times
-//     this fingerprint has actually recurred, not from MaxReescalations
-//     (which can be 0-configured to mean "never" and would collide with, or
-//     go negative against, a shift count).
-const (
-	criticalDuplicateFloor   = 1 * time.Minute
-	highDuplicateFraction    = 4
-	maxDuplicateBackoffShift = 6
-)
-
-func fingerprintSuppressionWindow(severity string, staleThreshold time.Duration, priorClosures int) time.Duration {
-	switch severity {
-	case config.SeverityCritical:
-		return criticalDuplicateFloor
-	case config.SeverityHigh:
-		return staleThreshold / highDuplicateFraction
-	default: // medium, low
-		shift := priorClosures
-		if shift < 0 {
-			shift = 0
-		}
-		if shift > maxDuplicateBackoffShift {
-			shift = maxDuplicateBackoffShift
-		}
-		return staleThreshold * time.Duration(int64(1)<<uint(shift))
-	}
-}
-
-// suppressDuplicateEscalation decides whether an existing fingerprint match
-// should suppress creation of a new escalation. Matches include every
-// status (gt-9bzd): a closed match no longer blocks dedup once its
-// suppression window elapses, so a genuinely-recurring condition escalates
-// again instead of the create path silently going dark after the Mayor
-// closes the first occurrence.
-func suppressDuplicateEscalation(matches []*beads.Issue, severity string, staleThreshold time.Duration) (bool, *beads.Issue, string) {
-	var mostRecentClosed *beads.Issue
-	var mostRecentClosedAt time.Time
-	var closedCount int
-
-	for _, m := range matches {
-		if m.Status != "closed" {
-			return true, m, "matching non-closed escalation exists"
-		}
-		closedAt, err := time.Parse(time.RFC3339, m.ClosedAt)
-		if err != nil {
-			continue
-		}
-		closedCount++
-		if closedAt.After(mostRecentClosedAt) {
-			mostRecentClosedAt = closedAt
-			mostRecentClosed = m
-		}
-	}
-
-	if mostRecentClosed == nil {
-		return false, nil, ""
-	}
-
-	window := fingerprintSuppressionWindow(severity, staleThreshold, closedCount-1)
-	elapsed := time.Since(mostRecentClosedAt)
-	if elapsed >= window {
-		return false, nil, ""
-	}
-	return true, mostRecentClosed, fmt.Sprintf("resolved %s ago, within %s duplicate-suppression window", elapsed.Round(time.Second), window)
-}
-
 type deliveryStatus struct {
 	Target            string `json:"target,omitempty"`
 	Channel           string `json:"channel"`
@@ -456,12 +372,6 @@ func runEscalateAck(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("acknowledging escalation: %w", err)
 	}
 
-	// Stop the escalation from re-prompting its recipients: an ack is not a mail
-	// reply, so the reply-path nudge cleanup never runs. Clear the thread's
-	// queued escalation/reply nudges so a still-pending (but acknowledged)
-	// escalation no longer keeps asking the recipient to resolve it.
-	clearEscalationThreadNudges(townRoot, escalationID)
-
 	// Log to activity feed
 	_ = events.LogFeed(events.TypeEscalationAcked, ackedBy, map[string]interface{}{
 		"escalation_id": escalationID,
@@ -491,11 +401,6 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("closing escalation: %w", err)
 	}
 
-	// Clear any queued escalation/reply nudges for this thread so the resolved
-	// escalation stops re-requesting resolution from its recipients (the loop in
-	// gt-2lmt). A close is not a mail reply, so the reply-path cleanup never runs.
-	clearEscalationThreadNudges(townRoot, escalationID)
-
 	// Log to activity feed
 	_ = events.LogFeed(events.TypeEscalationClosed, closedBy, map[string]interface{}{
 		"escalation_id": escalationID,
@@ -506,33 +411,6 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Escalation closed: %s\n", style.Bold.Render("✓"), escalationID)
 	fmt.Printf("  Reason: %s\n", escalateCloseReason)
 	return nil
-}
-
-// clearEscalationThreadNudges removes any queued escalation/reply nudges for an
-// escalation's thread across the recipients it was routed to. Escalation nudges
-// and reply reminders are threaded on the escalation ID and are otherwise only
-// cleared by a mail reply — never by ack/close — so without this a resolved
-// escalation keeps re-prompting its recipients to resolve it. Best-effort: the
-// escalation is already acked/closed regardless of nudge-cleanup outcome.
-func clearEscalationThreadNudges(townRoot, escalationID string) {
-	if townRoot == "" || escalationID == "" {
-		return
-	}
-	cfg, err := config.LoadOrCreateEscalationConfig(config.EscalationConfigPath(townRoot))
-	if err != nil {
-		return
-	}
-	router := mail.NewRouter(townRoot)
-	seen := make(map[string]bool)
-	for _, severity := range []string{config.SeverityLow, config.SeverityMedium, config.SeverityHigh, config.SeverityCritical} {
-		for _, target := range extractMailTargetsFromActions(cfg.GetRouteForSeverity(severity)) {
-			if seen[target] {
-				continue
-			}
-			seen[target] = true
-			_ = router.ClearThreadNudges(target, escalationID)
-		}
-	}
 }
 
 func runEscalateStale(cmd *cobra.Command, args []string) error {
@@ -625,12 +503,7 @@ func runEscalateStale(cmd *cobra.Command, args []string) error {
 					To:      target,
 					Subject: fmt.Sprintf("[%s→%s] Re-escalated: %s", strings.ToUpper(result.OldSeverity), strings.ToUpper(result.NewSeverity), result.Title),
 					Body:    formatReescalationMailBody(result, reescalatedBy),
-					Type:    mail.TypeEscalation,
-					// Thread the re-escalation on the escalation itself so its queued
-					// nudges are cleared by clearEscalationThreadNudges when the
-					// escalation is acked/closed. Without a ThreadID they would carry
-					// an empty thread and keep nudging a resolved escalation (gt-2lmt).
-					ThreadID: result.ID,
+					Type:    mail.TypeTask,
 				}
 
 				// Set priority based on new severity
@@ -1057,4 +930,18 @@ func formatRelativeTime(timestamp string) string {
 		return "1 day ago"
 	}
 	return fmt.Sprintf("%d days ago", days)
+}
+
+// detectSender is defined in mail_send.go - we reuse it here
+// If it's not accessible, we fall back to environment variables
+func detectSenderFallback() string {
+	// Try BD_ACTOR first (most common in agent context)
+	if actor := os.Getenv("BD_ACTOR"); actor != "" {
+		return actor
+	}
+	// Try GT_ROLE
+	if role := os.Getenv("GT_ROLE"); role != "" {
+		return role
+	}
+	return ""
 }

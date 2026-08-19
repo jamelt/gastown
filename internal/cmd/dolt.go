@@ -12,7 +12,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	gtconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/style"
@@ -266,44 +265,6 @@ Examples:
 	RunE: runDoltPull,
 }
 
-var doltReconcileCmd = &cobra.Command{
-	Use:   "reconcile",
-	Short: "Diagnose divergent Beads histories and create a preservation plan",
-	Long: `Inspect a rig database and its configured remote without mutating either.
-
-When histories have no common ancestor, the default invocation prints both
-heads and unique commit/record counts, then stops. Creating a preservation
-bundle requires both an explicit authoritative choice and the head-bound
-approval token printed by the command.
-
-An approved run exports every table and the complete commit log from both
-tracked heads, hashes each artifact, and writes an audit receipt. It never
-fetches, merges, resets, deletes, or pushes. Reconstruction remains a separate,
-reviewed operation so no live Dolt database is replaced implicitly.
-
-Examples:
-  gt dolt reconcile --db gastown
-  gt dolt reconcile --db gastown --authoritative remote --approve RECONCILE-gastown-<local>-<remote>`,
-	RunE: runDoltReconcile,
-}
-
-var doltReconcileVerifyCmd = &cobra.Command{
-	Use:   "reconcile-verify",
-	Short: "Verify no issues were lost reconstructing from a reconciliation bundle",
-	Long: `Compare every issue ID preserved on both heads of a reconciliation bundle
-(written by 'gt dolt reconcile') against the issue IDs currently live in the
-named database, and fail loudly if any are missing. Read-only.
-
-Run this after manually reconstructing a database per a bundle's
-receipt.json next_step. The 2026-08-17 incident dropped 31 gastown issues,
-including 3 open P0s, during reconstruction with no automated check to catch
-it — this command is that check.
-
-Examples:
-  gt dolt reconcile-verify --db gastown --bundle .runtime/dolt-reconciliation/gastown-20260817T045548Z`,
-	RunE: runDoltReconcileVerify,
-}
-
 var doltCleanupCmd = &cobra.Command{
 	Use:   "cleanup",
 	Short: "Remove orphaned databases from .dolt-data/",
@@ -368,23 +329,16 @@ var (
 	doltCleanupDry   bool
 	doltCleanupForce bool
 
-	doltMigrateWispsDry    bool
-	doltMigrateWispsDB     string
-	doltRollbackDry        bool
-	doltRollbackList       bool
-	doltSyncDry            bool
-	doltSyncForce          bool
-	doltSyncDB             string
-	doltSyncGC             bool
-	doltPullDry            bool
-	doltPullDB             string
-	doltReconcileDB        string
-	doltReconcileAuthority string
-	doltReconcileApproval  string
-	doltReconcileOutput    string
-
-	doltReconcileVerifyDB     string
-	doltReconcileVerifyBundle string
+	doltMigrateWispsDry bool
+	doltMigrateWispsDB  string
+	doltRollbackDry     bool
+	doltRollbackList    bool
+	doltSyncDry         bool
+	doltSyncForce       bool
+	doltSyncDB          string
+	doltSyncGC          bool
+	doltPullDry         bool
+	doltPullDB          string
 )
 
 func init() {
@@ -403,8 +357,6 @@ func init() {
 	doltCmd.AddCommand(doltFixMetadataCmd)
 	doltCmd.AddCommand(doltRecoverCmd)
 	doltCmd.AddCommand(doltCleanupCmd)
-	doltCmd.AddCommand(doltReconcileCmd)
-	doltCmd.AddCommand(doltReconcileVerifyCmd)
 	doltCmd.AddCommand(doltRollbackCmd)
 	doltCmd.AddCommand(doltSyncCmd)
 	doltCmd.AddCommand(doltPullCmd)
@@ -426,12 +378,6 @@ func init() {
 	doltSyncCmd.Flags().BoolVar(&doltSyncForce, "force", false, "Force-push to remotes")
 	doltSyncCmd.Flags().StringVar(&doltSyncDB, "db", "", "Sync a single database instead of all")
 	doltSyncCmd.Flags().BoolVar(&doltSyncGC, "gc", false, "Purge closed ephemeral beads before push (requires bd purge)")
-	doltReconcileCmd.Flags().StringVar(&doltReconcileDB, "db", "", "Database to inspect (required)")
-	doltReconcileCmd.Flags().StringVar(&doltReconcileAuthority, "authoritative", "", "Authoritative history: local or remote")
-	doltReconcileCmd.Flags().StringVar(&doltReconcileApproval, "approve", "", "Head-bound approval token printed by the diagnostic run")
-	doltReconcileCmd.Flags().StringVar(&doltReconcileOutput, "output", "", "Preservation bundle directory (default: .runtime/dolt-reconciliation/...)")
-	doltReconcileVerifyCmd.Flags().StringVar(&doltReconcileVerifyDB, "db", "", "Database to verify (required)")
-	doltReconcileVerifyCmd.Flags().StringVar(&doltReconcileVerifyBundle, "bundle", "", "Reconciliation bundle directory to verify against (required)")
 
 	doltPullCmd.Flags().BoolVar(&doltPullDry, "dry-run", false, "Preview what would be pulled without pulling")
 	doltPullCmd.Flags().StringVar(&doltPullDB, "db", "", "Pull a single database instead of all")
@@ -766,15 +712,15 @@ type beadsRuntimeConfig struct {
 	Port     int
 }
 
-func currentBeadsRuntimeConfig() (beadsRuntimeConfig, bool) {
+func currentBeadsRuntimeConfig(townRoot string) (beadsRuntimeConfig, bool) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return beadsRuntimeConfig{}, false
 	}
-	return readBeadsRuntimeConfig(beads.ResolveBeadsDir(cwd))
+	return readBeadsRuntimeConfig(beads.ResolveBeadsDir(cwd), townRoot)
 }
 
-func readBeadsRuntimeConfig(beadsDir string) (beadsRuntimeConfig, bool) {
+func readBeadsRuntimeConfig(beadsDir, townRoot string) (beadsRuntimeConfig, bool) {
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
@@ -802,14 +748,7 @@ func readBeadsRuntimeConfig(beadsDir string) (beadsRuntimeConfig, bool) {
 	}
 	port := metadata.DoltServerPort
 	if port == 0 {
-		if data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port")); err == nil {
-			if parsed, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && parsed > 0 {
-				port = parsed
-			}
-		}
-	}
-	if port == 0 {
-		port = doltserver.DefaultPort
+		port = doltserver.DefaultConfig(townRoot).Port
 	}
 	database := metadata.DoltDatabase
 	if database == "" {
@@ -825,7 +764,7 @@ func readBeadsRuntimeConfig(beadsDir string) (beadsRuntimeConfig, bool) {
 }
 
 func printBeadsRuntimeConfig(townRoot string) {
-	cfg, ok := currentBeadsRuntimeConfig()
+	cfg, ok := currentBeadsRuntimeConfig(townRoot)
 	if !ok {
 		return
 	}
@@ -840,17 +779,6 @@ func printBeadsRuntimeConfig(townRoot string) {
 		parts = append(parts, "from "+cfg.Source)
 	}
 	fmt.Printf("  Beads client: %s\n", strings.Join(parts, ", "))
-	if hint := beadsScopeHint(cfg.Database, townRoot); hint != "" {
-		fmt.Print(hint)
-	}
-}
-
-func beadsScopeHint(database, townRoot string) string {
-	if database != "hq" {
-		return ""
-	}
-
-	return fmt.Sprintf("    Gas Town town beads use database hq. Use `bd -C %s <cmd>` for hq-* beads; do not use `bd --global`, which targets Beads' beads_global database.\n", gtconfig.ShellQuote(townRoot))
 }
 
 func netJoinHostPort(host string, port int) string {
@@ -1743,95 +1671,6 @@ func runDoltSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%d database(s) failed to sync", failed)
 	}
 	return nil
-}
-
-func runDoltReconcile(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-	if doltReconcileDB == "" {
-		return fmt.Errorf("--db is required")
-	}
-	if !doltserver.DatabaseExists(townRoot, doltReconcileDB) {
-		return fmt.Errorf("database %q not found in .dolt-data/", doltReconcileDB)
-	}
-	if running, _, _ := doltserver.IsRunning(townRoot); !running {
-		return fmt.Errorf("Dolt server must be running for read-only reconciliation diagnostics")
-	}
-
-	report, err := doltserver.InspectLineageSQL(townRoot, doltReconcileDB)
-	if err != nil {
-		return fmt.Errorf("inspecting Dolt lineage: %w", err)
-	}
-	fmt.Printf("%s\n", report.Diagnostic())
-	if report.State != doltserver.LineageDiverged {
-		if report.State == doltserver.LineageNoRemote {
-			fmt.Printf("%s No Dolt remote is registered; nothing to reconcile.\n", style.Bold.Render("✓"))
-			return nil
-		}
-		if report.Shared() {
-			fmt.Printf("%s Histories share lineage; no reconciliation is needed.\n", style.Bold.Render("✓"))
-			return nil
-		}
-		return fmt.Errorf("remote lineage is not verified; initialize from the configured remote before accepting work")
-	}
-
-	token := doltserver.ReconciliationApprovalToken(report)
-	if doltReconcileAuthority == "" || doltReconcileApproval == "" {
-		fmt.Printf("\nNo data was changed. Review both heads and unique-record counts above.\n")
-		fmt.Printf("To create a complete preservation bundle, choose authority explicitly:\n")
-		fmt.Printf("  gt dolt reconcile --db %s --authoritative <local|remote> --approve %s\n", doltReconcileDB, token)
-		return fmt.Errorf("independent histories require explicit authority and approval")
-	}
-
-	bundle, err := doltserver.CreateReconciliationBundle(
-		townRoot, report, strings.ToLower(strings.TrimSpace(doltReconcileAuthority)),
-		doltReconcileApproval, doltReconcileOutput,
-	)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("%s Preservation bundle and audit receipt written to %s\n", style.Bold.Render("✓"), bundle)
-	fmt.Printf("No Dolt branch or remote was mutated. Follow receipt.json for the reviewed reconstruction step.\n")
-	fmt.Printf("After reconstructing, verify nothing was lost:\n")
-	fmt.Printf("  gt dolt reconcile-verify --db %s --bundle %s\n", doltReconcileDB, bundle)
-	return nil
-}
-
-func runDoltReconcileVerify(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-	if doltReconcileVerifyDB == "" {
-		return fmt.Errorf("--db is required")
-	}
-	if doltReconcileVerifyBundle == "" {
-		return fmt.Errorf("--bundle is required")
-	}
-	if !doltserver.DatabaseExists(townRoot, doltReconcileVerifyDB) {
-		return fmt.Errorf("database %q not found in .dolt-data/", doltReconcileVerifyDB)
-	}
-	if running, _, _ := doltserver.IsRunning(townRoot); !running {
-		return fmt.Errorf("Dolt server must be running for read-only verification")
-	}
-
-	report, err := doltserver.VerifyReconciliationImport(townRoot, doltReconcileVerifyBundle, doltReconcileVerifyDB)
-	if err != nil {
-		return err
-	}
-	if report.OK() {
-		fmt.Printf("%s No losses: %d preserved issue(s) all present in %s (%d live).\n",
-			style.Bold.Render("✓"), report.ExpectedCount, report.Database, report.CurrentCount)
-		return nil
-	}
-	fmt.Printf("%s %d of %d preserved issue(s) are MISSING from %s (%d live):\n",
-		style.Bold.Render("✗"), len(report.MissingIDs), report.ExpectedCount, report.Database, report.CurrentCount)
-	for _, id := range report.MissingIDs {
-		fmt.Printf("  - %s\n", id)
-	}
-	return fmt.Errorf("reconciliation verification failed: %d issue(s) missing from %s", len(report.MissingIDs), report.Database)
 }
 
 func runDoltPull(cmd *cobra.Command, args []string) error {

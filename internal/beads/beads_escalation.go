@@ -246,12 +246,6 @@ func (b *Beads) AckEscalation(id, ackedBy string) error {
 
 // CloseEscalation closes an escalation bead with a resolution reason.
 // Sets closed_by and closed_reason fields, closes the issue.
-//
-// Escalations are routed to their recipient (e.g. "mayor/") as the bead
-// assignee, so the normal case — that recipient closing its own escalation
-// after resolving it — is rejected by bd close's assignee/actor check unless
-// forced. That is the expected workflow here, not an edge case, so the close
-// is always forced.
 func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 	target := b.forIssueID(id)
 	// First get current issue to preserve other fields
@@ -282,7 +276,7 @@ func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 	}
 
 	// Close the issue
-	_, err = target.run("close", id, "--reason="+reason, "--force")
+	_, err = target.run("close", id, "--reason="+reason)
 	return err
 }
 
@@ -320,11 +314,7 @@ func (b *Beads) ListEscalations() ([]*Issue, error) {
 	return filterEscalationRecords(issues), nil
 }
 
-// ListEscalationsByFingerprint returns escalation beads (any status) matching
-// a stable fingerprint label. Callers that only care about active duplicates
-// should filter by Status themselves; the create-path dedup check needs
-// closed matches too, to distinguish "still open" from "already resolved"
-// (gt-9bzd).
+// ListEscalationsByFingerprint returns open escalation beads matching a stable fingerprint label.
 func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue, error) {
 	if fingerprintLabel == "" {
 		return nil, nil
@@ -332,7 +322,7 @@ func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue,
 	out, err := b.run("list",
 		"--label=gt:escalation",
 		"--label="+fingerprintLabel,
-		"--status=all",
+		"--status=open",
 		"--json",
 	)
 	if err != nil {
@@ -380,12 +370,6 @@ func filterEscalationRecords(issues []*Issue) []*Issue {
 
 // ListStaleEscalations returns escalations older than the given threshold.
 // threshold is a duration string like "1h" or "30m".
-//
-// Staleness is measured from the last re-escalation (LastReescalatedAt), or
-// from CreatedAt if the escalation has never been re-escalated. Each
-// re-escalation doubles the effective threshold, so a stuck escalation
-// backs off instead of being re-selected on every patrol cycle once it
-// first goes stale.
 func (b *Beads) ListStaleEscalations(threshold time.Duration) ([]*Issue, error) {
 	// Get all open escalations
 	escalations, err := b.ListEscalations()
@@ -393,7 +377,7 @@ func (b *Beads) ListStaleEscalations(threshold time.Duration) ([]*Issue, error) 
 		return nil, err
 	}
 
-	now := time.Now()
+	cutoff := time.Now().Add(-threshold)
 	var stale []*Issue
 
 	for _, issue := range escalations {
@@ -402,24 +386,13 @@ func (b *Beads) ListStaleEscalations(threshold time.Duration) ([]*Issue, error) 
 			continue
 		}
 
-		fields := ParseEscalationFields(issue.Description)
-
-		referenceAt := issue.CreatedAt
-		if fields.LastReescalatedAt != "" {
-			referenceAt = fields.LastReescalatedAt
-		}
-
-		reference, err := time.Parse(time.RFC3339, referenceAt)
+		// Check if older than threshold
+		createdAt, err := time.Parse(time.RFC3339, issue.CreatedAt)
 		if err != nil {
 			continue // Skip if can't parse
 		}
 
-		effectiveThreshold := threshold
-		for i := 0; i < fields.ReescalationCount; i++ {
-			effectiveThreshold *= 2
-		}
-
-		if reference.Add(effectiveThreshold).Before(now) {
+		if createdAt.Before(cutoff) {
 			stale = append(stale, issue)
 		}
 	}
@@ -456,22 +429,6 @@ func (b *Beads) ReescalateEscalation(id, reescalatedBy string, maxReescalations 
 		ID:          id,
 		Title:       issue.Title,
 		OldSeverity: fields.Severity,
-	}
-
-	// Defense-in-depth: never re-escalate (and re-mail) an escalation that is no
-	// longer open. Callers select candidates from a prior open+un-acked snapshot
-	// (ListStaleEscalations), but an escalation can be acknowledged or closed
-	// between that snapshot and this call — re-mailing it then re-requests
-	// resolution of an already-resolved escalation. Skip instead of re-sending.
-	if issue.Status != "" && issue.Status != "open" {
-		result.Skipped = true
-		result.SkipReason = fmt.Sprintf("no longer open (status=%s)", issue.Status)
-		return result, nil
-	}
-	if HasLabel(issue, "resolved") || HasLabel(issue, "acked") {
-		result.Skipped = true
-		result.SkipReason = "already acknowledged or resolved"
-		return result, nil
 	}
 
 	// Check if already at max reescalations
