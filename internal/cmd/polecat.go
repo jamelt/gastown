@@ -1327,7 +1327,8 @@ func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *Recover
 	if targetRefLookupFailed {
 		input.MQLookupFailed = true
 	}
-	if !input.HasSubmittableWork || input.MQNotRequired || input.AssignedBeadTerminal {
+	// gt-nasl: see manager.go — AssignedBeadTerminal must not skip the MR lookup.
+	if !input.HasSubmittableWork || input.MQNotRequired {
 		return
 	}
 	mr, mrErr := bd.FindMRForBranchAny(status.Branch)
