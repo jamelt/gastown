@@ -38,8 +38,8 @@ func TestMatchesGoTest(t *testing.T) {
 		{"gotestsum ./...", false}, // base name is not "go"
 		{"git commit -m 'go test'", false},
 		// Documented residuals: indirection matchesGoTest cannot see through.
-		{"make test", false},               // shells out to go test, not visible
-		{`bash -c "go test ./..."`, false}, // command word is bash, not go
+		{"make test", false},                // shells out to go test, not visible
+		{`bash -c "go test ./..."`, false},  // command word is bash, not go
 		{"nice -n 10 go test ./...", false}, // valued-arg wrapper (residual)
 		{"", false},
 	}
