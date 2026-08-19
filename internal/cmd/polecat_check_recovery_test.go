@@ -13,16 +13,6 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
-// fakeMRFinder is a test stub for the mrFinder interface used by applyMQCheck.
-type fakeMRFinder struct {
-	issue *beads.Issue
-	err   error
-}
-
-func (f fakeMRFinder) FindMRForBranchAny(branch string) (*beads.Issue, error) {
-	return f.issue, f.err
-}
-
 type fakeIssueShower struct {
 	issue *beads.Issue
 	err   error
@@ -102,105 +92,6 @@ func TestCheckNukeActiveMRSafety(t *testing.T) {
 	err = checkNukeActiveMRSafety(lookupErrorChecker, "toast", "gastown", false)
 	if err == nil || !strings.Contains(err.Error(), "agent_lookup_error") {
 		t.Fatalf("lookup-error check = %v, want fail-closed agent_lookup_error", err)
-	}
-}
-
-func TestApplyMQCheck(t *testing.T) {
-	tests := []struct {
-		name           string
-		finder         mrFinder
-		beadTerminal   bool
-		hasWork        bool
-		mqNotRequired  bool
-		initialVerdict string
-		wantVerdict    string
-		wantMQStatus   string
-		wantNeedsRecov bool
-	}{
-		{
-			// The regression this change fixes: assigned bead is CLOSED
-			// (e.g. aa-xtee no-op audit). Must NOT return NEEDS_MQ_SUBMIT
-			// because there is nothing to submit — the work is terminal.
-			name:           "closed bead skips MQ submit check",
-			finder:         fakeMRFinder{issue: nil, err: nil},
-			beadTerminal:   true,
-			hasWork:        true,
-			initialVerdict: "SAFE_TO_NUKE",
-			wantVerdict:    "SAFE_TO_NUKE",
-			wantMQStatus:   "submitted",
-			wantNeedsRecov: false,
-		},
-		{
-			name:           "no submittable work skips MQ submit check",
-			finder:         fakeMRFinder{issue: nil, err: nil},
-			beadTerminal:   false,
-			hasWork:        false,
-			initialVerdict: "SAFE_TO_NUKE",
-			wantVerdict:    "SAFE_TO_NUKE",
-			wantMQStatus:   "not_required",
-			wantNeedsRecov: false,
-		},
-		{
-			name:           "no merge source with pushed branch work skips MQ submit check",
-			finder:         fakeMRFinder{issue: nil, err: nil},
-			beadTerminal:   false,
-			hasWork:        true,
-			mqNotRequired:  true,
-			initialVerdict: "SAFE_TO_NUKE",
-			wantVerdict:    "SAFE_TO_NUKE",
-			wantMQStatus:   "not_required",
-			wantNeedsRecov: false,
-		},
-		{
-			name:           "open bead with no MR escalates to NEEDS_MQ_SUBMIT",
-			finder:         fakeMRFinder{issue: nil, err: nil},
-			beadTerminal:   false,
-			hasWork:        true,
-			initialVerdict: "SAFE_TO_NUKE",
-			wantVerdict:    "NEEDS_MQ_SUBMIT",
-			wantMQStatus:   "not_submitted",
-			wantNeedsRecov: true,
-		},
-		{
-			name:           "open bead with MR stays SAFE_TO_NUKE",
-			finder:         fakeMRFinder{issue: &beads.Issue{ID: "mr-1"}, err: nil},
-			beadTerminal:   false,
-			hasWork:        true,
-			initialVerdict: "SAFE_TO_NUKE",
-			wantVerdict:    "SAFE_TO_NUKE",
-			wantMQStatus:   "submitted",
-			wantNeedsRecov: false,
-		},
-		{
-			name:           "MR lookup error fails closed",
-			finder:         fakeMRFinder{issue: nil, err: errors.New("bd exploded")},
-			beadTerminal:   false,
-			hasWork:        true,
-			initialVerdict: "SAFE_TO_NUKE",
-			wantVerdict:    "NEEDS_RECOVERY",
-			wantMQStatus:   "unknown",
-			wantNeedsRecov: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			status := RecoveryStatus{
-				Verdict: tt.initialVerdict,
-				Branch:  "polecat/test",
-			}
-			applyMQCheck(&status, tt.finder, tt.beadTerminal, tt.hasWork, tt.mqNotRequired)
-
-			if status.Verdict != tt.wantVerdict {
-				t.Errorf("Verdict = %q, want %q", status.Verdict, tt.wantVerdict)
-			}
-			if status.MQStatus != tt.wantMQStatus {
-				t.Errorf("MQStatus = %q, want %q", status.MQStatus, tt.wantMQStatus)
-			}
-			if status.NeedsRecovery != tt.wantNeedsRecov {
-				t.Errorf("NeedsRecovery = %v, want %v", status.NeedsRecovery, tt.wantNeedsRecov)
-			}
-		})
 	}
 }
 
@@ -288,6 +179,36 @@ func TestCleanupStatusBlockerForRecovery_PartialSpawnWithoutHook(t *testing.T) {
 			got := cleanupStatusBlockerForRecovery(tt.status, tt.partialSpawn)
 			if got != tt.want {
 				t.Errorf("cleanupStatusBlockerForRecovery() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDisplayedCleanupStatusMatchesWhatTheVerdictDecidedOn(t *testing.T) {
+	// Regression test for gt-ve9o: check-recovery must never print a raw
+	// stale/unknown cleanup status next to a verdict (e.g. SAFE_TO_NUKE) that
+	// was only reached because that same raw value was ignored in favor of
+	// live evidence.
+	tests := []struct {
+		name                string
+		status              polecat.CleanupStatus
+		ignoreCleanupStatus bool
+		want                polecat.CleanupStatus
+	}{
+		{name: "not ignored reports raw clean", status: polecat.CleanupClean, ignoreCleanupStatus: false, want: polecat.CleanupClean},
+		{name: "not ignored reports raw unknown", status: polecat.CleanupUnknown, ignoreCleanupStatus: false, want: polecat.CleanupUnknown},
+		{name: "not ignored reports raw dirty status", status: polecat.CleanupUnpushed, ignoreCleanupStatus: false, want: polecat.CleanupUnpushed},
+		{name: "ignored unknown displays as clean, not unknown", status: polecat.CleanupUnknown, ignoreCleanupStatus: true, want: polecat.CleanupClean},
+		{name: "ignored stale dirty status displays as clean", status: polecat.CleanupUnpushed, ignoreCleanupStatus: true, want: polecat.CleanupClean},
+		{name: "ignored missing status displays as clean", status: "", ignoreCleanupStatus: true, want: polecat.CleanupClean},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := polecat.WorkstateInput{CleanupStatus: tt.status, IgnoreCleanupStatus: tt.ignoreCleanupStatus}
+			got := displayedCleanupStatus(input)
+			if got != tt.want {
+				t.Errorf("displayedCleanupStatus() = %q, want %q", got, tt.want)
 			}
 		})
 	}

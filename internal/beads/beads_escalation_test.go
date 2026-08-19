@@ -1,10 +1,12 @@
 package beads
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFormatEscalationDescription(t *testing.T) {
@@ -447,6 +449,47 @@ exit 0
 	}
 }
 
+// TestListEscalationsByFingerprint_QueriesAllStatuses is the regression test
+// for gt-9bzd: the create-path dedup check must see closed matches too, not
+// just open ones, or a resolved-then-recurring escalation can never be
+// suppressed/backed-off — it just recreates unconditionally forever.
+func TestListEscalationsByFingerprint_QueriesAllStatuses(t *testing.T) {
+	stubDir := t.TempDir()
+	argsPath := filepath.Join(stubDir, "args.txt")
+
+	stubScript := `#!/bin/sh
+for a in "$@"; do
+  printf '%s\n' "$a" >> "` + argsPath + `"
+done
+echo '[]'
+exit 0
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ResetBdAllowStaleCacheForTest()
+
+	b := New(t.TempDir())
+	if _, err := b.ListEscalationsByFingerprint("escalation-fp:abc123def456"); err != nil {
+		t.Fatalf("ListEscalationsByFingerprint: %v", err)
+	}
+
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read stub args: %v", err)
+	}
+	args := string(argsData)
+	if !strings.Contains(args, "--status=all") {
+		t.Errorf("expected --status=all in bd list args (must see closed matches too), got:\n%s", args)
+	}
+	if strings.Contains(args, "--status=open") {
+		t.Errorf("must not restrict to --status=open — closed matches are needed for dedup backoff, got:\n%s", args)
+	}
+}
+
 // TestCloseEscalation_PassesForce verifies that CloseEscalation always passes
 // --force to the underlying bd close.
 //
@@ -552,5 +595,66 @@ exit 1
 	}
 	if _, statErr := os.Stat(updateMarker); statErr == nil {
 		t.Errorf("bd update was called — a resolved escalation must not be re-escalated or re-mailed")
+	}
+}
+
+// TestListStaleEscalations_BacksOffAfterReescalation verifies that an
+// escalation which was recently re-escalated is not immediately re-selected
+// as stale just because its original CreatedAt is old. Staleness must be
+// measured from LastReescalatedAt (with exponential backoff per
+// ReescalationCount), or every patrol cycle would re-escalate the same
+// escalation regardless of how recently it was last bumped (gt-gtnk).
+func TestListStaleEscalations_BacksOffAfterReescalation(t *testing.T) {
+	stubDir := t.TempDir()
+
+	now := time.Now()
+	longAgo := now.Add(-3 * time.Hour).Format(time.RFC3339)
+	recentReescalation := now.Add(-10 * time.Minute).Format(time.RFC3339)
+
+	descRecentlyReescalated := "severity: high\nreason: r\nescalated_by: x\nescalated_at: " + longAgo +
+		"\nreescalation_count: 1\nlast_reescalated_at: " + recentReescalation + "\nlast_reescalated_by: deacon/"
+	descNeverReescalated := "severity: high\nreason: r\nescalated_by: x\nescalated_at: " + longAgo
+
+	listJSON := fmt.Sprintf(`[
+  {"id":"hq-recent","title":"Recently re-escalated","status":"open","priority":2,"issue_type":"task","created_at":%q,"labels":["gt:escalation"],"description":%q},
+  {"id":"hq-stale","title":"Never re-escalated","status":"open","priority":2,"issue_type":"task","created_at":%q,"labels":["gt:escalation"],"description":%q}
+]`, longAgo, descRecentlyReescalated, longAgo, descNeverReescalated)
+
+	stubScript := `#!/bin/sh
+case " $* " in
+  *" version "*)
+    echo "unknown flag: --allow-stale"
+    exit 1
+    ;;
+  *" list "*)
+    cat <<'LISTEOF'
+` + listJSON + `
+LISTEOF
+    exit 0
+    ;;
+esac
+exit 1
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ResetBdAllowStaleCacheForTest()
+
+	b := New(t.TempDir())
+	stale, err := b.ListStaleEscalations(time.Hour)
+	if err != nil {
+		t.Fatalf("ListStaleEscalations: %v", err)
+	}
+
+	var ids []string
+	for _, issue := range stale {
+		ids = append(ids, issue.ID)
+	}
+
+	if len(ids) != 1 || ids[0] != "hq-stale" {
+		t.Fatalf("expected only hq-stale to be selected as stale, got %v", ids)
 	}
 }

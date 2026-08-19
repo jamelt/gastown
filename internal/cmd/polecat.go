@@ -1223,7 +1223,6 @@ func computePolecatRecoveryStatus(mgr *polecat.Manager, r *rig.Rig, rigName, pol
 		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
 	}
 
-	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
 	if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" {
 		sessionDormant := false
@@ -1250,6 +1249,7 @@ func computePolecatRecoveryStatus(mgr *polecat.Manager, r *rig.Rig, rigName, pol
 			status.Diagnostics = append(status.Diagnostics, "legacy_cleanup_status=<missing> evidence="+legacyCleanupReadOnlyProvenance)
 		}
 	}
+	status.CleanupStatus = displayedCleanupStatus(input)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
@@ -1433,6 +1433,18 @@ func cleanupStatusBlocker(status polecat.CleanupStatus) string {
 	default:
 		return fmt.Sprintf("cleanup_status=%s", status)
 	}
+}
+
+// displayedCleanupStatus is the cleanup status check-recovery prints. It must
+// match the value the verdict was actually decided on: when IgnoreCleanupStatus
+// is set, DecideWorkstate already treated the raw stored value as stale and
+// superseded by live evidence, so a raw/stale display (e.g. "unknown") next
+// to a verdict like SAFE_TO_NUKE would contradict the verdict it sits beside.
+func displayedCleanupStatus(input polecat.WorkstateInput) polecat.CleanupStatus {
+	if input.IgnoreCleanupStatus {
+		return polecat.CleanupClean
+	}
+	return input.CleanupStatus
 }
 
 func cleanupStatusBlockerForRecovery(status polecat.CleanupStatus, partialSpawnWithoutHook bool) string {
@@ -1732,12 +1744,6 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
-// mrFinder is the subset of *beads.Beads that applyMQCheck needs. It lets us
-// unit-test the verdict logic without a real bd binary.
-type mrFinder interface {
-	FindMRForBranchAny(branch string) (*beads.Issue, error)
-}
-
 // isAssignedBeadTerminal reports whether the polecat's assigned bead (if any)
 // is in a terminal status (closed/tombstone). Returns false on any lookup
 // failure — callers must only use this to *skip* further escalation, never to
@@ -1772,45 +1778,6 @@ func isMQNotRequiredSource(bd issueShower, issueID string) bool {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local")
-}
-
-// applyMQCheck mutates status based on merge-queue state for the polecat's
-// branch. If beadTerminal is true, the assigned bead is already closed, so
-// there is nothing to submit and we leave the verdict as SAFE_TO_NUKE.
-//
-// This guard fixes the zombie-restart loop documented in bead aa-55d8:
-// a closed "no-op audit" bead (e.g. aa-xtee) used to report NEEDS_MQ_SUBMIT
-// forever, causing witness patrols to restart the polecat on every cycle.
-func applyMQCheck(status *RecoveryStatus, bd mrFinder, beadTerminal, hasSubmittableWork, mqNotRequired bool) {
-	if !hasSubmittableWork || mqNotRequired {
-		// No commits/content ahead of the integration branch means gt done had
-		// nothing to enqueue; treating that as missing MQ submission causes
-		// recovery loops on no-op/report-only assignments.
-		status.MQStatus = "not_required"
-		return
-	}
-	if beadTerminal {
-		// Work exists, but the bead is already terminal.
-		status.MQStatus = "submitted"
-		return
-	}
-	mr, mrErr := bd.FindMRForBranchAny(status.Branch)
-	if mrErr != nil {
-		// Can't verify MQ — fail closed until the queue state can be checked.
-		status.MQStatus = "unknown"
-		status.NeedsRecovery = true
-		status.Verdict = "NEEDS_RECOVERY"
-		status.Blockers = append(status.Blockers, fmt.Sprintf("mq_lookup_error: %v", mrErr))
-		return
-	}
-	if mr != nil {
-		status.MQStatus = "submitted"
-		return
-	}
-	// Work was pushed but never entered the merge queue
-	status.MQStatus = "not_submitted"
-	status.NeedsRecovery = true
-	status.Verdict = "NEEDS_MQ_SUBMIT"
 }
 
 func runPolecatGC(cmd *cobra.Command, args []string) error {
@@ -2014,16 +1981,6 @@ func dryRunNukeSummary(total, blocked int) string {
 		return fmt.Sprintf("Would refuse to nuke %d of %d polecat(s) without --force.", blocked, total)
 	}
 	return fmt.Sprintf("Would nuke %d polecat(s).", total)
-}
-
-// nukePolecatFull performs the complete cleanup sequence for a single polecat:
-// 1. Kill tmux session
-// 2. Delete worktree (via RemoveWithOptions with nuclear=true)
-// 3. Delete git branch
-// 4. Close agent bead
-// This is the canonical cleanup path used by both `polecat nuke` and `polecat stale --cleanup`.
-func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig) error {
-	return nukePolecatFullWithOptions(polecatName, rigName, mgr, r, nukePolecatOptions{PurgeClosedEphemerals: true})
 }
 
 type nukePolecatOptions struct {

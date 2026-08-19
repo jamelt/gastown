@@ -2662,8 +2662,8 @@ type BranchContamination struct {
 }
 
 // Contamination thresholds shared by every caller that gates on branch
-// divergence (gt done's preflight, gt pr-sheriff-check --merge-gate, and the
-// branch-hygiene tap guard). Behind thresholds were established for GH#2220.
+// divergence (gt done's preflight and the branch-hygiene tap guard). Behind
+// thresholds were established for GH#2220.
 // Ahead thresholds close a gap GH#2220 left open: a branch can carry commits
 // unrelated to its intended diff without ever falling behind. The known
 // contamination cases (PR #4238: ~86 ahead, PR #4257: ~98 ahead) were both
@@ -2745,13 +2745,10 @@ func (g *Git) CheckBranchContamination(baseRef string) (BranchContamination, err
 // ResolveContaminationCheck resolves the base ref to compare against (the
 // explicit ref if given, otherwise the fork-aware default), best-effort
 // fetches its remote, and returns the resulting BranchContamination reading.
-// Shared by gt pr-sheriff-check and the branch-hygiene tap guard so both
-// follow the identical resolve/fetch/check sequence.
 //
-// The fetch error (if any) is returned separately rather than swallowed,
-// since callers differ on whether to surface it: gt pr-sheriff-check warns
-// on fetch failure and proceeds with local refs, the tap guard ignores it
-// silently as part of its documented fail-open contract.
+// The fetch error (if any) is returned separately rather than swallowed: the
+// tap guard ignores it silently as part of its documented fail-open
+// contract, but a future caller may want to surface it instead.
 func (g *Git) ResolveContaminationCheck(explicitBase string) (base string, contam BranchContamination, fetchErr error, err error) {
 	base = explicitBase
 	if base == "" {

@@ -73,11 +73,27 @@ func NewRouterWithTownRoot(workDir, townRoot string) *Router {
 	}
 }
 
+// notifyWaitTimeout bounds how long WaitPendingNotifications blocks. Each
+// in-flight notification goroutine's tmux calls are individually bounded
+// (see tmux.Tmux.run), but this gives WaitPendingNotifications its own
+// backstop so a caller can never block indefinitely here regardless of how
+// many notifications are in flight or what they end up waiting on. gt-h8bj.
+const notifyWaitTimeout = 30 * time.Second
+
 // WaitPendingNotifications blocks until all in-flight async notifications
-// have completed. CLI commands should call this before exiting to avoid
-// losing notifications that are still being delivered.
+// have completed, or notifyWaitTimeout elapses, whichever comes first.
+// CLI commands should call this before exiting to avoid losing
+// notifications that are still being delivered.
 func (r *Router) WaitPendingNotifications() {
-	r.notifyWg.Wait()
+	done := make(chan struct{})
+	go func() {
+		r.notifyWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(notifyWaitTimeout):
+	}
 }
 
 // isListAddress returns true if the address uses list:name syntax.

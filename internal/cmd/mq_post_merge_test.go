@@ -35,18 +35,20 @@ func (m *fakeMQPostMergeManager) PostMergeMR(mr *refinery.MergeRequest) (*refine
 }
 
 type fakeMQPostMergeGit struct {
-	verifyErr    error
-	tipVerifyErr error
-	openPR       bool
-	deleteErr    error
-	remoteTip    string
-	localHead    string
-	tipErr       error
+	verifyErr     error
+	tipVerifyErr  error
+	openPR        bool
+	openPRHeadSHA string // when set, HasOpenPullRequest also requires ref.HeadSHA to match (simulates the real exact-HeadSHA PR lookup)
+	deleteErr     error
+	remoteTip     string
+	localHead     string
+	tipErr        error
 
 	verifiedCommits []string
 	deletedBranches []string
 	deletedHeads    []string
 	localDeleted    []string
+	prRefs          []git.PullRequestRef
 }
 
 // VerifyPushedCommitReachableFromPushTarget is called twice on the happy
@@ -61,7 +63,11 @@ func (g *fakeMQPostMergeGit) VerifyPushedCommitReachableFromPushTarget(_, _, com
 	return g.verifyErr
 }
 
-func (g *fakeMQPostMergeGit) HasOpenPullRequest(git.PullRequestRef) bool {
+func (g *fakeMQPostMergeGit) HasOpenPullRequest(ref git.PullRequestRef) bool {
+	g.prRefs = append(g.prRefs, ref)
+	if g.openPRHeadSHA != "" {
+		return g.openPR && ref.HeadSHA == g.openPRHeadSHA
+	}
 	return g.openPR
 }
 
@@ -99,7 +105,7 @@ func TestRunVerifiedMQPostMerge_ProofFailurePreservesRecordsAndBranch(t *testing
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{verifyErr: errors.New("not reachable")}
 
-	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
 	if err == nil || !strings.Contains(err.Error(), "merge proof failed") {
 		t.Fatalf("runVerifiedMQPostMerge error = %v, want merge proof failure", err)
 	}
@@ -121,7 +127,7 @@ func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) 
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{remoteTip: mgr.mr.CommitSHA, localHead: mgr.mr.CommitSHA}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
 	if err != nil {
 		t.Fatalf("runVerifiedMQPostMerge: %v", err)
 	}
@@ -155,7 +161,7 @@ func TestRunVerifiedMQPostMerge_StaleCommitSHAUsesFreshRemoteTip(t *testing.T) {
 	freshTip := "eb20c1f259fresh"
 	rigGit := &fakeMQPostMergeGit{remoteTip: freshTip, localHead: freshTip}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
 	if err != nil {
 		t.Fatalf("runVerifiedMQPostMerge: %v", err)
 	}
@@ -180,7 +186,7 @@ func TestRunVerifiedMQPostMerge_FreshTipNotReachableFailsClosed(t *testing.T) {
 	freshTip := "eb20c1f259fresh"
 	rigGit := &fakeMQPostMergeGit{remoteTip: freshTip, localHead: freshTip, tipVerifyErr: errors.New("not reachable")}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
 	if err == nil || !strings.Contains(err.Error(), "not proven on") {
 		t.Fatalf("runVerifiedMQPostMerge error = %v, want fresh-tip reachability failure", err)
 	}
@@ -196,7 +202,7 @@ func TestRunVerifiedMQPostMerge_SkipBranchDeleteStillRequiresProof(t *testing.T)
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, true)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, true)
 	if err != nil {
 		t.Fatalf("runVerifiedMQPostMerge: %v", err)
 	}
@@ -216,9 +222,9 @@ func TestRunVerifiedMQPostMerge_SkipBranchDeleteStillRequiresProof(t *testing.T)
 
 func TestRunVerifiedMQPostMerge_OpenPRSkipsRemoteDeleteAfterProof(t *testing.T) {
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
-	rigGit := &fakeMQPostMergeGit{openPR: true, localHead: mgr.mr.CommitSHA}
+	rigGit := &fakeMQPostMergeGit{openPR: true, remoteTip: mgr.mr.CommitSHA, localHead: mgr.mr.CommitSHA}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
 	if err != nil {
 		t.Fatalf("runVerifiedMQPostMerge: %v", err)
 	}
@@ -236,11 +242,41 @@ func TestRunVerifiedMQPostMerge_OpenPRSkipsRemoteDeleteAfterProof(t *testing.T) 
 	}
 }
 
+// TestRunVerifiedMQPostMerge_OpenPRLookupUsesFreshRemoteTipNotStaleCommitSHA
+// covers gt-zr7e: a conflict-resolution push after MR submission can move the
+// branch's remote tip past the recorded mr.CommitSHA. The open-PR lookup must
+// use that fresh tip, not the stale commit_sha, or a genuinely open PR at the
+// new head is missed and the branch gets deleted out from under it.
+func TestRunVerifiedMQPostMerge_OpenPRLookupUsesFreshRemoteTipNotStaleCommitSHA(t *testing.T) {
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	movedTip := "movedaftertheconflictresolutionpush"
+	rigGit := &fakeMQPostMergeGit{
+		remoteTip:     movedTip,
+		openPR:        true,
+		openPRHeadSHA: movedTip,
+		localHead:     mgr.mr.CommitSHA,
+	}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !cleanup.OpenPR {
+		t.Fatalf("cleanup.OpenPR = false, want true: open-PR lookup must use the fresh remote tip %q, not the stale commit_sha %q, cleanup=%+v", movedTip, mgr.mr.CommitSHA, cleanup)
+	}
+	if len(rigGit.prRefs) != 1 || rigGit.prRefs[0].HeadSHA != movedTip {
+		t.Fatalf("HasOpenPullRequest refs = %+v, want a single call with HeadSHA=%q", rigGit.prRefs, movedTip)
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("remote branch deleted despite open PR at moved head: %v", rigGit.deletedBranches)
+	}
+}
+
 func TestRunVerifiedMQPostMerge_LeaseDeleteFailureReturnsAfterPostMerge(t *testing.T) {
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{remoteTip: mgr.mr.CommitSHA, deleteErr: errors.New("stale info")}
 
-	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
 	if err == nil || !strings.Contains(err.Error(), "remote branch delete") {
 		t.Fatalf("runVerifiedMQPostMerge error = %v, want remote branch delete failure", err)
 	}
@@ -262,7 +298,7 @@ func TestRunVerifiedMQPostMerge_MissingRemoteBranchIsIdempotentAfterProof(t *tes
 	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
 	rigGit := &fakeMQPostMergeGit{localHead: mgr.mr.CommitSHA}
 
-	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
 	if err != nil {
 		t.Fatalf("runVerifiedMQPostMerge: %v", err)
 	}
@@ -283,7 +319,7 @@ func TestRunVerifiedMQPostMerge_MissingSubmittedHeadFailsClosed(t *testing.T) {
 	mgr := &fakeMQPostMergeManager{mr: mr}
 	rigGit := &fakeMQPostMergeGit{}
 
-	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
 	if err == nil || !strings.Contains(err.Error(), "missing submitted commit_sha") {
 		t.Fatalf("runVerifiedMQPostMerge error = %v, want missing submitted head", err)
 	}
@@ -302,7 +338,7 @@ func TestRunVerifiedMQPostMerge_SourceTargetBranchFailsClosed(t *testing.T) {
 	mgr := &fakeMQPostMergeManager{mr: mr}
 	rigGit := &fakeMQPostMergeGit{}
 
-	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	_, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, "origin", mgr.mr.ID, false)
 	if err == nil || !strings.Contains(err.Error(), "matches target branch") {
 		t.Fatalf("runVerifiedMQPostMerge error = %v, want source/target failure", err)
 	}

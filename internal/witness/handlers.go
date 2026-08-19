@@ -1010,6 +1010,10 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	}
 	clonePath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
 	g := git.NewGit(clonePath)
+	// Resolve the remote work is published to. With no per-bead override
+	// producer reachable here, PublishRemote resolves to "origin" (see
+	// git.ResolveWorkRefs) — identical to the previously hardcoded remote.
+	publishRemote := g.ResolveWorkRefs(rig.DefaultBranchForPath(filepath.Join(townRoot, rigName)), git.WorkRefs{}).PublishRemote
 	bd := beads.New(beads.ResolveBeadsDir(workDir))
 	var targetRefs []string
 	if branch, err := g.CurrentBranch(); err == nil {
@@ -1026,7 +1030,7 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		} else {
 			input.GitCheckFailed = true
 		}
-		if preservation, err := g.BranchPreservationStatus(branch, "origin", targetRefs); err == nil {
+		if preservation, err := g.BranchPreservationStatus(branch, publishRemote, targetRefs); err == nil {
 			input.UnpushedCommits = preservation.UnpreservedPatchCount
 		} else {
 			input.GitCheckFailed = true
@@ -1052,7 +1056,7 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		}
 	}
 	input.MQCheckRequired = input.Branch != ""
-	input.HasSubmittableWork = witnessHasSubmittableWork(clonePath, targetRefs)
+	input.HasSubmittableWork = witnessHasSubmittableWork(clonePath, publishRemote, targetRefs)
 	input.AssignedBeadTerminal = witnessIssueTerminal(rigBeads, issueID)
 	if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, input.AssignedBeadTerminal || sourceTerminal || hookTerminal, hookSafe, activeMRSafe, gitSafe) {
 		input.IgnoreCleanupStatus = true
@@ -1200,10 +1204,10 @@ func witnessMQNotRequiredSource(bd *beads.Beads, issueID string) bool {
 	return attachment.NoMerge || attachment.ReviewOnly || strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local")
 }
 
-func witnessHasSubmittableWork(worktreePath string, targetRefs []string) bool {
+func witnessHasSubmittableWork(worktreePath, publishRemote string, targetRefs []string) bool {
 	g := git.NewGit(worktreePath)
 	branch, _ := g.CurrentBranch()
-	status, err := g.BranchTargetStatus(branch, "origin", targetRefs)
+	status, err := g.BranchTargetStatus(branch, publishRemote, targetRefs)
 	return err == nil && status.UnpreservedPatchCount > 0
 }
 
@@ -1388,10 +1392,7 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 	}
 
 	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
+	defaultBranch := rig.DefaultBranchForPath(filepath.Join(townRoot, rigName))
 
 	// Construct polecat path, handling both new and old structures
 	// New structure: polecats/<name>/<rigname>/
@@ -1473,10 +1474,7 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName string) (bool, err
 		return false, fmt.Errorf("finding town root: %v", err)
 	}
 
-	defaultBranch := "main"
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
+	defaultBranch := rig.DefaultBranchForPath(filepath.Join(townRoot, rigName))
 
 	polecatPath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
 	if _, err := os.Stat(polecatPath); os.IsNotExist(err) {

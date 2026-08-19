@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func setupSlingTestRegistry(t *testing.T) {
@@ -119,6 +121,10 @@ func TestNudgeWitnessDoesNotEmitEvent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
 
+	prevEscalate := escalateNudgeFailure
+	t.Cleanup(func() { escalateNudgeFailure = prevEscalate })
+	escalateNudgeFailure = func(string, string, error) {}
+
 	nudgeWitness("gastown", "POLECAT_DONE: test")
 
 	paths, err := filepath.Glob(filepath.Join(townRoot, "events", "witness", "*.event"))
@@ -127,6 +133,61 @@ func TestNudgeWitnessDoesNotEmitEvent(t *testing.T) {
 	}
 	if len(paths) != 0 {
 		t.Fatalf("witness event files = %v, want none", paths)
+	}
+}
+
+// TestQueueFallbackNudgeIgnoresOtherErrors verifies that a nudge failure
+// unrelated to a stranded composer (e.g. dead session) is returned unchanged
+// instead of being queued — queueing only makes sense when the text is known
+// to have made it into the composer (gt-ax7a).
+func TestQueueFallbackNudgeIgnoresOtherErrors(t *testing.T) {
+	townRoot := t.TempDir()
+	original := fmt.Errorf("nudge to session %q: session not found", "gt-witness")
+
+	got := queueFallbackNudge(townRoot, "gt-witness", "hello", original)
+
+	if got != original {
+		t.Fatalf("queueFallbackNudge() = %v, want unchanged %v", got, original)
+	}
+	if n, _ := nudge.Pending(townRoot, "gt-witness"); n != 0 {
+		t.Fatalf("queueFallbackNudge() queued %d nudges for a non-stranded error, want 0", n)
+	}
+}
+
+// TestQueueFallbackNudgeWithoutTownRootReturnsOriginal verifies that without
+// a resolvable town root (queueing is impossible: nowhere to write the queue
+// file), the original stranded-composer error is surfaced rather than
+// silently swallowed.
+func TestQueueFallbackNudgeWithoutTownRootReturnsOriginal(t *testing.T) {
+	original := fmt.Errorf("nudge to session %q: %w", "gt-witness", tmux.ErrSubmitNotVerified)
+
+	got := queueFallbackNudge("", "gt-witness", "hello", original)
+
+	if got != original {
+		t.Fatalf("queueFallbackNudge() = %v, want unchanged %v", got, original)
+	}
+}
+
+// TestQueueFallbackNudgeOnStrandedComposerQueuesMessage verifies the actual
+// fix for gt-ax7a: when a nudge fails with ErrSubmitNotVerified (text was
+// typed into the composer but a pre-existing draft blocked submission), the
+// message is queued for durable delivery instead of being dropped with a
+// warning.
+func TestQueueFallbackNudgeOnStrandedComposerQueuesMessage(t *testing.T) {
+	townRoot := t.TempDir()
+	stranded := fmt.Errorf("nudge to session %q: %w", "gt-witness", tmux.ErrSubmitNotVerified)
+
+	got := queueFallbackNudge(townRoot, "gt-witness", "Polecat dispatched - check for work", stranded)
+
+	if got != nil {
+		t.Fatalf("queueFallbackNudge() = %v, want nil (queued successfully)", got)
+	}
+	queued, err := nudge.Drain(townRoot, "gt-witness")
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(queued) != 1 || queued[0].Message != "Polecat dispatched - check for work" {
+		t.Fatalf("queued nudges = %+v, want one entry with the stranded message", queued)
 	}
 }
 

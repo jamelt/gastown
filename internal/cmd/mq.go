@@ -540,7 +540,12 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("post-merge proof: %w", err)
 	}
 
-	result, branchCleanup, err := runVerifiedMQPostMerge(mgr, r.Path, rigGit, mrID, mqPostMergeSkipBranchDelete)
+	// Resolve the publish remote against the concrete *git.Git before it is
+	// narrowed to the mqPostMergeGit interface. With no per-MR override
+	// producer, this resolves to "origin" (see git.ResolveWorkRefs).
+	publishRemote := rigGit.ResolveWorkRefs(r.DefaultBranch(), git.WorkRefs{}).PublishRemote
+
+	result, branchCleanup, err := runVerifiedMQPostMerge(mgr, r.Path, rigGit, publishRemote, mrID, mqPostMergeSkipBranchDelete)
 	if err != nil {
 		return fmt.Errorf("post-merge cleanup: %w", err)
 	}
@@ -580,12 +585,12 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, mrID string, skipBranchDelete bool) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, error) {
+func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, publishRemote, mrID string, skipBranchDelete bool) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, error) {
 	mr, err := mgr.FindMRForPostMerge(mrID)
 	if err != nil {
 		return nil, mqPostMergeBranchCleanup{}, err
 	}
-	if err := verifyMQPostMergeProof(rigGit, mr); err != nil {
+	if err := verifyMQPostMergeProof(rigGit, publishRemote, mr); err != nil {
 		return nil, mqPostMergeBranchCleanup{}, err
 	}
 
@@ -594,11 +599,11 @@ func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPos
 		return result, mqPostMergeBranchCleanup{}, err
 	}
 
-	branchCleanup, err := cleanupMQPostMergeBranch(rigPath, rigGit, result.MR, skipBranchDelete)
+	branchCleanup, err := cleanupMQPostMergeBranch(rigPath, rigGit, publishRemote, result.MR, skipBranchDelete)
 	return result, branchCleanup, err
 }
 
-func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) error {
+func verifyMQPostMergeProof(rigGit mqPostMergeGit, publishRemote string, mr *refinery.MergeRequest) error {
 	if mr == nil {
 		return fmt.Errorf("merge proof failed: merge request is missing")
 	}
@@ -613,13 +618,13 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) er
 	if commit == "" {
 		return fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
 	}
-	if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, commit); err != nil {
+	if err := rigGit.VerifyPushedCommitReachableFromPushTarget(publishRemote, target, commit); err != nil {
 		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s: %w", mr.ID, target, commit, err)
 	}
 	return nil
 }
 
-func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refinery.MergeRequest, skipBranchDelete bool) (mqPostMergeBranchCleanup, error) {
+func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, publishRemote string, mr *refinery.MergeRequest, skipBranchDelete bool) (mqPostMergeBranchCleanup, error) {
 	cleanup := mqPostMergeBranchCleanup{}
 	if mr == nil {
 		return cleanup, fmt.Errorf("remote branch delete: merge request is missing")
@@ -646,28 +651,32 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 
 	// Deleting a branch with an open PR causes GitHub to auto-close the PR as
 	// "closed" (not "merged"), destroying the PR audit trail. (gas-fk4)
-	var remoteTip string
-	if rigGit.HasOpenPullRequest(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: cleanup.Branch, HeadSHA: expectedHead}) {
+	//
+	// The open-PR lookup must use the branch's current remote tip, not the
+	// MR's recorded commit_sha: a conflict-resolution push after MR submission
+	// moves the branch head, and the fallback PR lookup exact-matches HeadSHA
+	// (pr_lookup.go), so a stale SHA can miss a genuinely open PR and silently
+	// defeat this protection (gt-zr7e; same staleness pattern as the
+	// CAS-delete fix in gt-twuj).
+	tip, err := rigGit.PushRemoteBranchTip(publishRemote, cleanup.Branch)
+	if err != nil {
+		return cleanup, fmt.Errorf("remote branch delete %s: read remote branch tip: %w", cleanup.Branch, err)
+	}
+	remoteTip := strings.TrimSpace(tip)
+	if remoteTip == "" {
+		cleanup.AlreadyGone = true
+	} else if rigGit.HasOpenPullRequest(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: cleanup.Branch, HeadSHA: remoteTip}) {
 		cleanup.OpenPR = true
+	} else if err := rigGit.VerifyPushedCommitReachableFromPushTarget(publishRemote, mr.TargetBranch, remoteTip); err != nil {
+		return cleanup, fmt.Errorf("remote branch delete %s: current tip %s not proven on %s: %w", cleanup.Branch, remoteTip, mr.TargetBranch, err)
+	} else if err := rigGit.DeleteRemoteBranchIfAt(publishRemote, cleanup.Branch, remoteTip); err != nil {
+		// expectedHead (mr.CommitSHA) is captured at MR-submit time and goes
+		// stale if a conflict-resolution push later lands a new commit on the
+		// same branch, so the delete's compare-and-swap must target the
+		// branch's current remote tip instead (gt-twuj).
+		return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, remoteTip, err)
 	} else {
-		tip, err := rigGit.PushRemoteBranchTip("origin", cleanup.Branch)
-		if err != nil {
-			return cleanup, fmt.Errorf("remote branch delete %s: read remote branch tip: %w", cleanup.Branch, err)
-		}
-		remoteTip = strings.TrimSpace(tip)
-		if remoteTip == "" {
-			cleanup.AlreadyGone = true
-		} else if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", mr.TargetBranch, remoteTip); err != nil {
-			return cleanup, fmt.Errorf("remote branch delete %s: current tip %s not proven on %s: %w", cleanup.Branch, remoteTip, mr.TargetBranch, err)
-		} else if err := rigGit.DeleteRemoteBranchIfAt("origin", cleanup.Branch, remoteTip); err != nil {
-			// expectedHead (mr.CommitSHA) is captured at MR-submit time and goes
-			// stale if a conflict-resolution push later lands a new commit on the
-			// same branch, so the delete's compare-and-swap must target the
-			// branch's current remote tip instead (gt-twuj).
-			return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, remoteTip, err)
-		} else {
-			cleanup.RemoteDeleted = true
-		}
+		cleanup.RemoteDeleted = true
 	}
 
 	deleteHead := expectedHead

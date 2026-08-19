@@ -1200,7 +1200,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				if !branchPushedWithWork {
 					return fmt.Errorf("cannot complete: no commits on branch ahead of %s\n"+
 						"Polecats must have at least 1 commit to submit.\n"+
-						"If the bug was already fixed upstream: gt done --status DEFERRED\n"+
+						"If the bug was already fixed upstream (nothing to implement): "+
+						"bd close <id> --reason=\"no-changes: <explanation>\" then gt done --cleanup-status clean\n"+
+						"  (do NOT use --status DEFERRED here — it leaves the bead open for redispatch,\n"+
+						"  and the next polecat reaches the same conclusion forever; see gt-624k)\n"+
+						"If you're genuinely paused and will resume later: gt done --status DEFERRED\n"+
 						"If you're blocked: gt done --status ESCALATED",
 						baseRef)
 				}
