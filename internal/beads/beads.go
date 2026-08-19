@@ -565,11 +565,34 @@ type Beads struct {
 	// and forIssueID() skip ResolveRoutingTarget and operate against
 	// beadsDir directly.
 	noRoute bool
+
+	// ctx, when set, is used as the parent context for bd subprocess calls.
+	// Lets callers impose an aggregate deadline across many bd invocations
+	// (e.g. a multi-rig inventory loop) on top of the per-call subprocess
+	// timeout. Set via WithContext; nil means context.Background().
+	ctx context.Context
 }
 
 // New creates a new Beads wrapper for the given directory.
 func New(workDir string) *Beads {
 	return &Beads{workDir: workDir}
+}
+
+// WithContext returns a copy of b whose bd subprocess calls use ctx as their
+// parent context. This bounds the aggregate time a caller spends across many
+// bd invocations (e.g. querying several rig databases in a loop) in addition
+// to the fixed per-call subprocess timeout, so a caller holding a lock across
+// the calls cannot block indefinitely on a slow or wedged backend.
+func (b *Beads) WithContext(ctx context.Context) *Beads {
+	return &Beads{
+		workDir:    b.workDir,
+		beadsDir:   b.beadsDir,
+		isolated:   b.isolated,
+		serverPort: b.serverPort,
+		store:      b.store,
+		noRoute:    b.noRoute,
+		ctx:        ctx,
+	}
 }
 
 // NewIsolated creates a Beads wrapper for test isolation.
@@ -803,7 +826,15 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
 	// The context covers both the initial attempt and the --flat retry.
-	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
+	// If the caller supplied a parent context (WithContext), the effective
+	// deadline is the earlier of the parent's and this per-call timeout —
+	// letting a caller bound the aggregate time across many bd calls (e.g.
+	// a multi-rig inventory loop) on top of the per-call bound.
+	parentCtx := b.ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, resolveBdSubprocessTimeout())
 	defer cancel()
 
 	// Always explicitly set BEADS_DIR to prevent inherited env vars from
