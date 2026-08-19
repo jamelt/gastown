@@ -1347,7 +1347,7 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification unverifiable — %v (running gates normally)\n", ancErr)
 			} else if !based {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification rejected — submitted commit %s is not based on attested base %s (running gates normally)\n",
-					shortSHA(mr.CommitSHA), mr.PreVerifiedBase[:min(8, len(mr.PreVerifiedBase))])
+					shortSHA(mr.CommitSHA), shortSHA(mr.PreVerifiedBase))
 			} else {
 				_, _ = fmt.Fprintln(e.output, "[Engineer] Pre-verification valid — target unchanged, skipping gates (fast-path)")
 				skipGates = true
