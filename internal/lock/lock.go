@@ -184,6 +184,15 @@ func (l *Lock) Read() (*LockInfo, error) {
 // Returns ErrLocked if locked by another live process.
 // Automatically cleans up stale locks.
 func (l *Lock) Check() error {
+	// Acquire advisory flock to serialize concurrent Check() and Acquire() calls.
+	// Without this, a concurrent Acquire() could have its freshly written lock
+	// file deleted between the write and when it considers itself locked.
+	unlock, err := flockAcquire(l.lockPath + ".flock")
+	if err != nil {
+		return fmt.Errorf("acquiring coordination lock: %w", err)
+	}
+	defer unlock()
+
 	info, err := l.Read()
 	if err != nil {
 		if errors.Is(err, ErrNotLocked) {
@@ -194,7 +203,7 @@ func (l *Lock) Check() error {
 
 	// Check if stale
 	if info.IsStale() {
-		// Clean up stale lock (best-effort cleanup)
+		// Clean up stale lock (now safe - we hold the flock)
 		_ = l.Release()
 		return nil
 	}
