@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -95,6 +96,41 @@ func TestSanitizeKey(t *testing.T) {
 			got := sanitizeKey(tt.key)
 			if got != tt.want {
 				t.Errorf("sanitizeKey(%q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMemBeadKey(t *testing.T) {
+	// Regression for gt-tgy: the key handed to bd remember/forget must be the
+	// un-prefixed "<type>.<slug>". bd owns the reserved "memory." namespace and
+	// rejects any caller-supplied key starting with it, so memBeadKey must never
+	// emit that prefix.
+	tests := []struct {
+		name    string
+		memType string
+		key     string
+		want    string
+	}{
+		{name: "feedback", memType: "feedback", key: "dont-mock-db", want: "feedback.dont-mock-db"},
+		{name: "general", memType: "general", key: "some-insight", want: "general.some-insight"},
+		{name: "user", memType: "user", key: "senior-go-dev", want: "user.senior-go-dev"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := memBeadKey(tt.memType, tt.key)
+			if got != tt.want {
+				t.Errorf("memBeadKey(%q, %q) = %q, want %q", tt.memType, tt.key, got, tt.want)
+			}
+			if strings.HasPrefix(got, memoryKeyPrefix) {
+				t.Errorf("memBeadKey(%q, %q) = %q must not start with reserved prefix %q", tt.memType, tt.key, got, memoryKeyPrefix)
+			}
+			// Prepending the reserved prefix reproduces the kv key that bd stores
+			// under, so the read/existence paths stay addressable.
+			gotType, gotKey := parseMemoryKey(memoryKeyPrefix + got)
+			if gotType != tt.memType || gotKey != tt.key {
+				t.Errorf("round-trip parseMemoryKey(%q) = (%q, %q), want (%q, %q)", memoryKeyPrefix+got, gotType, gotKey, tt.memType, tt.key)
 			}
 		})
 	}
