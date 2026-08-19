@@ -2800,6 +2800,59 @@ func TestRemoveWithOptions_ShellInWorktreeBlocksBeforeMutation(t *testing.T) {
 	}
 }
 
+// TestRemoveWithOptions_KillsLingeringSession is the regression test for
+// gt-rmwp: a polecat removed via RemoveWithOptions (e.g. dispatch rollback's
+// cleanupSpawnedPolecat, which has no separate session-kill step) previously
+// left its tmux session alive after the worktree and beads record were gone.
+// That produced a "zombie" only `gt polecat list`'s orphan-session scan could
+// see, disagreeing with `gt polecat status` (not found) for the same name,
+// and left the identity's name free to be handed to a future dispatch while
+// the stale session was still attached.
+func TestRemoveWithOptions_KillsLingeringSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux not supported on Windows")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+	tm := tmux.NewTmux()
+	if !tm.IsAvailable() {
+		t.Skip("tmux is required to prove the session is killed")
+	}
+	mgr.tmux = tm
+
+	p, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+
+	sessMgr := NewSessionManager(tm, mgr.rig)
+	sessionName := sessMgr.SessionName("toast")
+	if err := tm.NewSessionWithCommand(sessionName, t.TempDir(), "sleep 300"); err != nil {
+		t.Fatalf("create tmux session: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSessionWithProcesses(sessionName) })
+
+	running, err := tm.HasSession(sessionName)
+	if err != nil || !running {
+		t.Fatalf("precondition: session %s should be running", sessionName)
+	}
+
+	if err := mgr.RemoveWithOptions("toast", true, true, false); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+	if _, statErr := os.Stat(p.ClonePath); !os.IsNotExist(statErr) {
+		t.Fatalf("worktree still exists after removal, stat err=%v", statErr)
+	}
+
+	running, _ = tm.HasSession(sessionName)
+	if running {
+		t.Error("session should have been killed by RemoveWithOptions")
+	}
+}
+
 // TestReuseIdlePolecat_KillsLiveSession verifies that ReuseIdlePolecat kills
 // an existing live (non-stale) tmux session instead of returning ErrSessionRunning.
 // This is the regression test for the sling-reuse-stale-session bug: idle polecats

@@ -1295,6 +1295,23 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 	// assignee set) after removal, permanently stuck with no one working on them.
 	m.unassignWorkBeads(name)
 
+	// Kill any lingering tmux session for this identity. Without this, a
+	// removed polecat's worktree and beads record disappear but its tmux
+	// session can outlive them — a zombie that `gt polecat list` reports
+	// (session alive, no directory) while `gt polecat status` reports "not
+	// found" for the same name, and whose identity can be handed to a later
+	// dispatch while the stale session is still attached (gt-rmwp).
+	//
+	// Skip when selfNuke: that flag means the caller IS the process running
+	// inside this identity's own session (deleting its own worktree), so an
+	// unqualified session kill would terminate the caller itself before it
+	// reaches the branch-push and worktree removal below.
+	if !selfNuke {
+		if err := m.killExistingPolecatSession(name, "remove"); err != nil {
+			style.PrintWarning("could not kill session for %s during removal: %v", name, err)
+		}
+	}
+
 	// Best-effort: Push the polecat's branch to remote before removing the worktree.
 	// This preserves committed work that hasn't been pushed yet — without this,
 	// nuking a stalled polecat (e.g., after disk space recovery) permanently loses
@@ -2045,9 +2062,11 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	}, nil
 }
 
-// killExistingPolecatSession clears an existing tmux session before reusing or
-// repairing its worktree. The next SessionManager.Start call will create a fresh
-// session with the current hook and startup prompt.
+// killExistingPolecatSession clears an existing tmux session for a polecat
+// identity. Called before reusing or repairing a worktree (so the next
+// SessionManager.Start call creates a fresh session with the current hook and
+// startup prompt), and from removeWithOptionsLocked (so a removed identity
+// doesn't leave an orphan session behind).
 func (m *Manager) killExistingPolecatSession(name, action string) error {
 	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
 	townRoot := filepath.Dir(m.rig.Path)
