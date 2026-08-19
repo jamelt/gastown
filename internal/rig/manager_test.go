@@ -775,7 +775,7 @@ exit 0
 		t.Fatalf("reading command log: %v", err)
 	}
 	cmds := string(logData)
-	if !strings.Contains(cmds, "args=init --prefix xx --database my_project --server") {
+	if !strings.Contains(cmds, "args=init --skip-agents --skip-hooks --prefix xx --database my_project --server") {
 		t.Fatalf("bd init did not use canonical database; log:\n%s", cmds)
 	}
 	if strings.Contains(cmds, "env=stale_prefix_db") || strings.Contains(cmds, "wrong.db") || strings.Contains(cmds, filepath.Join(rigPath, "wrong", ".beads")) {

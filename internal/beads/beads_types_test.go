@@ -835,7 +835,7 @@ func TestEnsureDatabaseInitialized(t *testing.T) {
 		}
 
 		logOutput := readMockBDLog(t, logPath)
-		for _, want := range []string{"init --prefix gt --server", "config set issue_prefix", "migrate --yes"} {
+		for _, want := range []string{"init --skip-agents --skip-hooks --prefix gt --server", "config set issue_prefix", "migrate --yes"} {
 			if !strings.Contains(logOutput, want) {
 				t.Fatalf("mock bd log %q missing %q", logOutput, want)
 			}
@@ -852,7 +852,7 @@ func TestEnsureDatabaseInitialized(t *testing.T) {
 		}
 
 		logOutput := readMockBDLog(t, logPath)
-		for _, want := range []string{"init --prefix gt --server", "config set issue_prefix", "migrate --yes"} {
+		for _, want := range []string{"init --skip-agents --skip-hooks --prefix gt --server", "config set issue_prefix", "migrate --yes"} {
 			if !strings.Contains(logOutput, want) {
 				t.Fatalf("mock bd log %q missing %q", logOutput, want)
 			}

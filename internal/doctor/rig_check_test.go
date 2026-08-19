@@ -96,7 +96,7 @@ func TestBeadsRedirectCheck_FixInitBeadsUsesCanonicalDatabase(t *testing.T) {
 		t.Fatalf("reading bd args log: %v", err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "args=init --prefix tr --database testrig --server --server-port") {
+	if !strings.Contains(log, "args=init --skip-agents --skip-hooks --prefix tr --database testrig --server --server-port") {
 		t.Fatalf("bd init did not use canonical rig database; log:\n%s", log)
 	}
 	if !strings.Contains(log, "env=testrig") || !strings.Contains(log, "beads="+filepath.Join(rigDir, ".beads")) {
