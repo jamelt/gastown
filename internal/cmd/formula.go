@@ -778,10 +778,13 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 	if workflowAgent == "" {
 		workflowAgent = f.Agent
 	}
+	// Merge formula defaults with CLI-provided vars (CLI args take precedence)
+	defaults := formulaVarDefaults(f)
+	mergedVars := mergeFormulaVars(defaults, setVars)
 
 	for _, step := range f.Steps {
 		stepBeadID := fmt.Sprintf("%s-wfs-%s", rigPrefix, generateFormulaShortID())
-		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, setVars), workflowAgent)
+		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, mergedVars), workflowAgent)
 
 		// Use --body-file=- (stdin) for the description to avoid CLI arg
 		// length limits and quoting issues with large markdown descriptions.
@@ -880,7 +883,7 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		// Agent precedence: CLI --agent > formula-level
 		stepAgent := workflowAgent
 		stepTarget := workflowStepTarget(step, targetRig)
-		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, setVars), workflowAgent)
+		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, mergedVars), workflowAgent)
 
 		slingArgs := buildWorkflowStepSlingArgs(stepBeadID, stepTarget, stepDescription, step.Title, stepAgent)
 
@@ -1010,6 +1013,32 @@ func parseSetVars(setArgs []string) map[string]interface{} {
 		}
 	}
 	return vars
+}
+
+// formulaVarDefaults extracts default values from formula variable declarations.
+// Returns a map with all declared variables that have non-empty defaults.
+// CLI-provided vars (from setVars) should be merged on top of these defaults.
+func formulaVarDefaults(f *formula.Formula) map[string]interface{} {
+	defaults := make(map[string]interface{})
+	for name, v := range f.Vars {
+		if v.Default != "" {
+			defaults[name] = v.Default
+		}
+	}
+	return defaults
+}
+
+// mergeFormulaVars merges formula defaults with CLI-provided vars.
+// CLI-provided vars take precedence over formula defaults (setVars override defaults).
+func mergeFormulaVars(defaults, setVars map[string]interface{}) map[string]interface{} {
+	merged := make(map[string]interface{})
+	for k, v := range defaults {
+		merged[k] = v
+	}
+	for k, v := range setVars {
+		merged[k] = v
+	}
+	return merged
 }
 
 func formulaTemplateContext(formulaName, targetDescription, reviewID string, prNumber int, prTitle string, changedFiles []map[string]interface{}, files []string, setVars map[string]interface{}) map[string]interface{} {

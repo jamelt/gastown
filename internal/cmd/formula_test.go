@@ -221,6 +221,67 @@ func TestResolveFormulaLegAgent_Precedence(t *testing.T) {
 	}
 }
 
+func TestFormulaVarDefaults(t *testing.T) {
+	t.Parallel()
+
+	f := &formula.Formula{
+		Vars: map[string]formula.Var{
+			"notify_target": {
+				Description: "Who to notify",
+				Default:     "mayor",
+			},
+			"response_selector": {
+				Description: "How to select responses",
+				Default:     "latest valid HUMAN_DECISION v1 comment",
+			},
+			"optional_var": {
+				Description: "This has no default",
+				Default:     "",
+			},
+		},
+	}
+
+	got := formulaVarDefaults(f)
+	if got["notify_target"] != "mayor" {
+		t.Errorf("notify_target = %q, want %q", got["notify_target"], "mayor")
+	}
+	if got["response_selector"] != "latest valid HUMAN_DECISION v1 comment" {
+		t.Errorf("response_selector mismatch")
+	}
+	if _, ok := got["optional_var"]; ok {
+		t.Errorf("optional_var should not be in defaults (empty default)")
+	}
+}
+
+func TestMergeFormulaVars_CLIOverridesDefaults(t *testing.T) {
+	t.Parallel()
+
+	defaults := map[string]interface{}{
+		"notify_target":      "mayor",
+		"response_selector":  "latest",
+		"from_defaults_only": "default_value",
+	}
+	setVars := map[string]interface{}{
+		"notify_target": "witness",
+		"cli_only":      "cli_value",
+	}
+
+	got := mergeFormulaVars(defaults, setVars)
+
+	if got["notify_target"] != "witness" {
+		t.Errorf("CLI var should override default: got %q, want %q", got["notify_target"], "witness")
+	}
+	if got["response_selector"] != "latest" {
+		t.Errorf("Default should be present: got %q, want %q", got["response_selector"], "latest")
+	}
+	if got["from_defaults_only"] != "default_value" {
+		t.Errorf("Default-only var missing: got %q", got["from_defaults_only"])
+	}
+	if got["cli_only"] != "cli_value" {
+		t.Errorf("CLI-only var missing: got %q", got["cli_only"])
+	}
+}
+
 func TestSubstituteFormulaVars(t *testing.T) {
 	t.Parallel()
 

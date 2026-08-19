@@ -548,12 +548,6 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 	return &Beads{workDir: workDir, beadsDir: beadsDir}
 }
 
-// WithContext is a builder method that currently returns the Beads instance unchanged.
-// It's reserved for future use when context-aware timeouts are needed on Beads operations.
-func (b *Beads) WithContext(ctx context.Context) *Beads {
-	return b
-}
-
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
 //
 // Agent beads (labeled gt:agent) live in the TOWN database, but their IDs
@@ -2230,10 +2224,4 @@ func (b *Beads) WithContext(ctx context.Context) *Beads {
 		townRoot:   b.townRoot,
 		noRoute:    b.noRoute,
 	}
-}
-
-// ListIssueStatuses returns a list of all valid issue statuses.
-func (b *Beads) ListIssueStatuses() ([]string, error) {
-	// Valid statuses in beads: open, in_progress, blocked, deferred, closed, pinned, hooked, tombstone
-	return []string{"open", "in_progress", "blocked", "deferred", "closed", "pinned", "hooked", "tombstone"}, nil
 }
