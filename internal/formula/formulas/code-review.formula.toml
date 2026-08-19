@@ -71,18 +71,18 @@ base = """
 You are a specialized code reviewer participating in a convoy review.
 
 ## Context
-- **Formula**: {{.formula_name}}
-- **Review target**: {{.target_description}}
-- **Your focus**: {{.leg.focus}}
-- **Leg ID**: {{.leg.id}}
+- **Formula**: {{formula_name}}
+- **Review target**: {{target_description}}
+- **Your focus**: {{leg_focus}}
+- **Leg ID**: {{leg_id}}
 
 ## Files Under Review
 {{if .pr_number -}}
-PR #{{.pr_number}}: {{.pr_title}}
+PR #{{pr_number}}: {{pr_title}}
 
 Changed files:
 {{range .changed_files -}}
-- {{.path}} (+{{.additions}}/-{{.deletions}})
+- {{path}} (+{{additions}}/-{{deletions}})
 {{end -}}
 {{else -}}
 {{range .files -}}
@@ -91,14 +91,14 @@ Changed files:
 {{end}}
 
 ## Your Task
-{{.leg.description}}
+{{leg_description}}
 
 ## Output Requirements
-Write your findings to: **{{.output_path}}**
+Write your findings to: **{{output_path}}**
 
 Structure your output as follows:
 ```markdown
-# {{.leg.title}} Review
+# {{leg_title}} Review
 
 ## Summary
 (1-2 paragraph overview of findings)
@@ -127,8 +127,8 @@ Use specific file:line references. Be actionable. Prioritize impact.
 
 # Output configuration
 [output]
-directory = ".reviews/{{.review_id}}"
-leg_pattern = "{{.leg.id}}-findings.md"
+directory = ".reviews/{{review_id}}"
+leg_pattern = "{{leg_id}}-findings.md"
 synthesis = "review-summary.md"
 
 # Leg definitions - each spawns a parallel polecat
@@ -451,3 +451,56 @@ Deduplicate issues found by multiple legs (note which legs found them).
 Prioritize by impact and effort. Be actionable.
 """
 depends_on = ["correctness", "performance", "security", "elegance", "resilience", "style", "smells", "wiring", "commit-discipline", "test-quality"]
+
+# Template variables - computed by the formula system
+[vars.formula_name]
+description = "Name of the formula being executed"
+default = ""
+
+[vars.target_description]
+description = "Description of what is being reviewed"
+default = ""
+
+[vars.leg_focus]
+description = "The focus/heading of the current leg"
+default = ""
+
+[vars.leg_id]
+description = "The ID of the current leg"
+default = ""
+
+[vars.leg_title]
+description = "The title of the current leg"
+default = ""
+
+[vars.leg_description]
+description = "The description of the current leg"
+default = ""
+
+[vars.pr_number]
+description = "Pull request number being reviewed"
+default = ""
+
+[vars.pr_title]
+description = "Pull request title"
+default = ""
+
+[vars.additions]
+description = "Number of lines added in a file"
+default = ""
+
+[vars.deletions]
+description = "Number of lines deleted in a file"
+default = ""
+
+[vars.path]
+description = "File path under review"
+default = ""
+
+[vars.output_path]
+description = "Output path for review findings"
+default = ""
+
+[vars.review_id]
+description = "Unique identifier for this review"
+default = ""

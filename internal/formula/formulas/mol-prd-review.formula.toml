@@ -48,21 +48,21 @@ base = """
 You are a specialized analyst participating in a parallel PRD review convoy.
 
 ## Context
-- **Formula**: {{.formula_name}}
-- **Problem / Feature**: {{.problem}}
+- **Formula**: {{formula_name}}
+- **Problem / Feature**: {{problem}}
 - **Your dimension**: {{.leg.focus}}
 - **Leg ID**: {{.leg.id}}
 
 {{if .context}}
 ## Additional Context
-{{.context}}
+{{context}}
 {{end}}
 
 ## Your Task
 {{.leg.description}}
 
 ## Output Requirements
-Write your analysis to: **{{.output_path}}**
+Write your analysis to: **{{output_path}}**
 
 Structure your output as follows:
 ```markdown
@@ -96,7 +96,7 @@ or unclear — not to fill in the gaps yourself.
 """
 
 [output]
-directory = ".prd-reviews/{{.review_id}}"
+directory = ".prd-reviews/{{review_id}}"
 leg_pattern = "{{.leg.id}}.md"
 synthesis = "prd-review.md"
 
@@ -278,7 +278,7 @@ All leg analyses from: {{.output.directory}}/
 
 **Structure:**
 ```markdown
-# PRD Review: {{.problem}}
+# PRD Review: {{problem}}
 
 ## Executive Summary
 (2-3 sentences: overall PRD health, biggest risks, confidence in current state)
@@ -319,7 +319,7 @@ All leg analyses from: {{.output.directory}}/
 
 **After writing the file, mail the human overseer:**
 ```bash
-gt mail send --human -s "PRD Review Complete: {{.problem}}" -m "
+gt mail send --human -s "PRD Review Complete: {{problem}}" -m "
 Review is ready: {{.output.directory}}/prd-review.md
 
 ## Summary
@@ -334,3 +334,15 @@ implementation plan generation.
 ```
 """
 depends_on = ["requirements", "gaps", "ambiguity", "feasibility", "scope", "stakeholders"]
+
+[vars.formula_name]
+description = "Name of the formula being executed"
+default = ""
+
+[vars.output_path]
+description = "Output path for review findings"
+default = ""
+
+[vars.review_id]
+description = "Unique identifier for this review"
+default = ""
