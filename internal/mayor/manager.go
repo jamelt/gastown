@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/acp"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -182,6 +183,17 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 		return err
 	}
 
+	// Start background nudge-queue poller (gt-hr90). Claude drains its queue
+	// via UserPromptSubmit hook, but that hook only fires when the agent
+	// submits a prompt. Mayor sits idle at the prompt waiting for work, so
+	// queued nudges (including CRITICAL escalations) never trigger a drain.
+	// Every other role (witness, refinery, crew, deacon) already starts this
+	// poller; mayor was the one role missing it. Drain() is atomic so the
+	// poller and UserPromptSubmit hook coexist safely.
+	if _, pollerErr := nudge.StartPoller(m.townRoot, sessionID); pollerErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not start nudge poller for %s: %v\n", sessionID, pollerErr)
+	}
+
 	time.Sleep(session.ShutdownDelay())
 
 	return nil
@@ -337,6 +349,12 @@ func (m *Manager) Stop() error {
 	}
 	if !running {
 		return ErrNotRunning
+	}
+
+	// Stop the background nudge poller before killing the session.
+	// Non-fatal — the poller will exit on its own when the session dies.
+	if pollerErr := nudge.StopPoller(m.townRoot, sessionID); pollerErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not stop nudge poller for %s: %v\n", sessionID, pollerErr)
 	}
 
 	// Try graceful shutdown first (best-effort interrupt)

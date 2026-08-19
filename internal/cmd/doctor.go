@@ -243,6 +243,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewZombieSessionCheck())
 	d.Register(doctor.NewStalledPolecatCheck())
 	d.Register(newRigCapacityStallCheck()) // Silent stall: rig has ready work, zero usable polecat capacity (gt-yl9q)
+	d.Register(doctor.NewNudgeQueueBacklogCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
 	d.Register(doctor.NewWispGCCheck())
 	d.Register(doctor.NewCheckMisclassifiedWisps())
