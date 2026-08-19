@@ -155,6 +155,10 @@ func buildPolecatMQIndex(bd polecatMQIndexSource, fieldsByName map[string]*beads
 // across every polecat and was reviewed and rejected as a perf regression on
 // the scheduler's heartbeat path. The approximation only ever biases toward
 // "needs a check" (NEEDS_MQ_SUBMIT), never toward falsely claiming reusable.
+// It must not fold in AssignedBeadTerminal: a closed source bead says nothing
+// about whether the branch still carries pushed-but-unsubmitted work, and
+// doing so let stranded work read as SAFE_TO_NUKE once the source bead
+// closed (gt-6mhu).
 func applyMQIndexToWorkstateInput(input *polecat.WorkstateInput, fields *beads.AgentFields, mq polecatMQIndex) {
 	branch := strings.TrimSpace(input.Branch)
 	if branch == "" {
@@ -173,7 +177,7 @@ func applyMQIndexToWorkstateInput(input *polecat.WorkstateInput, fields *beads.A
 		}
 	}
 	_, input.MRSubmitted = mq.mrByBranch[branch]
-	input.HasSubmittableWork = !input.PushFailed && !input.MRSubmitted && !input.AssignedBeadTerminal
+	input.HasSubmittableWork = !input.PushFailed && !input.MRSubmitted
 }
 
 func buildPolecatInventoryItem(rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet, mq polecatMQIndex) polecatInventoryItem {
