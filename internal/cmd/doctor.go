@@ -114,6 +114,7 @@ Patrol checks:
   - patrol-hooks-wired       Verify daemon triggers patrols
   - patrol-not-stuck         Detect stale wisps (>1h)
   - patrol-plugins-accessible Verify plugin directories
+  - town-unfed-work          Detect dispatchable-looking beads stuck in the town database
 
 Use --fix to attempt automatic fixes for issues that support it.
 Use --no-start with --fix to suppress starting the daemon and agents.
@@ -243,6 +244,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewZombieSessionCheck())
 	d.Register(doctor.NewStalledPolecatCheck())
 	d.Register(newRigCapacityStallCheck()) // Silent stall: rig has ready work, zero usable polecat capacity (gt-yl9q)
+	d.Register(newTownUnfedWorkCheck())    // Silent stall: town DB has dispatchable work, gt scheduler feed never sees it (gt-1g4w)
 	d.Register(doctor.NewNudgeQueueBacklogCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
 	d.Register(doctor.NewWispGCCheck())
