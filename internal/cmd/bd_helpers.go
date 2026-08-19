@@ -13,13 +13,14 @@ import (
 // It provides a fluent API for configuring environment variables,
 // working directory, and I/O settings common to bd CLI invocations.
 type bdCmd struct {
-	args       []string
-	dir        string
-	env        []string
-	stderr     io.Writer
-	autoCommit bool
-	gtRoot     string
-	beadsDir   string
+	args        []string
+	dir         string
+	env         []string
+	stderr      io.Writer
+	autoCommit  bool
+	gtRoot      string
+	beadsDir    string
+	allowStale  bool
 }
 
 // BdCmd creates a new bd command builder with the given arguments.
@@ -87,6 +88,13 @@ func (b *bdCmd) Stderr(w io.Writer) *bdCmd {
 	return b
 }
 
+// AllowStale allows queries against a potentially stale Dolt database.
+// This sets the BD_ALLOW_STALE=1 environment variable.
+func (b *bdCmd) AllowStale() *bdCmd {
+	b.allowStale = true
+	return b
+}
+
 // filterEnvKey removes all entries matching the given key from the env slice.
 // This ensures appended values aren't shadowed by existing entries, since
 // glibc getenv() returns the first match in the environment array.
@@ -137,6 +145,12 @@ func (b *bdCmd) buildEnv() []string {
 	if b.autoCommit {
 		env = filterEnvKey(env, "BD_DOLT_AUTO_COMMIT")
 		env = append(env, "BD_DOLT_AUTO_COMMIT=on")
+	}
+
+	// Add BD_ALLOW_STALE=1 to allow queries against a potentially stale database.
+	if b.allowStale {
+		env = filterEnvKey(env, "BD_ALLOW_STALE")
+		env = append(env, "BD_ALLOW_STALE=1")
 	}
 
 	// Add GT_ROOT if specified.
