@@ -90,6 +90,20 @@ func (g *Git) WorkDir() string {
 	return g.workDir
 }
 
+// diagPath returns the best available path for diagnostic messages: workDir
+// when set, falling back to gitDir for bare-repo wrappers constructed via
+// NewGitWithDir(gitDir, "") (e.g. mq_integration.go, rig/manager.go), so a
+// timeout error always names a real path instead of an empty string.
+func (g *Git) diagPath() string {
+	if g.workDir != "" {
+		return g.workDir
+	}
+	if g.gitDir != "" {
+		return g.gitDir
+	}
+	return "(unknown)"
+}
+
 // IsRepo returns true if the workDir is a git repository.
 func (g *Git) IsRepo() bool {
 	_, err := g.run("rev-parse", "--git-dir")
@@ -177,7 +191,7 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 	err := cmd.Run()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("git %s timed out after %v in %s (remote may be unreachable)", args[0], timeout, g.workDir)
+			return "", fmt.Errorf("git %s timed out after %v in %s (may be blocked on I/O or an unresponsive remote)", args[0], timeout, g.diagPath())
 		}
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}
@@ -237,7 +251,7 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 		// ctx.Err() into the returned error for a non-success exit — only
 		// ctx.Err() itself reliably reports the timeout in that case.
 		if ctx != nil && ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("git %s timed out after %v in %s (remote may be unreachable)", args[0], timeout, g.workDir)
+			return "", fmt.Errorf("git %s timed out after %v in %s (may be blocked on I/O or an unresponsive remote)", args[0], timeout, g.diagPath())
 		}
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}
@@ -3581,7 +3595,7 @@ func InitSubmodules(repoPath string, referencePath ...string) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("git submodule update timed out after %v in %s (remote may be unreachable)", timeout, repoPath)
+			return fmt.Errorf("git submodule update timed out after %v in %s (may be blocked on I/O or an unresponsive remote)", timeout, repoPath)
 		}
 		return fmt.Errorf("initializing submodules: %s", strings.TrimSpace(stderr.String()))
 	}
