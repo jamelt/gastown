@@ -318,6 +318,15 @@ func runDown(cmd *cobra.Command, args []string) error {
 				printDownStatus("Dolt orphans", true, fmt.Sprintf("stopped %d rogue server(s)", stopped))
 			}
 		}
+		// Stop test-spawned Dolt sql-servers from /tmp/beads-bd-tests-* directories
+		// These are orphaned servers left by test suites that didn't properly cleanup
+		testOrphans := findTestOrphanDoltServers()
+		if len(testOrphans) > 0 {
+			stopped := stopOrphanDoltServers(testOrphans)
+			if stopped > 0 {
+				printDownStatus("Test Dolt servers", true, fmt.Sprintf("stopped %d orphaned test server(s)", stopped))
+			}
+		}
 	} else {
 		conflictPID, _ := doltserver.CheckPortConflict(townRoot)
 		if conflictPID > 0 {
@@ -326,6 +335,10 @@ func runDown(cmd *cobra.Command, args []string) error {
 		orphanDolts := findOrphanDoltServers(townRoot)
 		if len(orphanDolts) > 0 {
 			printDownStatus("Dolt orphans", true, fmt.Sprintf("%d rogue server(s) would stop", len(orphanDolts)))
+		}
+		testOrphans := findTestOrphanDoltServers()
+		if len(testOrphans) > 0 {
+			printDownStatus("Test Dolt servers", true, fmt.Sprintf("%d orphaned test server(s) would stop", len(testOrphans)))
 		}
 	}
 
@@ -844,6 +857,55 @@ func stopIdleMonitors(pids []int) int {
 		stopped++
 	}
 	return stopped
+}
+
+// findTestOrphanDoltServers finds dolt sql-server processes spawned by test suites
+// in temporary directories (e.g., /tmp/beads-bd-tests-*). These are typically left
+// behind when test teardown doesn't properly cleanup the Dolt server process.
+func findTestOrphanDoltServers() []int {
+	out, err := exec.Command("ps", "-eo", "pid,args").Output()
+	if err != nil {
+		return nil
+	}
+
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "dolt") || !strings.Contains(line, "sql-server") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+
+		// Check the process's working directory via lsof
+		cwdOut, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "-Fn", "-d", "cwd").Output()
+		if err != nil {
+			continue
+		}
+		cwd := ""
+		for _, cwdLine := range strings.Split(string(cwdOut), "\n") {
+			if strings.HasPrefix(cwdLine, "n") {
+				cwd = cwdLine[1:]
+				break
+			}
+		}
+		if cwd == "" {
+			continue
+		}
+
+		// Only target processes in /tmp that are test-spawned Dolt servers
+		// (e.g., /tmp/beads-bd-tests-<pid>/dolt)
+		if strings.HasPrefix(cwd, "/tmp/") && strings.Contains(cwd, "beads-bd-tests") {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 // findOrphanDoltServers finds dolt sql-server processes whose working

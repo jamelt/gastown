@@ -202,12 +202,14 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// 1. gt binary freshness
 	// 2. bd binary exists
 	// 3. dolt binary exists
-	// 4. Dolt server is reachable (everything downstream depends on this)
+	// 4. Dolt server is running (everything downstream depends on this)
+	// 5. Dolt server is reachable and has required databases
 	d.Register(doctor.NewStaleBinaryCheck())
 	d.Register(doctor.NewBeadsBinaryCheck())
 	d.Register(doctor.NewDoltBinaryCheck())
 	d.Register(doctor.NewClaudeBinaryCheck())
 	d.Register(doctor.NewGroqCompoundCheck())
+	d.Register(doctor.NewDoltServerHealthCheck())
 	d.Register(doctor.NewDoltServerReachableCheck())
 
 	d.Register(doctor.NewTownGitCheck())
