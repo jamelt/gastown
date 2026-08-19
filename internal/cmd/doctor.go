@@ -58,6 +58,7 @@ Cleanup checks (fixable):
   - misclassified-wisps      Detect issues that should be wisps (purges to wisps table, fixable)
   - jsonl-bloat              Detect stale/bloated issues.jsonl vs live database
   - stale-beads-redirect     Detect stale files in .beads directories with redirects
+  - stale-gt-done-recovery   Detect and remove old gt-done-recovery records (>7 days, fixable)
 
 Clone divergence checks:
   - persistent-role-branches Detect witness/refinery not on main (excludes crew)
@@ -257,6 +258,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewStaleBeadsRedirectCheck())
 	d.Register(doctor.NewBeadsRedirectTargetCheck())
 	d.Register(doctor.NewStaleRuntimeFilesCheck())
+	d.Register(doctor.NewStaleGtDoneRecoveryCheck())
 	d.Register(doctor.NewBranchCheck())
 	d.Register(doctor.NewCloneDivergenceCheck())
 	d.Register(doctor.NewDefaultBranchAllRigsCheck())
