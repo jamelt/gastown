@@ -2420,10 +2420,6 @@ func (m *Manager) FindIdlePolecats() ([]*Polecat, error) {
 	}
 	var idle []*Polecat
 	for _, p := range polecats {
-<<<<<<< HEAD
-		if p.State == StateIdle && m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
-			idle = append(idle, p)
-=======
 		// gt-nz5x: StateDone is a reuse candidate, not a terminal state. gt done
 		// sets agent_state=done on completion ("done means gone", gt-4ac), so a
 		// polecat that finishes work is StateDone and never StateIdle again —
@@ -2441,8 +2437,7 @@ func (m *Manager) FindIdlePolecats() ([]*Polecat, error) {
 			continue
 		}
 		if m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
-			return p, nil
->>>>>>> origin/main
+			idle = append(idle, p)
 		}
 	}
 	return idle, nil
