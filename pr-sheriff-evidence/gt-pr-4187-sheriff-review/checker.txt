@@ -1,0 +1,24 @@
+=== gt pr-sheriff-check --merge-gate --base upstream/main (PR #4187, fix/loud-mr-orphan-detection-nmi-rt5dt) ===
+{"base":"upstream/main","ahead":22,"behind":775,"severity":"block","reasons":["775 commits behind (block threshold: 200)","22 commits ahead, check for unrelated changes (warn threshold: 20)"],"merge_gate":true,"merge_path_allowed":false}
+exit: 1
+
+Cross-checked via git rev-list --left-right --count upstream/main...pr4187/fix/loud-mr-orphan-detection-nmi-rt5dt: 775 22 (matches exactly).
+
+=== gt pr-sheriff-check --merge-gate --base upstream/main (PR #4450, polecat/synth/gt-4413-pr4187-replacement+2fd42a) ===
+{"base":"upstream/main","ahead":1,"behind":57,"severity":"warn","reasons":["57 commits behind (warn threshold: 50)"],"merge_gate":true,"merge_path_allowed":true}
+exit: 0
+
+Cross-checked via git rev-list --left-right --count upstream/main...pr4450/polecat/synth/gt-4413-pr4187-replacement+2fd42a: 57 1 (matches exactly).
+
+=== gh pr checks 4450 --repo gastownhall/gastown (re-run 2026-08-19) ===
+Integration Tests      pass
+Lint                    pass
+Reject go.mod replace directives   pass
+Reject issues.jsonl     pass
+Test                    pass
+Windows Smoke Test      pass
+add-triage-label        pass
+remove-triage-label     pass
+Block Internal PRs      skipping
+
+All results independently re-verified 2026-08-19 against current GitHub state; unchanged from the evidence record captured in the bead's --design field (generated_at 2026-08-19T11:00:00Z). PR #4187: state OPEN, mergeable CONFLICTING, mergeStateStatus DIRTY, updatedAt 2026-07-31T10:07:32Z. PR #4450: state OPEN, mergeable MERGEABLE, mergeStateStatus CLEAN, updatedAt 2026-07-15T17:45:26Z, single commit 143540a6a544b6953df63e772fdf782a724a6295 unchanged.
