@@ -475,6 +475,8 @@ func runRefineryQueue(cmd *cobra.Command, args []string) error {
 					status = style.Dim.Render("[conflict]")
 				case refinery.CloseReasonSuperseded:
 					status = style.Dim.Render("[superseded]")
+				case refinery.CloseReasonNoop:
+					status = style.Dim.Render("[no-op]")
 				default:
 					status = style.Dim.Render("[closed]")
 				}

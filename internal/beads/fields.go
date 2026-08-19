@@ -689,7 +689,7 @@ type MRFields struct {
 	PRURL       string // Recorded pull request URL, if one exists for this MR
 	PRNumber    int    // Recorded pull request number, scoped to the target repo
 	MergeCommit string // SHA of merge commit (set on close)
-	CloseReason string // Reason for closing: merged, rejected, conflict, superseded
+	CloseReason string // Reason for closing: merged, rejected, conflict, superseded, no-op
 	AgentBead   string // Agent bead ID that created this MR (for traceability)
 
 	// Conflict resolution fields (for priority scoring)
