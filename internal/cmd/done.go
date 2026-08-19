@@ -419,6 +419,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Get agent bead ID for cross-referencing
 	var agentBeadID string
+	var agentRole Role
 	if roleInfo, err := GetRoleWithContext(cwd, townRoot); err == nil {
 		ctx := RoleContext{
 			Role:     roleInfo.Role,
@@ -428,6 +429,16 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			WorkDir:  cwd,
 		}
 		agentBeadID = getAgentBeadID(ctx)
+		agentRole = ctx.Role
+
+		// Ensure the agent bead exists in the correct database.
+		// For singleton roles (Witness, Refinery), use rig-local database.
+		// For other roles, use town database.
+		bd := beads.New(cwd)
+		if err := ensureAgentBeadExists(bd, agentBeadID, agentRole, cwd, townRoot); err != nil {
+			// Log but don't block - agent bead checks are best-effort
+			fmt.Fprintf(os.Stderr, "Warning: could not ensure agent bead exists: %v\n", err)
+		}
 
 		// Persistent polecat model (gt-hdf8): no deferred session kill.
 		// Sessions stay alive after gt done — polecat transitions to IDLE.
@@ -453,8 +464,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// skip those stages to avoid repeating work or hitting errors.
 	checkpoints := map[DoneCheckpoint]string{}
 	if agentBeadID != "" {
-		// Agent bead lives in town DB despite rig prefix — bypass routing.
-		bd := beads.New(cwd).ForAgentBead()
+		// Use correct beads database for this role.
+		// For singleton roles (Witness, Refinery), use rig-local database.
+		// For others, use town database.
+		bd := beads.New(cwd)
+		bd = rigLocalAgentBeads(bd, agentRole, cwd, townRoot)
 		setDoneIntentLabel(bd, agentBeadID, exitType)
 		checkpoints = readDoneCheckpoints(bd, agentBeadID)
 		if len(checkpoints) > 0 {
@@ -874,8 +888,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Write push checkpoint for resume (gt-aufru)
 		if agentBeadID != "" {
-			// Agent bead lives in town DB despite rig prefix — bypass routing.
-			cpBd := beads.New(cwd).ForAgentBead()
+			// Use correct beads database for this role.
+			cpBd := beads.New(cwd)
+			cpBd = rigLocalAgentBeads(cpBd, agentRole, cwd, townRoot)
 			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointPushed, branch)
 		}
 
@@ -1321,8 +1336,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Write MR checkpoint for resume (gt-aufru)
 		if mrID != "" && agentBeadID != "" {
-			// Agent bead lives in town DB despite rig prefix — bypass routing.
-			cpBd := beads.New(cwd).ForAgentBead()
+			// Use correct beads database for this role.
+			cpBd := beads.New(cwd)
+			cpBd = rigLocalAgentBeads(cpBd, agentRole, cwd, townRoot)
 			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointMRCreated, mrID)
 		}
 
@@ -1382,8 +1398,9 @@ notifyWitness:
 
 	// Write witness notification checkpoint for resume (gt-aufru)
 	if agentBeadID != "" {
-		// Agent bead lives in town DB despite rig prefix — bypass routing.
-		cpBd := beads.New(cwd).ForAgentBead()
+		// Use correct beads database for this role.
+		cpBd := beads.New(cwd)
+		cpBd = rigLocalAgentBeads(cpBd, agentRole, cwd, townRoot)
 		writeDoneCheckpoint(cpBd, agentBeadID, CheckpointWitnessNotified, "ok")
 	}
 
@@ -2102,4 +2119,72 @@ func purgeClosedEphemeralBeads(bd *beads.Beads) {
 	if outStr != "" && outStr != "0" {
 		fmt.Fprintf(os.Stderr, "Purged closed ephemeral beads: %s\n", outStr)
 	}
+}
+
+// rigLocalAgentBeads returns a Beads wrapper pinned to the rig-local database
+// for singleton roles (Witness, Refinery). For other roles, returns the town-pinned
+// wrapper unchanged. This ensures singleton identities are created/reopened in the
+// rig-local database, not in the town database.
+func rigLocalAgentBeads(bd *beads.Beads, role Role, cwd, townRoot string) *beads.Beads {
+	if role != RoleWitness && role != RoleRefinery {
+		// Non-singleton roles use the town-pinned wrapper (normal behavior)
+		return bd
+	}
+
+	// Determine the rig name from the role context or cwd
+	rigName := ""
+	if townRoot != "" {
+		relPath, err := filepath.Rel(townRoot, cwd)
+		if err == nil {
+			parts := strings.Split(relPath, string(filepath.Separator))
+			if len(parts) > 0 && parts[0] != "" && parts[0] != "." {
+				rigName = parts[0]
+			}
+		}
+	}
+
+	// Get the rig-local beads directory
+	currentBeadsDir, err := resolveAgentTrackingBeadsDir()
+	if err != nil {
+		return bd // Fallback to town-pinned on error
+	}
+	rigBeadsDir, err := resolveAgentsPrimaryBeadsDir(cwd, currentBeadsDir, rigName)
+	if err != nil {
+		return bd // Fallback to town-pinned on error
+	}
+
+	// Create a new wrapper pinned to the rig-local directory with routing disabled
+	return beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForLocalBeads()
+}
+
+// ensureAgentBeadExists ensures the agent bead for the current role exists and is open.
+// For singleton roles (Witness, Refinery), this uses the rig-local database.
+// For other roles, it uses the town database. This prevents creating duplicate beads
+// when a rig-local singleton is closed and auto-recreated.
+func ensureAgentBeadExists(bd *beads.Beads, agentBeadID string, role Role, cwd, townRoot string) error {
+	if agentBeadID == "" {
+		return nil // No agent bead for this role
+	}
+
+	// For singleton roles, use rig-local beads; for others, use town beads
+	targetBd := rigLocalAgentBeads(bd, role, cwd, townRoot)
+
+	// Check if the bead exists and is open
+	issue, err := targetBd.Show(agentBeadID)
+	if err != nil {
+		// Bead doesn't exist or is inaccessible - let it fail naturally downstream
+		// (the bead will be created on first access)
+		return nil
+	}
+
+	// If closed, reopen it
+	if strings.EqualFold(issue.Status, "closed") {
+		openStatus := "open"
+		if err := targetBd.Update(agentBeadID, beads.UpdateOptions{Status: &openStatus}); err != nil {
+			// Log but don't block - closed bead reopening is best-effort
+			fmt.Fprintf(os.Stderr, "Warning: could not reopen agent bead %s: %v\n", agentBeadID, err)
+		}
+	}
+
+	return nil
 }
