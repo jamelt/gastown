@@ -770,6 +770,12 @@ func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
+// PSQuote is the exported form of psQuote, for callers outside this package
+// that build PowerShell command strings (e.g. tmux respawn on Windows).
+func PSQuote(s string) string {
+	return psQuote(s)
+}
+
 // ExportPrefix builds an export statement prefix for shell commands.
 // Returns a string like "export GT_ROLE=mayor BD_ACTOR=mayor && "
 // The keys are sorted for deterministic output.

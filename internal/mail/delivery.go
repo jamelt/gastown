@@ -97,7 +97,8 @@ func AcknowledgeDeliveryBead(workDir, beadsDir, beadID, recipientIdentity string
 	for _, label := range toWrite {
 		args := []string{"label", "add", beadID, label}
 		ctx, cancel := bdWriteCtx()
-		_, err := runBdCommand(ctx, args, workDir, beadsDir)
+		_, err := runBdCommand(ctx, args, workDir, beadsDir,
+			"BD_ACTOR="+AddressToIdentity(recipientIdentity))
 		cancel()
 		if err == nil {
 			continue // bd label add silently succeeds on duplicate labels.
@@ -110,7 +111,7 @@ func AcknowledgeDeliveryBead(workDir, beadsDir, beadID, recipientIdentity string
 
 	labelsAfterAck := append(append([]string{}, existingLabels...), toWrite...)
 	if deliveryPendingRemovalNeeded(labelsAfterAck) {
-		return removeDeliveryPendingLabel(workDir, beadsDir, beadID)
+		return removeDeliveryPendingLabel(workDir, beadsDir, beadID, recipientIdentity)
 	}
 	return nil
 }
@@ -129,10 +130,11 @@ func deliveryPendingRemovalNeeded(labels []string) bool {
 	return hasPending && hasAcked
 }
 
-func removeDeliveryPendingLabel(workDir, beadsDir, beadID string) error {
+func removeDeliveryPendingLabel(workDir, beadsDir, beadID, recipientIdentity string) error {
 	args := []string{"label", "remove", beadID, DeliveryLabelPending}
 	ctx, cancel := bdWriteCtx()
-	_, err := runBdCommand(ctx, args, workDir, beadsDir)
+	_, err := runBdCommand(ctx, args, workDir, beadsDir,
+		"BD_ACTOR="+AddressToIdentity(recipientIdentity))
 	cancel()
 	if err == nil {
 		return nil

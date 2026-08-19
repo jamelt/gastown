@@ -124,7 +124,7 @@ func (m *Mailbox) storeArchiveInDir(id string) error {
 	ctx, cancel := mailStoreCtx()
 	defer cancel()
 
-	err := m.store.AddLabel(ctx, id, archivedLabel, "")
+	err := m.store.AddLabel(ctx, id, archivedLabel, m.mutationActor())
 	telemetry.RecordMailMessage(context.Background(), "archive", telemetry.MailMessageInfo{
 		ID: id,
 		To: m.identity,
@@ -153,7 +153,7 @@ func (m *Mailbox) storeCloseInDir(id string) error {
 	defer cancel()
 
 	sessionID := runtime.SessionIDFromEnv()
-	err := m.store.CloseIssue(ctx, id, "", "", sessionID)
+	err := m.store.CloseIssue(ctx, id, "", m.mutationActor(), sessionID)
 	telemetry.RecordMailMessage(context.Background(), "read", telemetry.MailMessageInfo{
 		ID: id,
 		To: m.identity,
@@ -172,7 +172,7 @@ func (m *Mailbox) storeMarkReadOnly(id string) error {
 	ctx, cancel := mailStoreCtx()
 	defer cancel()
 
-	err := m.store.AddLabel(ctx, id, "read", "")
+	err := m.store.AddLabel(ctx, id, "read", m.mutationActor())
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return ErrMessageNotFound
@@ -203,7 +203,7 @@ func (m *Mailbox) storeAcknowledgeDeliveryForPrimary(id string) error {
 
 	toWrite := deliveryAckLabelsToWrite(m.identity, timeNow().UTC(), si.Labels)
 	for _, label := range toWrite {
-		if err := m.store.AddLabel(ctx, id, label, ""); err != nil {
+		if err := m.store.AddLabel(ctx, id, label, m.mutationActor()); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return ErrMessageNotFound
 			}
@@ -215,7 +215,7 @@ func (m *Mailbox) storeAcknowledgeDeliveryForPrimary(id string) error {
 	if !deliveryPendingRemovalNeeded(labelsAfterAck) {
 		return nil
 	}
-	if err := m.store.RemoveLabel(ctx, id, DeliveryLabelPending, ""); err != nil {
+	if err := m.store.RemoveLabel(ctx, id, DeliveryLabelPending, m.mutationActor()); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return ErrMessageNotFound
 		}

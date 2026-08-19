@@ -95,6 +95,7 @@ Formula overlay checks (fixable):
 
 Migration checks:
   - town-claude-md           Check town-root CLAUDE.md matches embedded version (fixable)
+  - role-claude-md-guard     Verify role CLAUDE.md files are absent or exactly @AGENTS.md (fixable)
 
 Session hook checks:
   - session-hooks            Check settings.json use session-start.sh
@@ -105,6 +106,7 @@ Session hook checks:
 Dolt checks:
   - dolt-binary              Check that dolt is installed and meets minimum version
   - dolt-metadata            Check dolt metadata tables exist
+  - dolt-lineage             Detect rig Beads histories with no common ancestor
   - dolt-server-reachable    Check dolt sql-server is reachable
   - dolt-orphaned-databases  Detect orphaned dolt databases
 
@@ -113,6 +115,7 @@ Patrol checks:
   - patrol-hooks-wired       Verify daemon triggers patrols
   - patrol-not-stuck         Detect stale wisps (>1h)
   - patrol-plugins-accessible Verify plugin directories
+  - town-unfed-work          Detect dispatchable-looking beads stuck in the town database
 
 Use --fix to attempt automatic fixes for issues that support it.
 Use --no-start with --fix to suppress starting the daemon and agents.
@@ -217,9 +220,11 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// start with missing PATH exports. See gt-99u.
 	d.Register(doctor.NewClaudeSettingsCheck())
 	d.Register(doctor.NewDaemonCheck())
+	d.Register(doctor.NewDaemonBinaryStaleCheck())
 	d.Register(doctor.NewTmuxGlobalEnvCheck())
 	d.Register(doctor.NewBootHealthCheck())
 	d.Register(doctor.NewTownBeadsConfigCheck())
+	d.Register(doctor.NewDoltConfigCheck())
 	d.Register(doctor.NewCustomTypesCheck())
 	d.Register(doctor.NewCustomStatusesCheck())
 	d.Register(doctor.NewFormulaCheck())
@@ -231,6 +236,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewStaleSQLServerInfoCheck()) // Check for stale sql-server.info files (GH#2770)
 	d.Register(doctor.NewPrefixMismatchCheck())
 	d.Register(doctor.NewDatabasePrefixCheck())
+	d.Register(doctor.NewMisroutedBeadIDCheck())
 	d.Register(doctor.NewIdleTimeoutCheck()) // Verify dolt.idle-timeout: "0" for all rigs
 	d.Register(doctor.NewRoutesCheck())
 	d.Register(doctor.NewRigRoutesJSONLCheck())
@@ -239,6 +245,9 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewOrphanSessionCheck())
 	d.Register(doctor.NewZombieSessionCheck())
 	d.Register(doctor.NewStalledPolecatCheck())
+	d.Register(newRigCapacityStallCheck()) // Silent stall: rig has ready work, zero usable polecat capacity (gt-yl9q)
+	d.Register(newTownUnfedWorkCheck())    // Silent stall: town DB has dispatchable work, gt scheduler feed never sees it (gt-1g4w)
+	d.Register(doctor.NewNudgeQueueBacklogCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
 	d.Register(doctor.NewWispGCCheck())
 	d.Register(doctor.NewCheckMisclassifiedWisps())
@@ -288,6 +297,9 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// Town-root CLAUDE.md version check (migration check for behavioral norms)
 	d.Register(doctor.NewTownCLAUDEmdCheck())
 
+	// Role CLAUDE.md guard check (prevent bd init from polluting source repos)
+	d.Register(doctor.NewRoleClaudeMdCheck())
+
 	// Crew workspace checks
 	d.Register(doctor.NewCrewStateCheck())
 	d.Register(doctor.NewCrewWorktreeCheck())
@@ -309,6 +321,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 
 	// Dolt data health checks (binary + server reachability moved to top as prerequisites)
 	d.Register(doctor.NewDoltMetadataCheck())
+	d.Register(doctor.NewDoltLineageCheck())
 	d.Register(doctor.NewDoltOrphanedDatabaseCheck())
 	d.Register(doctor.NewUnregisteredBeadsDirsCheck())
 	d.Register(doctor.NewNullAssigneeCheck())

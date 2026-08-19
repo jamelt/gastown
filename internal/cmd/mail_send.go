@@ -71,10 +71,21 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// Determine sender (--from overrides auto-detection, for relay/bridge use)
-	from := mailFrom
-	if from == "" {
-		from = detectSender()
+	// Determine sender. --from can override auto-detection only for the
+	// convoy notification subsystem's synthetic actor (convoy/<id>) — the
+	// sole legitimate caller of this flag in the codebase. Any other value
+	// would let a caller impersonate a real agent or the human overseer with
+	// zero verification (gt-p7gu). detectSenderVerified additionally rejects
+	// a GT_ROLE claim that disagrees with the tmux session this process is
+	// actually running in, closing the same forgery reachable without --from
+	// at all via a bare `GT_ROLE=<role> gt mail send ...` (gt-9z0y).
+	detected, err := detectSenderVerified()
+	if err != nil {
+		return err
+	}
+	from, err := resolveSender(mailFrom, detected)
+	if err != nil {
+		return err
 	}
 
 	// If subject looks like a reply ("Re: ...") but the user didn't pass
@@ -104,6 +115,9 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 
 	// Set message type
 	msg.Type = mail.ParseMessageType(mailType)
+	if mailNoResponse {
+		msg.ResponsePolicy = mail.ResponsePolicyNone
+	}
 
 	// Set pinned flag
 	msg.Pinned = mailPinned
@@ -245,6 +259,22 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// resolveSender determines the message sender, restricting --from overrides
+// to the convoy notification subsystem's synthetic actor (convoy/<id>) — the
+// only legitimate use of --from in the codebase. A redundant override that
+// matches the detected identity is allowed as a no-op. Any other override is
+// rejected: without this, --from let any caller claim to be an arbitrary
+// sender (e.g. "overseer") with zero verification (gt-p7gu).
+func resolveSender(mailFrom, detected string) (string, error) {
+	if mailFrom == "" || mailFrom == detected {
+		return detected, nil
+	}
+	if !strings.HasPrefix(mailFrom, "convoy/") {
+		return "", fmt.Errorf("--from %q not permitted: sender overrides are restricted to convoy/<id> (relay/bridge use); detected identity is %q", mailFrom, detected)
+	}
+	return mailFrom, nil
 }
 
 // generateThreadID creates a random thread ID for new message threads.

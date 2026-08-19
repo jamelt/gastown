@@ -11,6 +11,12 @@ const (
 	defaultQuotaDogInterval = 5 * time.Minute
 	// quotaDogTimeout is the maximum time allowed for a single rotation cycle.
 	quotaDogTimeout = 2 * time.Minute
+	// quotaDogFailureEscalationThreshold is the number of consecutive failures
+	// of a single quota_dog action before its log level escalates from
+	// Warning to Error, surfacing a permanently broken action (e.g. no
+	// accounts configured) instead of letting it stay silent in daily
+	// "(non-fatal)" log noise.
+	quotaDogFailureEscalationThreshold = 3
 )
 
 // QuotaDogConfig holds configuration for the quota_dog patrol.
@@ -34,9 +40,11 @@ func quotaDogInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultQuotaDogInterval
 }
 
-// runQuotaDog executes a quota rotation cycle by shelling out to `gt quota rotate`.
-// The daemon is a thin ticker — `gt quota rotate` handles scanning for rate-limited
-// sessions, planning account assignments, and executing keychain swaps + session restarts.
+// runQuotaDog executes same-provider account rotation first, then cross-provider
+// agent failover for any hard-limited (and, if agent_failover.include_near_limit
+// is set, near-limit) sessions that remain. Rotation errors are non-fatal
+// because a town may intentionally have no second Claude account; provider
+// fallback must still get its chance.
 //
 // This follows the daemon's "dumb scheduler" principle: the daemon schedules,
 // existing commands do the work. No LLM or molecule needed — pure mechanical rotation.
@@ -45,34 +53,68 @@ func (d *Daemon) runQuotaDog() {
 		return
 	}
 
-	d.logger.Printf("quota_dog: starting rotation cycle")
+	d.logger.Printf("quota_dog: starting quota recovery cycle")
 
-	ctx, cancel := context.WithTimeout(d.ctx, quotaDogTimeout)
-	defer cancel()
+	for _, action := range quotaDogActions() {
+		ctx, cancel := context.WithTimeout(d.ctx, quotaDogTimeout)
+		cmd := exec.CommandContext(ctx, d.gtPath, "quota", action, "--json") //nolint:gosec // G204: gtPath resolved at daemon init
+		cmd.Dir = d.config.TownRoot
 
-	cmd := exec.CommandContext(ctx, d.gtPath, "quota", "rotate", "--json") //nolint:gosec // G204: gtPath resolved at daemon init
-	cmd.Dir = d.config.TownRoot
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		cancel()
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// Non-fatal: rotation failure shouldn't crash the daemon.
-		// Common expected failures: <2 accounts, no rate-limited sessions.
-		stderrStr := stderr.String()
-		if stderrStr != "" {
-			d.logger.Printf("quota_dog: rotation failed (non-fatal): %v: %s", err, stderrStr)
-		} else {
-			d.logger.Printf("quota_dog: rotation failed (non-fatal): %v", err)
+		if err != nil {
+			stderrStr := stderr.String()
+			if stderrStr == "" {
+				stderrStr = err.Error()
+			}
+			d.recordQuotaDogFailure(action)
+			failures := d.getQuotaDogFailures(action)
+			if failures >= quotaDogFailureEscalationThreshold {
+				d.logger.Printf("quota_dog: Error: %s repeatedly failing (%d consecutive failures, non-fatal): %s", action, failures, stderrStr)
+			} else {
+				d.logger.Printf("quota_dog: Warning: %s failed (%d consecutive failure(s), non-fatal): %s", action, failures, stderrStr)
+			}
+			continue
 		}
+		d.resetQuotaDogFailures(action)
+
+		outStr := stdout.String()
+		if outStr != "" && outStr != "[]\n" && outStr != "[]" {
+			d.logger.Printf("quota_dog: %s result: %s", action, outStr)
+		} else {
+			d.logger.Printf("quota_dog: %s found no actionable sessions", action)
+		}
+	}
+}
+
+// recordQuotaDogFailure increments the consecutive failure counter for a quota_dog action.
+func (d *Daemon) recordQuotaDogFailure(action string) {
+	if d.quotaDogFailures == nil {
+		d.quotaDogFailures = make(map[string]int)
+	}
+	d.quotaDogFailures[action]++
+}
+
+// getQuotaDogFailures returns the consecutive failure count for a quota_dog action.
+func (d *Daemon) getQuotaDogFailures(action string) int {
+	if d.quotaDogFailures == nil {
+		return 0
+	}
+	return d.quotaDogFailures[action]
+}
+
+// resetQuotaDogFailures clears the failure counter for a quota_dog action after it succeeds.
+func (d *Daemon) resetQuotaDogFailures(action string) {
+	if d.quotaDogFailures == nil {
 		return
 	}
+	delete(d.quotaDogFailures, action)
+}
 
-	outStr := stdout.String()
-	if outStr != "" && outStr != "[]\n" && outStr != "[]" {
-		d.logger.Printf("quota_dog: rotation result: %s", outStr)
-	} else {
-		d.logger.Printf("quota_dog: no rate-limited sessions detected")
-	}
+func quotaDogActions() []string {
+	return []string{"rotate", "failover"}
 }

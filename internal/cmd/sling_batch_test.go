@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // TestCreateBatchConvoy_CreatesOneConvoyTrackingAllBeads verifies that
@@ -662,6 +664,9 @@ func TestResolveRigFromBeadIDs_UnmappedPrefix_Errors(t *testing.T) {
 	if !strings.Contains(errMsg, "not mapped") {
 		t.Errorf("error should mention prefix is not mapped, got: %s", errMsg)
 	}
+	if !strings.Contains(errMsg, "--repo") {
+		t.Errorf("error should mention explicit --repo routing, got: %s", errMsg)
+	}
 }
 
 // TestResolveRigFromBeadIDs_TownLevelPrefix_Errors verifies that a bead with
@@ -923,7 +928,7 @@ exit 0
 	}
 	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
 
-	convoyID, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "")
+	convoyID, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "", git.WorkRefs{})
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
@@ -957,7 +962,7 @@ exit 0
 // TestCreateAutoConvoy_FlagLikeTitleReturnsError verifies that a title starting
 // with "--" is rejected.
 func TestCreateAutoConvoy_FlagLikeTitleReturnsError(t *testing.T) {
-	_, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "")
+	_, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "", git.WorkRefs{})
 	if err == nil {
 		t.Fatal("expected error for flag-like title, got nil")
 	}
@@ -984,7 +989,7 @@ exit 0
 		t.Fatalf("rewrite bd stub: %v", err)
 	}
 
-	_, err := createAutoConvoy("gt-aaa", "My task", true, "direct", "")
+	_, err := createAutoConvoy("gt-aaa", "My task", true, "direct", "", git.WorkRefs{})
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
@@ -995,6 +1000,54 @@ exit 0
 	}
 	if !strings.Contains(string(logBytes), "--labels=gt:convoy,gt:owned") {
 		t.Errorf("create should include convoy/owned labels:\n%q", string(logBytes))
+	}
+}
+
+// TestCreateAutoConvoy_WorkRefsInDescription verifies that non-empty work-ref
+// overrides passed to createAutoConvoy are persisted onto the convoy bead's
+// description as base_ref/publish_remote/publish_ref/pr_target_ref lines, so a
+// downstream consumer can read them back via beads.ParseConvoyFields.
+func TestCreateAutoConvoy_WorkRefsInDescription(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	bdScript := `#!/bin/sh
+printf 'CMD:' >> "LOGPATH"
+for arg in "$@"; do printf '%s\0' "$arg"; done >> "LOGPATH"
+printf '\n' >> "LOGPATH"
+exit 0
+`
+	townRoot, logPath := setupTownWithBdStub(t, "")
+	bdScript = strings.ReplaceAll(bdScript, "LOGPATH", logPath)
+	if err := os.WriteFile(filepath.Join(townRoot, "bin", "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("rewrite bd stub: %v", err)
+	}
+
+	_, err := createAutoConvoy("gt-aaa", "My task", false, "direct", "", git.WorkRefs{
+		BaseRef:       "upstream/main",
+		PublishRemote: "fork",
+		PublishRef:    "published-branch",
+		PRTargetRef:   "upstream/main",
+	})
+	if err != nil {
+		t.Fatalf("createAutoConvoy() error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"base_ref: upstream/main",
+		"publish_remote: fork",
+		"publish_ref: published-branch",
+		"pr_target_ref: upstream/main",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("convoy description missing %q:\n%q", want, log)
+		}
 	}
 }
 
@@ -1032,7 +1085,7 @@ exit 0
 		t.Fatalf("rewrite bd stub: %v", err)
 	}
 
-	convoyID, err := createAutoConvoy("gt-aaa", "My task", false, "", "")
+	convoyID, err := createAutoConvoy("gt-aaa", "My task", false, "", "", git.WorkRefs{})
 	if err != nil {
 		t.Fatalf("expected no error (dep fail is non-fatal), got: %v", err)
 	}

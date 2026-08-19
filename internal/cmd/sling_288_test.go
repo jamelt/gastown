@@ -998,3 +998,117 @@ exit /b 0
 		t.Fatalf("error message should mention missing spawned root id: %v", err)
 	}
 }
+
+// TestInstantiateFormulaOnBead_CustomAndGeneratedIDShapes is a regression test for
+// gt-ky6o: gt sling formula bonding must pass the bead ID through to `bd mol bond`
+// unmangled, for both bd-generated IDs (e.g. "gt-a3f8e9") and custom explicit IDs
+// created via `bd create --id` (e.g. "gt-pr4377-refresh"). Previously a stale bd
+// build's `mol bond` resolver rejected the latter shape with "not an issue ID or
+// formula name" even though `bd show` resolved the same ID fine; the bd stub below
+// fails the same way if InstantiateFormulaOnBead ever mangles or truncates the ID
+// before handing it to `bd mol bond`.
+func TestInstantiateFormulaOnBead_CustomAndGeneratedIDShapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		beadID string
+	}{
+		{name: "bd-generated hex ID", beadID: "gt-a3f8e9"},
+		{name: "custom explicit gt-pr* ID", beadID: "gt-pr4377-refresh"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+
+			if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
+				t.Fatalf("mkdir mayor/rig: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+				t.Fatalf("mkdir .beads: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(`{"prefix":"gt-","path":"."}`), 0644); err != nil {
+				t.Fatalf("write routes: %v", err)
+			}
+
+			binDir := filepath.Join(townRoot, "bin")
+			if err := os.MkdirAll(binDir, 0755); err != nil {
+				t.Fatalf("mkdir binDir: %v", err)
+			}
+			logPath := filepath.Join(townRoot, "bd.log")
+
+			// The bond sub-command only recognizes tt.beadID as the second bond
+			// operand; anything else (mangled/truncated/reshaped) reproduces the
+			// real-world "not an issue ID or formula name" failure.
+			bdScript := `#!/bin/sh
+echo "CMD:$*" >> "${BD_LOG}"
+cmd="$1"; shift || true
+case "$cmd" in
+  cook) exit 0;;
+  mol)
+    sub="$1"; shift || true
+    case "$sub" in
+      wisp) echo 'legacy mol wisp should not be called' >&2; exit 1;;
+      bond)
+        left="$1"; shift || true
+        right="$1"; shift || true
+        if [ "$right" != "` + tt.beadID + `" ]; then
+          echo "Error: '$right' not found (not an issue ID or formula name)" >&2
+          exit 1
+        fi
+        echo '{"result_id":"'"$right"'","id_mapping":{"'"$left"'":"'"$right"'.mol"}}'
+        ;;
+    esac;;
+esac
+exit 0
+`
+			bdScriptWindows := `@echo off
+setlocal enableextensions
+echo CMD:%*>>"%BD_LOG%"
+set "cmd=%1"
+set "sub=%2"
+set "right=%4"
+if "%cmd%"=="cook" exit /b 0
+if "%cmd%"=="mol" (
+  if "%sub%"=="wisp" (
+    echo legacy mol wisp should not be called 1>&2
+    exit /b 1
+  )
+  if "%sub%"=="bond" (
+    if not "%right%"=="` + tt.beadID + `" (
+      echo Error: '%right%' not found - not an issue ID or formula name 1>&2
+      exit /b 1
+    )
+    echo {^"result_id^":^"%right%^",^"id_mapping^":{^"mol-polecat-work^":^"%right%.mol^"}}
+    exit /b 0
+  )
+)
+exit /b 0
+`
+			_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
+
+			t.Setenv("BD_LOG", logPath)
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			cwd, _ := os.Getwd()
+			t.Cleanup(func() { _ = os.Chdir(cwd) })
+			_ = os.Chdir(townRoot)
+
+			result, err := InstantiateFormulaOnBead(context.Background(), "mol-polecat-work", tt.beadID, "Regression title", "", townRoot, false, nil)
+			if err != nil {
+				t.Fatalf("InstantiateFormulaOnBead(%q): %v", tt.beadID, err)
+			}
+			if result.BeadToHook != tt.beadID {
+				t.Errorf("BeadToHook = %q, want %q (bead ID must not be mangled)", result.BeadToHook, tt.beadID)
+			}
+			if result.WispRootID == "" {
+				t.Error("WispRootID should not be empty")
+			}
+
+			logBytes, _ := os.ReadFile(logPath)
+			logContent := string(logBytes)
+			if !strings.Contains(logContent, "mol bond mol-polecat-work "+tt.beadID+" --json --ephemeral") {
+				t.Errorf("direct mol bond command with unmangled bead ID not found in log:\n%s", logContent)
+			}
+		})
+	}
+}

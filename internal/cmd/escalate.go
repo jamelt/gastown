@@ -100,8 +100,9 @@ Records who closed it and the resolution reason.
 Examples:
   gt escalate close hq-abc123 --reason "Fixed in commit abc"
   gt escalate close hq-abc123 --reason "Not reproducible"`,
-	Args: cobra.ExactArgs(1),
-	RunE: runEscalateClose,
+	Args:         cobra.ExactArgs(1),
+	RunE:         runEscalateClose,
+	SilenceUsage: true, // Don't print usage on operational errors (confuses agents, see done.go)
 }
 
 var escalateStaleCmd = &cobra.Command{

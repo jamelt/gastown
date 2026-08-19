@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +16,9 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -55,6 +59,16 @@ Examples:
 	RunE: runDaemonStop,
 }
 
+var daemonRestartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the daemon",
+	Long: `Restart the Gas Town daemon.
+
+Stops the running daemon (if any) and starts a fresh one. Equivalent to
+'gt daemon stop && gt daemon start' but tolerates a not-running daemon.`,
+	RunE: runDaemonRestart,
+}
+
 var daemonStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show daemon status",
@@ -64,7 +78,8 @@ Displays whether the daemon is running, its PID, uptime, heartbeat
 count, and whether the binary has been rebuilt since the daemon started.
 
 Examples:
-  gt daemon status`,
+  gt daemon status
+  gt daemon status --json`,
 	RunE: runDaemonStatus,
 }
 
@@ -145,13 +160,15 @@ Examples:
 }
 
 var (
-	daemonLogLines  int
-	daemonLogFollow bool
+	daemonLogLines   int
+	daemonLogFollow  bool
+	daemonStatusJSON bool
 )
 
 func init() {
 	daemonCmd.AddCommand(daemonStartCmd)
 	daemonCmd.AddCommand(daemonStopCmd)
+	daemonCmd.AddCommand(daemonRestartCmd)
 	daemonCmd.AddCommand(daemonStatusCmd)
 	daemonCmd.AddCommand(daemonLogsCmd)
 	daemonCmd.AddCommand(daemonRunCmd)
@@ -159,6 +176,7 @@ func init() {
 	daemonCmd.AddCommand(daemonClearBackoffCmd)
 	daemonCmd.AddCommand(daemonRotateLogsCmd)
 
+	daemonStatusCmd.Flags().BoolVar(&daemonStatusJSON, "json", false, "Output as JSON")
 	daemonLogsCmd.Flags().IntVarP(&daemonLogLines, "lines", "n", 50, "Number of lines to show")
 	daemonLogsCmd.Flags().BoolVarP(&daemonLogFollow, "follow", "f", false, "Follow log output")
 	daemonRotateLogsCmd.Flags().BoolVar(&daemonRotateLogsForce, "force", false, "Rotate all logs regardless of size")
@@ -181,11 +199,30 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("daemon already running (PID %d)", pid)
 	}
 
-	// Start daemon in background
-	// We use 'gt daemon run' as the actual daemon process
+	pid, startedByUs, err := startDaemonProcess(townRoot)
+	if err != nil {
+		return err
+	}
+	if !startedByUs {
+		// Another concurrent start won the lock race - that's fine, report it.
+		fmt.Printf("%s Daemon already running (PID %d)\n", style.Bold.Render("●"), pid)
+		return nil
+	}
+
+	fmt.Printf("%s Daemon started (PID %d)\n", style.Bold.Render("✓"), pid)
+	return nil
+}
+
+// startDaemonProcess spawns a detached `gt daemon run`, waits up to 3s for it to
+// acquire the daemon lock, and resolves the start/PID race. Callers must have
+// already ensured no daemon is running (start) or stopped the old one (restart).
+// Returns the running PID and whether the process we spawned is the one that won
+// the lock (false means a concurrent start beat us to it).
+func startDaemonProcess(townRoot string) (pid int, startedByUs bool, err error) {
+	// We use 'gt daemon run' as the actual daemon process.
 	gtPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("finding executable: %w", err)
+		return 0, false, fmt.Errorf("finding executable: %w", err)
 	}
 
 	daemonCmd := exec.Command(gtPath, "daemon", "run")
@@ -198,40 +235,33 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 	util.SetDetachedProcessGroup(daemonCmd)
 
 	if err := daemonCmd.Start(); err != nil {
-		return fmt.Errorf("starting daemon: %w", err)
+		return 0, false, fmt.Errorf("starting daemon: %w", err)
 	}
 
 	// Poll for daemon to initialize and acquire the lock (up to 3s)
 	var started bool
 	for range 30 {
 		time.Sleep(100 * time.Millisecond)
-		running, pid, err = daemon.IsRunning(townRoot)
+		running, p, err := daemon.IsRunning(townRoot)
 		if err != nil {
-			return fmt.Errorf("checking daemon status: %w", err)
+			return 0, false, fmt.Errorf("checking daemon status: %w", err)
 		}
 		if running {
+			pid = p
 			started = true
 			break
 		}
 	}
 	if !started {
 		if msg := readDaemonStartupFailure(townRoot, daemonCmd.Process.Pid); msg != "" {
-			return fmt.Errorf("daemon failed to start: %s", msg)
+			return 0, false, fmt.Errorf("daemon failed to start: %s", msg)
 		}
-		return fmt.Errorf("daemon failed to start (check logs with 'gt daemon logs')")
+		return 0, false, fmt.Errorf("daemon failed to start (check logs with 'gt daemon logs')")
 	}
 
-	// Check if our spawned process is the one that won the race.
 	// If another concurrent start won, our process would have exited after
 	// failing to acquire the lock, and the PID file would have a different PID.
-	if pid != daemonCmd.Process.Pid {
-		// Another daemon won the race - that's fine, report it
-		fmt.Printf("%s Daemon already running (PID %d)\n", style.Bold.Render("●"), pid)
-		return nil
-	}
-
-	fmt.Printf("%s Daemon started (PID %d)\n", style.Bold.Render("✓"), pid)
-	return nil
+	return pid, pid == daemonCmd.Process.Pid, nil
 }
 
 func runDaemonStop(cmd *cobra.Command, args []string) error {
@@ -256,6 +286,37 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runDaemonRestart(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// Stop the running daemon first (if any). StopDaemon errors when nothing is
+	// running, so gate on IsRunning and just start fresh otherwise.
+	running, _, err := daemon.IsRunning(townRoot)
+	if err != nil {
+		return fmt.Errorf("checking daemon status: %w", err)
+	}
+	if running {
+		if err := daemon.StopDaemon(townRoot); err != nil {
+			return fmt.Errorf("stopping daemon: %w", err)
+		}
+	}
+
+	pid, startedByUs, err := startDaemonProcess(townRoot)
+	if err != nil {
+		return err
+	}
+	if !startedByUs {
+		fmt.Printf("%s Daemon already running (PID %d)\n", style.Bold.Render("●"), pid)
+		return nil
+	}
+
+	fmt.Printf("%s Daemon restarted (PID %d)\n", style.Bold.Render("✓"), pid)
+	return nil
+}
+
 func runDaemonStatus(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -267,6 +328,54 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking daemon status: %w", err)
 	}
 
+	state, stateErr := daemon.LoadState(townRoot)
+	binaryModTime, binaryErr := getBinaryModTime()
+
+	// Precise staleness: compare the *running process's* recorded build
+	// commit (not the on-disk binary, which may already have been rebuilt
+	// out from under it) against the build branch head. This is what
+	// replaces manually eyeballing mtimes against merge times (gt-if5q).
+	var staleInfo *version.StaleBinaryInfo
+	if stateErr == nil && state != nil {
+		staleInfo = daemonProcessStaleness(state.BinaryCommit)
+	}
+	isStale := staleInfo != nil && staleInfo.Error == nil && !staleInfo.Skipped && staleInfo.IsStale
+
+	if daemonStatusJSON {
+		sessions, sessionsErr := tmux.NewTmux().ListSessions()
+		if sessions == nil {
+			sessions = []string{}
+		}
+		sort.Strings(sessions)
+		status := daemonStatusOutput{
+			Running:  running,
+			PID:      pid,
+			Town:     townRoot,
+			Sessions: sessions,
+		}
+		if sessionsErr != nil {
+			status.SessionsError = sessionsErr.Error()
+		}
+		if stateErr == nil && state != nil {
+			status.StartedAt = optionalTime(state.StartedAt)
+			status.LastHeartbeat = optionalTime(state.LastHeartbeat)
+			status.HeartbeatCount = state.HeartbeatCount
+			status.BinaryCommit = state.BinaryCommit
+		}
+		if binaryErr == nil {
+			status.BinaryModifiedAt = optionalTime(binaryModTime)
+			status.BinaryNewer = status.StartedAt != nil && binaryModTime.After(*status.StartedAt)
+		}
+		if isStale {
+			status.Stale = true
+			status.StaleDescription = staleInfo.Describe("Daemon process")
+		}
+
+		encoder := json.NewEncoder(cmd.OutOrStdout())
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(status)
+	}
+
 	if running {
 		fmt.Printf("%s Daemon is %s (PID %d)\n",
 			style.Bold.Render("●"),
@@ -275,8 +384,7 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Town: %s\n", townRoot)
 
 		// Load state for more details
-		state, err := daemon.LoadState(townRoot)
-		if err == nil && !state.StartedAt.IsZero() {
+		if stateErr == nil && state != nil && !state.StartedAt.IsZero() {
 			fmt.Printf("  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
 			if !state.LastHeartbeat.IsZero() {
 				fmt.Printf("  Last heartbeat: %s (#%d)\n",
@@ -285,13 +393,20 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 			}
 
 			// Check if binary is newer than process
-			if binaryModTime, err := getBinaryModTime(); err == nil {
+			if binaryErr == nil {
 				fmt.Printf("  Binary: %s\n", binaryModTime.Format("2006-01-02 15:04:05"))
 				if binaryModTime.After(state.StartedAt) {
 					fmt.Printf("  %s Binary is newer than process - consider '%s'\n",
 						style.Bold.Render("⚠"),
 						style.Dim.Render("gt daemon stop && gt daemon start"))
 				}
+			}
+
+			if isStale {
+				fmt.Printf("  %s %s - consider '%s'\n",
+					style.Bold.Render("⚠"),
+					staleInfo.Describe("Daemon process"),
+					style.Dim.Render("gt daemon stop && gt daemon start"))
 			}
 		}
 	} else {
@@ -302,6 +417,52 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// daemonStatusOutput is the stable machine-readable form of `gt daemon status`.
+// Pointer timestamps are omitted when the daemon has not written that state yet.
+type daemonStatusOutput struct {
+	Running          bool       `json:"running"`
+	PID              int        `json:"pid,omitempty"`
+	Town             string     `json:"town"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	LastHeartbeat    *time.Time `json:"last_heartbeat,omitempty"`
+	HeartbeatCount   int64      `json:"heartbeat_count,omitempty"`
+	BinaryModifiedAt *time.Time `json:"binary_modified_at,omitempty"`
+	BinaryNewer      bool       `json:"binary_newer"`
+	Sessions         []string   `json:"sessions"`
+	SessionsError    string     `json:"sessions_error,omitempty"`
+	// BinaryCommit is the daemon process's own recorded build commit
+	// (daemon.State.BinaryCommit), empty for daemon state files written
+	// before this field existed. Stale/StaleDescription compare it against
+	// the build branch precisely -- a commit-based check (vs. BinaryNewer's
+	// mtime heuristic) that also catches the case where the merged fix is
+	// itself a daemon fix (gt-if5q).
+	BinaryCommit     string `json:"binary_commit,omitempty"`
+	Stale            bool   `json:"stale"`
+	StaleDescription string `json:"stale_description,omitempty"`
+}
+
+func optionalTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
+}
+
+// daemonProcessStaleness compares the daemon's recorded build commit against
+// the build branch head. Returns nil (not an error) when the commit is
+// unavailable (older daemon state predating BinaryCommit, or a dev build) or
+// the source repo can't be resolved — this is best-effort diagnostics.
+func daemonProcessStaleness(binaryCommit string) *version.StaleBinaryInfo {
+	if binaryCommit == "" {
+		return nil
+	}
+	repoRoot, err := version.GetRepoRoot()
+	if err != nil {
+		return nil
+	}
+	return version.CheckStaleBinaryForCommit(repoRoot, binaryCommit)
 }
 
 // getBinaryModTime returns the modification time of the current executable

@@ -1716,9 +1716,11 @@ func TestNotifyRecipient_IdleAgent(t *testing.T) {
 	}
 
 	msg := &Message{
-		From:    "gastown/crew/sender",
-		To:      "gastown/crew/idletest",
-		Subject: "test idle delivery",
+		From:     "gastown/crew/sender",
+		To:       "gastown/crew/idletest",
+		Subject:  "test idle delivery",
+		Type:     TypeTask,
+		ThreadID: "thread-idle-delivery",
 	}
 
 	err := r.notifyRecipient(msg)
@@ -1762,9 +1764,11 @@ func TestNotifyRecipient_BusyAgent(t *testing.T) {
 	}
 
 	msg := &Message{
-		From:    "gastown/crew/sender",
-		To:      "gastown/crew/busytest",
-		Subject: "test busy delivery",
+		From:     "gastown/crew/sender",
+		To:       "gastown/crew/busytest",
+		Subject:  "test busy delivery",
+		Type:     TypeTask,
+		ThreadID: "thread-busy-delivery",
 	}
 
 	err := r.notifyRecipient(msg)
@@ -1818,6 +1822,7 @@ func TestNotifyRecipient_CanonicalAliasFansOutToBusyCandidates(t *testing.T) {
 		From:     "gastown/witness",
 		To:       "gastown/aliasfanout",
 		Subject:  "fanout delivery",
+		Type:     TypeTask,
 		ThreadID: "thread-fanout",
 	}
 
@@ -1995,6 +2000,20 @@ func TestRouterSendEscalationAddsStructuredLabels(t *testing.T) {
 	}
 }
 
+func TestBuildLabelsPersistsExplicitResponsePolicy(t *testing.T) {
+	r := &Router{}
+	msg := &Message{
+		From:           "gastown/refinery",
+		Type:           TypeNotification,
+		ResponsePolicy: ResponsePolicyNone,
+		ThreadID:       "thread-terminal",
+	}
+	labels := r.buildLabels(msg)
+	if !containsLabel(labels, "response-policy:none") {
+		t.Fatalf("labels %v missing persisted response policy", labels)
+	}
+}
+
 func containsLabel(labels []string, want string) bool {
 	for _, label := range labels {
 		if label == want {
@@ -2006,6 +2025,31 @@ func containsLabel(labels []string, want string) bool {
 
 // --- enqueueReplyReminder tests ---
 
+func TestShouldEnqueueReplyReminderStructuredPolicy(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *Message
+		want bool
+	}{
+		{name: "nil", msg: nil, want: false},
+		{name: "terminal receipt notification", msg: &Message{Type: TypeNotification, Subject: "MERGED receipt"}, want: false},
+		{name: "ack reply", msg: &Message{Type: TypeReply, Subject: "ACK"}, want: false},
+		{name: "explicit no response task", msg: &Message{Type: TypeTask, ResponsePolicy: ResponsePolicyNone, Subject: "Action required"}, want: false},
+		{name: "actionable task despite terminal-looking subject", msg: &Message{Type: TypeTask, Subject: "Receipt: no response requested"}, want: true},
+		{name: "escalation", msg: &Message{Type: TypeEscalation}, want: true},
+		{name: "scavenge", msg: &Message{Type: TypeScavenge}, want: true},
+		{name: "explicit response required notification", msg: &Message{Type: TypeNotification, ResponsePolicy: ResponsePolicyRequired}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ShouldEnqueueReplyReminder(tt.msg); got != tt.want {
+				t.Fatalf("ShouldEnqueueReplyReminder(%+v) = %v, want %v", tt.msg, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestEnqueueReplyReminder_Basic verifies that a deferred reply-reminder nudge is
 // enqueued with the correct sender, message content, and DeliverAfter timestamp.
 func TestEnqueueReplyReminder_Basic(t *testing.T) {
@@ -2015,10 +2059,11 @@ func TestEnqueueReplyReminder_Basic(t *testing.T) {
 		townRoot: townRoot,
 	}
 	msg := &Message{
-		From:    "gastown/witness",
-		To:      "gastown/crew/alice",
-		Subject: "status check",
-		Type:    TypeNotification,
+		From:     "gastown/witness",
+		To:       "gastown/crew/alice",
+		Subject:  "status check",
+		Type:     TypeTask,
+		ThreadID: "thread-status-check",
 	}
 	sessionID := "gt-gastown-crew-alice"
 
@@ -2047,12 +2092,18 @@ func TestEnqueueReplyReminder_Basic(t *testing.T) {
 	// File still in queue — confirm DeliverAfter is ~30s ahead.
 	dir := filepath.Join(townRoot, ".runtime", "nudge_queue", sessionID)
 	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 file in queue dir, got %d", len(entries))
+	var queueFiles []os.DirEntry
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			queueFiles = append(queueFiles, entry)
+		}
+	}
+	if len(queueFiles) != 1 {
+		t.Fatalf("expected 1 queued JSON file, got %d", len(queueFiles))
 	}
 
 	// Read the raw JSON to inspect DeliverAfter.
-	data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	data, err := os.ReadFile(filepath.Join(dir, queueFiles[0].Name()))
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
@@ -2079,6 +2130,91 @@ func TestEnqueueReplyReminder_Basic(t *testing.T) {
 	}
 	if q.ThreadID != msg.ThreadID {
 		t.Errorf("ThreadID = %q, want %q", q.ThreadID, msg.ThreadID)
+	}
+}
+
+func TestEnqueueReplyReminder_DeduplicatesDeliveryRetry(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+	msg := &Message{
+		From:     "gastown/witness",
+		To:       "gastown/crew/alice",
+		Subject:  "actionable handoff",
+		Type:     TypeTask,
+		ThreadID: "thread-retried-delivery",
+	}
+	sessionID := "gt-gastown-crew-alice"
+
+	r.enqueueReplyReminder(msg, sessionID)
+	r.enqueueReplyReminder(msg, sessionID)
+
+	pending, err := nudge.Pending(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("duplicate delivery queued %d reminders, want 1", pending)
+	}
+}
+
+func TestEnqueueReplyReminder_TerminalMessagesDoNotQueue(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *Message
+	}{
+		{name: "receipt", msg: &Message{From: "gastown/refinery", Type: TypeNotification, Subject: "MERGED nux"}},
+		{name: "ack", msg: &Message{From: "gastown/witness", Type: TypeReply, Subject: "ACK"}},
+		{name: "explicit no response", msg: &Message{From: "mayor/", Type: TypeTask, ResponsePolicy: ResponsePolicyNone}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+			tt.msg.To = "gastown/witness"
+			tt.msg.ThreadID = "thread-terminal"
+			r.enqueueReplyReminder(tt.msg, "gt-gastown-witness")
+
+			pending, err := nudge.Pending(townRoot, "gt-gastown-witness")
+			if err != nil {
+				t.Fatalf("Pending: %v", err)
+			}
+			if pending != 0 {
+				t.Fatalf("terminal message queued %d reminders, want 0", pending)
+			}
+		})
+	}
+}
+
+func TestEnqueueReplyReminder_TerminalRetrySuppressesLegacyQueuedLoop(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+	sessionID := "gt-gastown-witness"
+	threadID := "thread-terminal-retry"
+	if err := nudge.Enqueue(townRoot, sessionID, nudge.QueuedNudge{
+		Sender:   "system",
+		Message:  "legacy ACK reminder",
+		Kind:     "reply-reminder",
+		ThreadID: threadID,
+	}); err != nil {
+		t.Fatalf("enqueue legacy reminder: %v", err)
+	}
+
+	r.enqueueReplyReminder(&Message{
+		From:           "gastown/refinery",
+		To:             "gastown/witness",
+		Subject:        "MERGED nux",
+		Type:           TypeNotification,
+		ResponsePolicy: ResponsePolicyNone,
+		ThreadID:       threadID,
+	}, sessionID)
+
+	pending, err := nudge.Pending(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("legacy terminal reminder remains queued: %d", pending)
 	}
 }
 
@@ -2114,10 +2250,11 @@ func TestEnqueueReplyReminder_RoutableSenderStillQueues(t *testing.T) {
 			townRoot := t.TempDir()
 			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
 			msg := &Message{
-				From:    from,
-				To:      "gastown/crew/bob",
-				Subject: "status check",
-				Type:    TypeNotification,
+				From:     from,
+				To:       "gastown/crew/bob",
+				Subject:  "status check",
+				Type:     TypeTask,
+				ThreadID: "thread-status-check",
 			}
 			sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
 
@@ -2224,6 +2361,74 @@ func TestClearReplyReminders(t *testing.T) {
 	}
 }
 
+// TestReplyReminderClearedAfterReply_NoThreadLabel reproduces the exact
+// reported churn bug: a message loaded from beads storage with no "thread:"
+// label (BeadsMessage.ToMessage falls back to the message's own ID as
+// ThreadID — see types.go) gets a reply reminder queued, and a reply built
+// the same way runMailReply builds one (reusing original.ThreadID, not
+// minting a fresh random one) must actually clear that reminder. Before the
+// ToMessage fallback fix, the original's ThreadID was "", the reminder was
+// queued under an unclearable "" key, and any reply — regardless of which
+// ThreadID it used — could never cancel it.
+func TestReplyReminderClearedAfterReply_NoThreadLabel(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+
+	// Simulate a message round-tripped from beads storage with no "thread:"
+	// label — the exact condition that produced an empty ThreadID pre-fix.
+	bm := &BeadsMessage{
+		ID:       "hq-mail-no-thread",
+		Title:    "status check",
+		Assignee: "gastown/crew/bob",
+		Labels:   []string{"gt:message", "from:gastown/witness", "msg-type:task"},
+	}
+	original := bm.ToMessage()
+	if original.ThreadID == "" {
+		t.Fatal("precondition failed: original.ThreadID should fall back to bm.ID, not stay empty")
+	}
+	if original.ThreadID != bm.ID {
+		t.Fatalf("precondition failed: original.ThreadID = %q, want fallback to %q", original.ThreadID, bm.ID)
+	}
+
+	sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
+	r.enqueueReplyReminder(original, sessionID)
+
+	pending, err := nudge.Pending(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("Pending = %d, want 1 (reminder should have been queued)", pending)
+	}
+
+	// Build the reply exactly as runMailReply does: reuse original.ThreadID
+	// rather than minting a fresh one.
+	reply := &Message{
+		From:     "gastown/crew/bob",
+		To:       original.From,
+		Subject:  "Re: status check",
+		Body:     "on it",
+		Type:     TypeReply,
+		ReplyTo:  original.ID,
+		ThreadID: original.ThreadID,
+	}
+	if reply.ThreadID == "" {
+		reply.ThreadID = generateThreadID()
+	}
+
+	if err := r.ClearReplyReminders("gastown/crew/bob", reply.ThreadID); err != nil {
+		t.Fatalf("ClearReplyReminders: %v", err)
+	}
+
+	pending, err = nudge.Pending(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("Pending = %d, want 0 (reply should have cleared the reminder)", pending)
+	}
+}
+
 // TestEnqueueReplyReminder_SkipsReply verifies that reply-type messages do not
 // trigger a reply reminder (would be redundant noise).
 func TestEnqueueReplyReminder_SkipsReply(t *testing.T) {
@@ -2281,5 +2486,50 @@ func TestEnqueueReplyReminder_DisabledByConfig(t *testing.T) {
 	pending, _ := nudge.Pending(townRoot, "gt-gastown-crew-bob")
 	if pending != 0 {
 		t.Errorf("reply_reminder_delay=0s should disable reminders, got %d pending", pending)
+	}
+}
+
+// TestClearThreadNudges_RemovesEscalationAndReplyReminder verifies that
+// ClearThreadNudges removes both the escalation wakeup nudge and the reply
+// reminder queued on an escalation's thread, while leaving nudges for other
+// threads intact. This underpins the gt-2lmt fix: ack/close clear a resolved
+// escalation's queued prompts even though neither is a mail reply.
+func TestClearThreadNudges_RemovesEscalationAndReplyReminder(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := session.MayorSessionName()
+
+	enqueue := func(kind, threadID string) {
+		if err := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
+			Sender:   "system",
+			Message:  "x",
+			Priority: nudge.PriorityNormal,
+			Kind:     kind,
+			ThreadID: threadID,
+		}); err != nil {
+			t.Fatalf("Enqueue(%s): %v", kind, err)
+		}
+	}
+	enqueue("escalation", "hq-esc1")
+	enqueue("reply-reminder", "hq-esc1")
+	enqueue("reply-reminder", "hq-other") // unrelated thread — must survive
+
+	if got := nudge.QueueLen(townRoot, sessionName); got != 3 {
+		t.Fatalf("expected 3 queued nudges, got %d", got)
+	}
+
+	r := NewRouterWithTownRoot(townRoot, townRoot)
+	if err := r.ClearThreadNudges(constants.RoleMayor, "hq-esc1"); err != nil {
+		t.Fatalf("ClearThreadNudges: %v", err)
+	}
+
+	if got := nudge.QueueLen(townRoot, sessionName); got != 1 {
+		t.Fatalf("expected 1 remaining nudge after clearing thread hq-esc1, got %d", got)
+	}
+	remaining, err := nudge.Drain(townRoot, sessionName)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ThreadID != "hq-other" {
+		t.Errorf("expected only the unrelated hq-other nudge to survive, got %+v", remaining)
 	}
 }

@@ -17,22 +17,6 @@ func (f fakeReuseMRShower) Show(issueID string) (*beads.Issue, error) {
 	return f.issue, f.err
 }
 
-type fakeReuseMapShower struct {
-	issues map[string]*beads.Issue
-	errs   map[string]error
-}
-
-func (f fakeReuseMapShower) Show(issueID string) (*beads.Issue, error) {
-	if err := f.errs[issueID]; err != nil {
-		return nil, err
-	}
-	issue, ok := f.issues[issueID]
-	if !ok {
-		return nil, beads.ErrNotFound
-	}
-	return issue, nil
-}
-
 func TestEffectivePolecatState(t *testing.T) {
 	tests := []struct {
 		name string
@@ -42,10 +26,9 @@ func TestEffectivePolecatState(t *testing.T) {
 		{
 			name: "session-running-done-with-issue-becomes-working",
 			item: PolecatListItem{
-				State:                polecat.StateDone,
-				Issue:                "gt-abc",
-				SessionRunning:       true,
-				CountsTowardCapacity: true,
+				State:          polecat.StateDone,
+				Issue:          "gt-abc",
+				SessionRunning: true,
 			},
 			want: polecat.StateWorking,
 		},
@@ -93,22 +76,11 @@ func TestEffectivePolecatState(t *testing.T) {
 		{
 			name: "idle-session-running-with-issue-becomes-working",
 			item: PolecatListItem{
-				State:                polecat.StateIdle,
-				Issue:                "gt-abc",
-				SessionRunning:       true,
-				CountsTowardCapacity: true,
+				State:          polecat.StateIdle,
+				Issue:          "gt-abc",
+				SessionRunning: true,
 			},
 			want: polecat.StateWorking,
-		},
-		{
-			name: "idle-session-running-with-protected-issue-stays-idle",
-			item: PolecatListItem{
-				State:                polecat.StateIdle,
-				Issue:                "gt-blocked",
-				SessionRunning:       true,
-				CountsTowardCapacity: false,
-			},
-			want: polecat.StateIdle,
 		},
 		{
 			name: "stalled-stays-stalled-when-session-dead",
@@ -148,12 +120,10 @@ func TestEffectivePolecatState(t *testing.T) {
 
 func TestActiveMRBlocksReuse(t *testing.T) {
 	tests := []struct {
-		name       string
-		mrID       string
-		sourceHint string
-		gitSafe    bool
-		bd         reuseMRShower
-		want       bool
+		name string
+		mrID string
+		bd   reuseMRShower
+		want bool
 	}{
 		{name: "empty active MR does not block"},
 		{
@@ -163,25 +133,10 @@ func TestActiveMRBlocksReuse(t *testing.T) {
 			want: true,
 		},
 		{
-			name:       "closed MR with terminal source does not block reuse",
-			mrID:       "mr-1",
-			sourceHint: "gt-closed",
-			gitSafe:    true,
-			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": &beads.Issue{ID: "mr-1", Status: "closed"}, "gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}}},
-			want:       false,
-		},
-		{
-			name:       "closed MR with terminal source blocks when git unsafe",
-			mrID:       "mr-1",
-			sourceHint: "gt-closed",
-			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": &beads.Issue{ID: "mr-1", Status: "closed"}, "gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}}},
-			want:       true,
-		},
-		{
-			name: "closed MR without source blocks conservatively",
+			name: "closed MR does not block reuse",
 			mrID: "mr-1",
-			bd:   fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": &beads.Issue{ID: "mr-1", Status: "closed"}}},
-			want: true,
+			bd:   fakeReuseMRShower{issue: &beads.Issue{ID: "mr-1", Status: "closed"}},
+			want: false,
 		},
 		{
 			name: "lookup error blocks conservatively",
@@ -190,111 +145,17 @@ func TestActiveMRBlocksReuse(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "missing MR blocks conservatively without source",
+			name: "missing MR blocks conservatively",
 			mrID: "mr-1",
 			bd:   fakeReuseMRShower{},
 			want: true,
 		},
-		{
-			name:       "missing MR with terminal source does not block reuse",
-			mrID:       "mr-1",
-			sourceHint: "gt-closed",
-			gitSafe:    true,
-			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}}},
-			want:       false,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := activeMRBlocksReuse(tt.bd, tt.mrID, tt.sourceHint, true, tt.gitSafe); got != tt.want {
+			if got := activeMRBlocksReuse(tt.bd, tt.mrID); got != tt.want {
 				t.Fatalf("activeMRBlocksReuse() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestWorkstateDispositionProjectionAgreement(t *testing.T) {
-	tests := []struct {
-		name         string
-		in           polecat.WorkstateInput
-		wantReusable bool
-		wantRecovery bool
-		wantMQSubmit bool
-		wantSafe     bool
-		wantCapacity polecatCapacitySnapshot
-	}{
-		{
-			name:         "reusable idle",
-			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean},
-			wantReusable: true,
-			wantSafe:     true,
-			wantCapacity: polecatCapacitySnapshot{ReusableIdle: 1},
-		},
-		{
-			name:         "recovery blocked idle",
-			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupUnpushed},
-			wantRecovery: true,
-			wantCapacity: polecatCapacitySnapshot{RecoveryBlocked: 1},
-		},
-		{
-			name:         "stale stash cleanup ignored is reusable capacity",
-			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupStash, IgnoreCleanupStatus: true},
-			wantReusable: true,
-			wantSafe:     true,
-			wantCapacity: polecatCapacitySnapshot{ReusableIdle: 1},
-		},
-		{
-			name:         "live branch stash remains recovery blocked",
-			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, StashCount: 1},
-			wantRecovery: true,
-			wantCapacity: polecatCapacitySnapshot{RecoveryBlocked: 1},
-		},
-		{
-			name:         "needs mq submit",
-			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, Branch: "polecat/test", MQCheckRequired: true, HasSubmittableWork: true},
-			wantRecovery: true,
-			wantMQSubmit: true,
-			wantCapacity: polecatCapacitySnapshot{RecoveryBlocked: 1},
-		},
-		{
-			name:         "working",
-			in:           polecat.WorkstateInput{State: polecat.StateWorking, CleanupStatus: polecat.CleanupClean},
-			wantCapacity: polecatCapacitySnapshot{Working: 1},
-		},
-		{
-			name:         "pending active mr",
-			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, ActiveMR: "gt-mr-open", ActiveMRBlocker: "active_mr=gt-mr-open status=open"},
-			wantCapacity: polecatCapacitySnapshot{PendingMR: 1},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			disposition := polecat.DecideWorkstate(tt.in)
-			list := PolecatListItem{
-				Verdict:              disposition.Verdict,
-				Reason:               disposition.Reason,
-				Reusable:             disposition.Reusable,
-				SafeToNuke:           disposition.SafeToNuke,
-				NeedsRecovery:        disposition.NeedsRecovery,
-				NeedsMQSubmit:        disposition.NeedsMQSubmit,
-				MQStatus:             disposition.MQStatus,
-				CountsTowardCapacity: disposition.CountsTowardCapacity,
-				ReuseStatus:          disposition.ReuseStatus,
-			}
-			recovery := RecoveryStatus{}
-			applyWorkstateDispositionToRecoveryStatus(&recovery, disposition)
-			if list.Reusable != recovery.Reusable || list.SafeToNuke != recovery.SafeToNuke || list.NeedsRecovery != recovery.NeedsRecovery || list.NeedsMQSubmit != recovery.NeedsMQSubmit || list.MQStatus != recovery.MQStatus || list.CountsTowardCapacity != recovery.CountsTowardCapacity || list.ReuseStatus != recovery.ReuseStatus {
-				t.Fatalf("list projection %+v disagrees with recovery %+v", list, recovery)
-			}
-			if recovery.Reusable != tt.wantReusable || recovery.SafeToNuke != tt.wantSafe || recovery.NeedsRecovery != tt.wantRecovery || recovery.NeedsMQSubmit != tt.wantMQSubmit {
-				t.Fatalf("recovery projection = %+v", recovery)
-			}
-			snapshot := polecatCapacitySnapshot{}
-			applyWorkstateDispositionToCapacitySnapshot(&snapshot, tt.in.State, disposition)
-			if snapshot.Working != tt.wantCapacity.Working || snapshot.RecoveryBlocked != tt.wantCapacity.RecoveryBlocked || snapshot.ReusableIdle != tt.wantCapacity.ReusableIdle || snapshot.PendingMR != tt.wantCapacity.PendingMR {
-				t.Fatalf("capacity projection = %+v, want %+v", snapshot, tt.wantCapacity)
 			}
 		})
 	}
@@ -302,14 +163,13 @@ func TestWorkstateDispositionProjectionAgreement(t *testing.T) {
 
 func TestPolecatReuseStatus(t *testing.T) {
 	tests := []struct {
-		name             string
-		state            polecat.State
-		cleanupStatus    string
-		activeMR         string
-		branch           string
-		activeMRBlocks   bool
-		staleCleanupSafe bool
-		want             string
+		name           string
+		state          polecat.State
+		cleanupStatus  string
+		activeMR       string
+		branch         string
+		activeMRBlocks bool
+		want           string
 	}{
 		{
 			name:  "working has no reuse status",
@@ -327,13 +187,6 @@ func TestPolecatReuseStatus(t *testing.T) {
 			state:         polecat.StateIdle,
 			cleanupStatus: string(polecat.CleanupUnpushed),
 			want:          "idle-recovery-needed",
-		},
-		{
-			name:             "idle stale dirty cleanup can be clean",
-			state:            polecat.StateIdle,
-			cleanupStatus:    string(polecat.CleanupUnpushed),
-			staleCleanupSafe: true,
-			want:             "idle-clean",
 		},
 		{
 			name:           "idle open MR is pr open",
@@ -361,7 +214,7 @@ func TestPolecatReuseStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := polecatReuseStatus(tt.state, tt.cleanupStatus, tt.activeMR, tt.branch, tt.activeMRBlocks, tt.staleCleanupSafe)
+			got := polecatReuseStatus(tt.state, tt.cleanupStatus, tt.activeMR, tt.branch, tt.activeMRBlocks)
 			if got != tt.want {
 				t.Fatalf("polecatReuseStatus() = %q, want %q", got, tt.want)
 			}

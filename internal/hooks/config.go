@@ -1019,10 +1019,16 @@ func DefaultBase() *HooksConfig {
 		PreToolUse: []HookEntry{
 			{
 				Matcher: "Bash(gh pr create*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard pr-workflow"),
-				}},
+				Hooks: []Hook{
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard pr-workflow"),
+					},
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard branch-hygiene"),
+					},
+				},
 			},
 			{
 				Matcher: "Bash(git checkout -b*)",
@@ -1057,6 +1063,18 @@ func DefaultBase() *HooksConfig {
 				Hooks: []Hook{{
 					Type:    "command",
 					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				// Block `go test` from a stale (pre-gt-8ik) worktree whose
+				// recompiled test binary would carry no isolation guard and
+				// could mutate the live control plane. The guard fires only for
+				// a real `go test` from a stale gastown worktree against a live
+				// town; current worktrees self-isolate and pass through (gt-x3yy).
+				Matcher: "Bash(*go test*)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard test-isolation"),
 				}},
 			},
 		},

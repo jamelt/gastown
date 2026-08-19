@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -186,23 +187,29 @@ func parseWorktreeConflict(output string) string {
 	return ""
 }
 
+// rigPathFromCloneDir derives the owning rig's root for a clone/role directory
+// under townRoot. Clone and role paths are always <townRoot>/<rig>/..., so the
+// rig is the first path segment. Returns false if dir is not under townRoot.
+func rigPathFromCloneDir(townRoot, dir string) (string, bool) {
+	rel, err := filepath.Rel(townRoot, dir)
+	if err != nil {
+		return "", false
+	}
+	parts := strings.SplitN(filepath.ToSlash(rel), "/", 2)
+	if len(parts) < 1 || parts[0] == "" || parts[0] == ".." {
+		return "", false
+	}
+	return filepath.Join(townRoot, parts[0]), true
+}
+
 // expectedBranch returns the branch a persistent role directory should be on.
 // Checks the rig's default_branch config, falling back to "main".
 func (c *BranchCheck) expectedBranch(townRoot, dir string) string {
-	rel, err := filepath.Rel(townRoot, dir)
-	if err != nil {
+	rigPath, ok := rigPathFromCloneDir(townRoot, dir)
+	if !ok {
 		return "main"
 	}
-	parts := strings.SplitN(filepath.ToSlash(rel), "/", 2)
-	if len(parts) < 1 {
-		return "main"
-	}
-	rigPath := filepath.Join(townRoot, parts[0])
-	cfg, err := rig.LoadRigConfig(rigPath)
-	if err != nil || cfg.DefaultBranch == "" {
-		return "main"
-	}
-	return cfg.DefaultBranch
+	return rig.DefaultBranchForPath(rigPath)
 }
 
 // isExpectedBranch checks if a directory is on the expected branch.
@@ -212,22 +219,12 @@ func (c *BranchCheck) isExpectedBranch(townRoot, dir, branch string) bool {
 	if branch == "main" || branch == "master" {
 		return true
 	}
-	// Derive the rig path from the directory.
 	// Directories are like <town>/<rig>/refinery/rig or <town>/<rig>/crew/<name>.
-	rel, err := filepath.Rel(townRoot, dir)
-	if err != nil {
+	rigPath, ok := rigPathFromCloneDir(townRoot, dir)
+	if !ok {
 		return false
 	}
-	parts := strings.SplitN(filepath.ToSlash(rel), "/", 2)
-	if len(parts) < 1 {
-		return false
-	}
-	rigPath := filepath.Join(townRoot, parts[0])
-	cfg, err := rig.LoadRigConfig(rigPath)
-	if err != nil || cfg.DefaultBranch == "" {
-		return false
-	}
-	return branch == cfg.DefaultBranch
+	return branch == rig.DefaultBranchForPath(rigPath)
 }
 
 // findPersistentRoleDirs finds infrastructure directories that should be on main:
@@ -333,7 +330,20 @@ type cloneInfo struct {
 	path     string
 	branch   string
 	headSHA  string
-	behindBy int // commits behind origin/main
+	baseRef  string // resolved base ref this clone is measured against (e.g. "origin/main")
+	behindBy int    // commits behind baseRef
+}
+
+// resolveBaseRef returns the remote-tracking base ref a clone should be measured
+// against. It consults the rig's resolved work-refs (fork-aware) rather than a
+// hardcoded origin/main, so a fork rig is compared against its true upstream
+// trunk. Falls back to origin/<default-branch> when the rig cannot be resolved.
+func (c *CloneDivergenceCheck) resolveBaseRef(townRoot, path string) string {
+	defaultBranch := "main"
+	if rigPath, ok := rigPathFromCloneDir(townRoot, path); ok {
+		defaultBranch = rig.DefaultBranchForPath(rigPath)
+	}
+	return git.NewGit(path).ResolveWorkRefs(defaultBranch, git.WorkRefs{}).BaseRef
 }
 
 // Run checks for significant divergence between clones.
@@ -350,7 +360,7 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 	// Gather info about each clone
 	var infos []cloneInfo
 	for _, path := range clones {
-		info, err := c.getCloneInfo(path)
+		info, err := c.getCloneInfo(path, c.resolveBaseRef(ctx.TownRoot, path))
 		if err != nil {
 			continue // Skip problematic clones
 		}
@@ -378,9 +388,9 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		if info.behindBy > 50 {
-			errors = append(errors, fmt.Sprintf("%s: %d commits behind origin/main (EMERGENCY)", relPath, info.behindBy))
+			errors = append(errors, fmt.Sprintf("%s: %d commits behind %s (EMERGENCY)", relPath, info.behindBy, info.baseRef))
 		} else if info.behindBy > 10 {
-			warnings = append(warnings, fmt.Sprintf("%s: %d commits behind origin/main", relPath, info.behindBy))
+			warnings = append(warnings, fmt.Sprintf("%s: %d commits behind %s", relPath, info.behindBy, info.baseRef))
 		}
 	}
 
@@ -398,7 +408,7 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: fmt.Sprintf("%d clone(s) behind origin/main", len(warnings)),
+			Message: fmt.Sprintf("%d clone(s) behind base ref", len(warnings)),
 			Details: warnings,
 			FixHint: "Run 'git pull --rebase' in affected directories",
 		}
@@ -407,7 +417,7 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusOK,
-		Message: fmt.Sprintf("All %d clones in sync with origin/main", len(infos)),
+		Message: fmt.Sprintf("All %d clones in sync with base ref", len(infos)),
 	}
 }
 
@@ -488,9 +498,9 @@ func (c *CloneDivergenceCheck) isGitRepo(path string) bool {
 	return false
 }
 
-// getCloneInfo gathers information about a clone.
-func (c *CloneDivergenceCheck) getCloneInfo(path string) (cloneInfo, error) {
-	info := cloneInfo{path: path}
+// getCloneInfo gathers information about a clone, measured against baseRef.
+func (c *CloneDivergenceCheck) getCloneInfo(path, baseRef string) (cloneInfo, error) {
+	info := cloneInfo{path: path, baseRef: baseRef}
 
 	// Get current branch
 	cmd := exec.Command("git", "branch", "--show-current")
@@ -510,12 +520,12 @@ func (c *CloneDivergenceCheck) getCloneInfo(path string) (cloneInfo, error) {
 	}
 	info.headSHA = strings.TrimSpace(string(out))
 
-	// Count commits behind origin/main (uses existing refs, may be stale)
-	cmd = exec.Command("git", "rev-list", "--count", "HEAD..origin/main")
+	// Count commits behind the resolved base ref (uses existing refs, may be stale)
+	cmd = exec.Command("git", "rev-list", "--count", "HEAD.."+baseRef)
 	cmd.Dir = path
 	out, err = cmd.Output()
 	if err != nil {
-		// origin/main might not exist, treat as 0 behind
+		// baseRef might not exist locally, treat as 0 behind
 		info.behindBy = 0
 		return info, nil
 	}

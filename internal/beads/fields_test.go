@@ -61,6 +61,22 @@ func TestAttachmentFieldsModeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAttachmentFieldsDispatchReceiptRoundTrip(t *testing.T) {
+	original := &AttachmentFields{
+		DispatchedBy:    "mayor/",
+		DispatchContext: "gt-sc-123",
+		DispatchActor:   "gastown/witness",
+	}
+	formatted := FormatAttachmentFields(original)
+	parsed := ParseAttachmentFields(&Issue{Description: formatted})
+	if parsed == nil {
+		t.Fatal("ParseAttachmentFields returned nil")
+	}
+	if parsed.DispatchedBy != original.DispatchedBy || parsed.DispatchContext != original.DispatchContext || parsed.DispatchActor != original.DispatchActor {
+		t.Fatalf("dispatch receipt round trip = %+v, want %+v", parsed, original)
+	}
+}
+
 func TestSetAttachmentFieldsPreservesMode(t *testing.T) {
 	issue := &Issue{
 		Description: "mode: ralph\nattached_molecule: gt-wisp-old\nSome other content",
@@ -766,5 +782,88 @@ func TestSetConvoyFieldsPreservesWatchers(t *testing.T) {
 	}
 	if !strings.Contains(got, "Some text") {
 		t.Errorf("lost prose, got:\n%s", got)
+	}
+}
+
+func TestConvoyFieldsWorkRefsRoundTrip(t *testing.T) {
+	fields := &ConvoyFields{
+		Owner:         "mayor/",
+		BaseBranch:    "feat/extraction-review",
+		BaseRef:       "upstream/main",
+		PublishRemote: "origin",
+		PublishRef:    "polecat/synth/gt-fork-aware-work-refs",
+		PRTargetRef:   "upstream/main",
+	}
+	formatted := FormatConvoyFields(fields)
+	for _, want := range []string{
+		"base_branch: feat/extraction-review",
+		"base_ref: upstream/main",
+		"publish_remote: origin",
+		"publish_ref: polecat/synth/gt-fork-aware-work-refs",
+		"pr_target_ref: upstream/main",
+	} {
+		if !strings.Contains(formatted, want) {
+			t.Errorf("FormatConvoyFields missing %q, got:\n%s", want, formatted)
+		}
+	}
+
+	parsed := ParseConvoyFields(&Issue{Description: formatted})
+	if parsed == nil {
+		t.Fatal("ParseConvoyFields returned nil")
+	}
+	if parsed.BaseRef != fields.BaseRef {
+		t.Errorf("BaseRef round-trip = %q, want %q", parsed.BaseRef, fields.BaseRef)
+	}
+	if parsed.PublishRemote != fields.PublishRemote {
+		t.Errorf("PublishRemote round-trip = %q, want %q", parsed.PublishRemote, fields.PublishRemote)
+	}
+	if parsed.PublishRef != fields.PublishRef {
+		t.Errorf("PublishRef round-trip = %q, want %q", parsed.PublishRef, fields.PublishRef)
+	}
+	if parsed.PRTargetRef != fields.PRTargetRef {
+		t.Errorf("PRTargetRef round-trip = %q, want %q", parsed.PRTargetRef, fields.PRTargetRef)
+	}
+}
+
+func TestSetConvoyFieldsReplacesWorkRefs(t *testing.T) {
+	issue := &Issue{Description: "Convoy tracking work\nbase_ref: origin/main\npublish_remote: origin"}
+	fields := &ConvoyFields{BaseRef: "upstream/main", PublishRemote: "origin", PRTargetRef: "upstream/main"}
+	got := SetConvoyFields(issue, fields)
+
+	if !strings.Contains(got, "base_ref: upstream/main") {
+		t.Errorf("missing updated base_ref, got:\n%s", got)
+	}
+	if strings.Contains(got, "origin/main") {
+		t.Errorf("stale base_ref value survived replace, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Convoy tracking work") {
+		t.Errorf("lost prose, got:\n%s", got)
+	}
+}
+
+func TestMRFieldsRemoteAndTargetRepoRoundTrip(t *testing.T) {
+	fields := &MRFields{
+		Branch:      "polecat/synth/gt-fork-aware-work-refs",
+		Target:      "main",
+		Remote:      "origin",
+		TargetRepo:  "gastownhall/gastown",
+		SourceIssue: "gt-fork-aware-work-refs",
+	}
+	formatted := FormatMRFields(fields)
+	for _, want := range []string{"remote: origin", "target_repo: gastownhall/gastown"} {
+		if !strings.Contains(formatted, want) {
+			t.Errorf("FormatMRFields missing %q, got:\n%s", want, formatted)
+		}
+	}
+
+	parsed := ParseMRFields(&Issue{Description: formatted})
+	if parsed == nil {
+		t.Fatal("ParseMRFields returned nil")
+	}
+	if parsed.Remote != fields.Remote {
+		t.Errorf("Remote round-trip = %q, want %q", parsed.Remote, fields.Remote)
+	}
+	if parsed.TargetRepo != fields.TargetRepo {
+		t.Errorf("TargetRepo round-trip = %q, want %q", parsed.TargetRepo, fields.TargetRepo)
 	}
 }

@@ -430,13 +430,17 @@ func MayorQuotaPath(townRoot string) string {
 // Patterns are intentionally specific to actual Claude rate-limit messages
 // to avoid false positives from agent discussion or code comments.
 var DefaultRateLimitPatterns = []string{
-	`You've hit your .*limit`,                        // Claude's primary rate-limit message
-	`limit\s*·\s*resets \d+[:\d]*(am|pm)\b`,         // "limit · resets 7pm" — requires limit context before resets
-	`Stop and wait for limit to reset`,               // /rate-limit-options TUI prompt option 1
-	`Add funds to continue with extra usage`,         // /rate-limit-options TUI prompt option 2
-	`API Error: Rate limit reached`,                  // Mid-stream API 429 during tool use or generation
-	`OAuth token revoked`,                            // Token invalidated after keychain swap
-	`OAuth token has expired`,                        // Token expired — needs fresh auth
+	`You've hit your .*limit`,                                          // Claude's primary rate-limit message
+	`limit\s*·\s*resets \d+[:\d]*(am|pm)\b`,                            // "limit · resets 7pm" — requires limit context before resets
+	`Stop and wait for limit to reset`,                                 // /rate-limit-options TUI prompt option 1
+	`Add funds to continue with extra usage`,                           // /rate-limit-options TUI prompt option 2
+	`API Error: Rate limit reached`,                                    // Mid-stream API 429 during tool use or generation
+	`OAuth token revoked`,                                              // Token invalidated after keychain swap
+	`OAuth token has expired`,                                          // Token expired — needs fresh auth
+	`(API |HTTP )?Error.*\binsufficient_quota\b`,                       // OpenAI/OpenRouter structured quota error
+	`(API |HTTP )?Error.*\brate_limit_exceeded\b`,                      // OpenAI/OpenRouter structured rate-limit error
+	`(HTTP\s*)?429\b.*(Too Many Requests|rate.?limit|quota)`,           // Provider HTTP quota response
+	`(usage|spend|credit) (limit|quota).*(reached|exhausted|depleted)`, // Terminal allocation exhaustion
 }
 
 // DefaultNearLimitPatterns are patterns that indicate a session is approaching
@@ -447,7 +451,7 @@ var DefaultNearLimitPatterns = []string{
 	`usage\s+(is\s+)?(at|near|approaching)\s+\d+\s*%`,             // "usage is at 90%"
 	`approaching\s+(your\s+)?(rate\s+)?limit`,                     // "approaching your rate limit"
 	`nearing\s+(your\s+)?(rate\s+)?limit`,                         // "nearing your rate limit"
-	`close\s+to\s+(your\s+)?(rate\s+)?limit`,                     // "close to your rate limit"
+	`close\s+to\s+(your\s+)?(rate\s+)?limit`,                      // "close to your rate limit"
 	`almost\s+(at|hit|reached)\s+(your\s+)?(rate\s+)?limit`,       // "almost reached your rate limit"
-	`\d+\s*(messages?|requests?)\s*(left|remaining)`,               // "10 messages remaining"
+	`\d+\s*(messages?|requests?)\s*(left|remaining)`,              // "10 messages remaining"
 }

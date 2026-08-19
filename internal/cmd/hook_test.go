@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -121,6 +122,55 @@ func TestHookRejectsNonBeadArg(t *testing.T) {
 				t.Errorf("runHook(%q) error = %q, want it to point at --help", arg, err.Error())
 			}
 		})
+	}
+}
+
+// TestHookRefusesHardProhibitionWithoutConfirmation pins gt-cpdg: gt hook
+// bypassed the hq-1s4w hard-prohibition gate entirely, attaching a
+// credentials/production/money-policy/human-decision-labeled bead to a live
+// agent's hook with no check at all (unlike gt sling, gated by gt-b2qi).
+// An already-running agent picks up hooked work on its next gt prime with no
+// further nudge needed, so gt hook needs the same gate as gt sling.
+func TestHookRefusesHardProhibitionWithoutConfirmation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix shell script bd stub")
+	}
+	t.Setenv("GT_ROLE", "")
+	t.Setenv("GT_POLECAT", "")
+
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$1" = "show" ]; then
+  echo '[{"title":"Rotate root AWS credentials","status":"open","assignee":"","description":"","labels":["human"]}]'
+  exit 0
+fi
+echo "unexpected bd invocation: $*" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	prevConfirm := hookConfirmHumanApproved
+	t.Cleanup(func() { hookConfirmHumanApproved = prevConfirm })
+
+	hookConfirmHumanApproved = false
+	err := runHook(nil, []string{"gt-secret"})
+	if err == nil {
+		t.Fatal("runHook error = nil, want hard-prohibition block")
+	}
+	if !strings.Contains(err.Error(), "fresh human approval") {
+		t.Fatalf("runHook error = %v, want it to mention fresh human approval", err)
+	}
+	if !strings.Contains(err.Error(), "--confirm-human-approved") {
+		t.Fatalf("runHook error = %v, want it to point at --confirm-human-approved", err)
+	}
+
+	hookConfirmHumanApproved = true
+	err = runHook(nil, []string{"gt-secret"})
+	if err != nil && strings.Contains(err.Error(), "fresh human approval") {
+		t.Fatalf("runHook with hookConfirmHumanApproved=true still blocked by hard-prohibition guard: %v", err)
 	}
 }
 

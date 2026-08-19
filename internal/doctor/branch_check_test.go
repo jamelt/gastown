@@ -176,6 +176,61 @@ func TestCheckoutWithWorktreeRetry_BranchNotFound(t *testing.T) {
 	}
 }
 
+// TestCloneDivergenceCheck_MeasuresAgainstResolvedBaseRef verifies that the
+// clone-divergence check counts commits behind the rig's resolved base ref
+// (origin/main on a normal single-remote rig — zero functional difference from
+// the previously hardcoded "origin/main") and names that ref in its output.
+func TestCloneDivergenceCheck_MeasuresAgainstResolvedBaseRef(t *testing.T) {
+	tmp := t.TempDir()
+	townRoot := filepath.Join(tmp, "town")
+	origin := filepath.Join(tmp, "origin.git")
+	runGit(t, "", "init", "--bare", "-b", "main", origin)
+
+	// Seed origin with one commit.
+	seed := filepath.Join(tmp, "seed")
+	runGit(t, "", "init", "-b", "main", seed)
+	runGit(t, seed, "commit", "--allow-empty", "-m", "c1")
+	runGit(t, seed, "remote", "add", "origin", origin)
+	runGit(t, seed, "push", "origin", "main")
+
+	// Clone into a recognized rig clone location (<rig>/witness/rig), on main at c1.
+	clonePath := filepath.Join(townRoot, "myrig", "witness", "rig")
+	runGit(t, "", "clone", origin, clonePath)
+
+	// resolveBaseRef must yield origin/main for a normal single-remote rig.
+	check := NewCloneDivergenceCheck()
+	if got := check.resolveBaseRef(townRoot, clonePath); got != "origin/main" {
+		t.Fatalf("resolveBaseRef() = %q, want %q", got, "origin/main")
+	}
+
+	// Advance origin 12 commits ahead so the clone is meaningfully behind.
+	for i := 0; i < 12; i++ {
+		runGit(t, seed, "commit", "--allow-empty", "-m", "ahead")
+	}
+	runGit(t, seed, "push", "origin", "main")
+	runGit(t, clonePath, "fetch", "origin")
+
+	info, err := check.getCloneInfo(clonePath, check.resolveBaseRef(townRoot, clonePath))
+	if err != nil {
+		t.Fatalf("getCloneInfo() error: %v", err)
+	}
+	if info.baseRef != "origin/main" {
+		t.Errorf("cloneInfo.baseRef = %q, want %q", info.baseRef, "origin/main")
+	}
+	if info.behindBy != 12 {
+		t.Errorf("cloneInfo.behindBy = %d, want 12", info.behindBy)
+	}
+
+	res := check.Run(&CheckContext{TownRoot: townRoot})
+	if res.Status != StatusWarning {
+		t.Fatalf("Run() status = %v, want StatusWarning; message=%q details=%v", res.Status, res.Message, res.Details)
+	}
+	joined := strings.Join(res.Details, " ")
+	if !strings.Contains(joined, "origin/main") {
+		t.Errorf("Run() details should name the resolved base ref origin/main, got: %v", res.Details)
+	}
+}
+
 // runGit is a test helper that runs git commands and fails the test on error.
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()

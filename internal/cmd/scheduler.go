@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -33,6 +36,7 @@ var schedulerCmd = &cobra.Command{
 Subcommands:
   gt scheduler status    # Show scheduler state
   gt scheduler list      # List all scheduled beads
+  gt scheduler feed      # Survey ready beads and schedule eligible work
   gt scheduler run       # Manual dispatch trigger
   gt scheduler pause     # Pause dispatch
   gt scheduler resume    # Resume dispatch
@@ -126,6 +130,40 @@ type scheduledBeadInfo struct {
 	Blocked   bool   `json:"blocked,omitempty"`
 }
 
+// dispatchLockStatus reports the current scheduler-dispatch.lock state for
+// `gt scheduler status`, so a wedged or stale dispatch lock (gt-jpib) is
+// visible without reading .runtime/ by hand.
+type dispatchLockStatus struct {
+	PID        int    `json:"pid,omitempty"`
+	Hostname   string `json:"hostname,omitempty"`
+	AcquiredAt string `json:"acquired_at,omitempty"`
+	AgeSeconds int64  `json:"age_seconds,omitempty"`
+	Stale      bool   `json:"stale,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// loadSchedulerDispatchLockStatus reads the dispatch lock for display.
+// Returns nil when unlocked (the common case) so callers can omit it from
+// output entirely. A corrupt lock file is reported via Error rather than
+// failing the whole status command — status must stay usable precisely when
+// an operator is diagnosing a wedged or corrupted lock.
+func loadSchedulerDispatchLockStatus(townRoot string) *dispatchLockStatus {
+	info, err := lock.New(schedulerDispatchLockPath(townRoot)).Read()
+	if err != nil {
+		if errors.Is(err, lock.ErrNotLocked) {
+			return nil
+		}
+		return &dispatchLockStatus{Error: err.Error()}
+	}
+	return &dispatchLockStatus{
+		PID:        info.PID,
+		Hostname:   info.Hostname,
+		AcquiredAt: info.AcquiredAt.Format(time.RFC3339),
+		AgeSeconds: int64(time.Since(info.AcquiredAt).Round(time.Second).Seconds()),
+		Stale:      info.IsStaleAfter(schedulerDispatchLockTTL),
+	}
+}
+
 func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -156,6 +194,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			ActivePolecats int                     `json:"active_polecats"`
 			Capacity       polecatCapacitySnapshot `json:"capacity"`
 			LastDispatchAt string                  `json:"last_dispatch_at,omitempty"`
+			DispatchLock   *dispatchLockStatus     `json:"dispatch_lock,omitempty"`
 			Beads          []scheduledBeadInfo     `json:"beads"`
 		}{
 			Paused:         state.Paused,
@@ -164,6 +203,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			ActivePolecats: capacitySnapshot.ActiveSessions,
 			Capacity:       capacitySnapshot,
 			LastDispatchAt: state.LastDispatchAt,
+			DispatchLock:   loadSchedulerDispatchLockStatus(townRoot),
 			Beads:          scheduled,
 		}
 		for _, b := range scheduled {
@@ -203,6 +243,23 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 		)
 	} else {
 		fmt.Printf("  Capacity:  direct dispatch (scheduler.max_polecats=%d)\n", capacitySnapshot.Max)
+	}
+	if dl := loadSchedulerDispatchLockStatus(townRoot); dl != nil {
+		host := ""
+		if dl.Hostname != "" {
+			host = " on " + dl.Hostname
+		}
+		switch {
+		case dl.Error != "":
+			fmt.Printf("  Dispatch:  %s lock file unreadable (%s): %s\n",
+				style.Warning.Render("⚠"), schedulerDispatchLockPath(townRoot), dl.Error)
+		case dl.Stale:
+			fmt.Printf("  Dispatch:  %s stale lock (PID %d%s, held %s — previous dispatch likely crashed; clears on next run)\n",
+				style.Warning.Render("⚠"), dl.PID, host, time.Duration(dl.AgeSeconds)*time.Second)
+		default:
+			fmt.Printf("  Dispatch:  running (PID %d%s, held %s)\n",
+				dl.PID, host, time.Duration(dl.AgeSeconds)*time.Second)
+		}
 	}
 	if state.LastDispatchAt != "" {
 		fmt.Printf("  Last dispatch: %s (%d beads)\n", state.LastDispatchAt, state.LastDispatchCount)
@@ -333,6 +390,12 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		// Mark the work bead itself, not just the context: an explicit clear
+		// must survive the next feed cycle even when there is nothing left to
+		// close (e.g. re-running clear, or a context that closed for another
+		// reason moments earlier). Only a fresh `gt sling` lifts this marker.
+		markSchedulerCleared(townRoot, schedulerClearBead)
+
 		if closed == 0 {
 			fmt.Printf("%s No sling context found for %s\n", style.Dim.Render("○"), schedulerClearBead)
 		} else {
@@ -360,10 +423,42 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		cleared++
+		if fields := beads.ParseSlingContextFields(ctx.issue.Description); fields != nil && fields.WorkBeadID != "" {
+			markSchedulerCleared(townRoot, fields.WorkBeadID)
+		}
 	}
 
 	fmt.Printf("%s Cleared %d context bead(s) from scheduler\n", style.Bold.Render("✓"), cleared)
 	return nil
+}
+
+// markSchedulerCleared records a durable marker on the work bead itself
+// (not the ephemeral context bead) saying its sling context was explicitly
+// removed via `gt scheduler clear`. Closing the context alone is not
+// durable: the next `gt scheduler feed` pass sees a ready, unscheduled bead
+// and — with no memory that a human just cleared it — recreates the exact
+// context it was cleared from (gt-5ti). The feeder checks this label and
+// skips marked beads; only `gt sling` (which bypasses the feeder) removes it.
+// Best-effort: the context close is the primary action and already
+// succeeded or failed on its own by the time this runs.
+func markSchedulerCleared(townRoot, workBeadID string) {
+	rigName := resolveRigForBead(townRoot, workBeadID)
+	if rigName == "" {
+		fmt.Printf("  %s Could not resolve rig for %s; scheduler-cleared marker not set (a later feed pass may re-enqueue it)\n",
+			style.Dim.Render("Warning:"), workBeadID)
+		return
+	}
+	rigBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, rigName)
+	if !ok {
+		fmt.Printf("  %s Could not resolve beads dir for rig %s; scheduler-cleared marker not set on %s (a later feed pass may re-enqueue it)\n",
+			style.Dim.Render("Warning:"), rigName, workBeadID)
+		return
+	}
+	b := beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForLocalBeads()
+	if err := b.Update(workBeadID, beads.UpdateOptions{AddLabels: []string{capacity.LabelSchedulerCleared}}); err != nil {
+		fmt.Printf("  %s Could not set scheduler-cleared marker on %s: %v (a later feed pass may re-enqueue it)\n",
+			style.Dim.Render("Warning:"), workBeadID, err)
+	}
 }
 
 func runSchedulerRun(cmd *cobra.Command, args []string) error {
@@ -451,10 +546,13 @@ func beadsSearchDirs(townRoot string) ([]string, error) {
 	return dirs, nil
 }
 
-// countActivePolecats counts all running polecat tmux sessions across all rigs.
+// countActivePolecats counts running, inventory-backed polecat tmux sessions.
+// A parseable name alone is not sufficient evidence: malformed and test
+// sessions such as gt-test-nudge-1 otherwise look like polecats because a
+// polecat name may contain dashes.
 // Capacity admission uses polecatCapacitySnapshotForTown instead; active sessions
 // are shown for operator context only.
-func countActivePolecats() int {
+func countActivePolecats(townRoot string) int {
 	listCmd := tmux.BuildCommand("list-sessions", "-F", "#{session_name}")
 	out, err := listCmd.Output()
 	if err != nil {
@@ -471,7 +569,13 @@ func countActivePolecats() int {
 			continue
 		}
 		if identity.Role == session.RolePolecat {
-			count++
+			if identity.Name == "." || identity.Name == ".." || filepath.Base(identity.Name) != identity.Name {
+				continue
+			}
+			polecatDir := filepath.Join(townRoot, identity.Rig, "polecats", identity.Name)
+			if info, statErr := os.Stat(polecatDir); statErr == nil && info.IsDir() {
+				count++
+			}
 		}
 	}
 	return count

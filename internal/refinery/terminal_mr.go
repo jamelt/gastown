@@ -82,9 +82,21 @@ func closeTerminalMR(b *beads.Beads, mrID string, opts terminalMRCloseOptions) (
 	}
 
 	if result.AgentBead != "" {
-		cleared, clearErr := b.ForAgentBead().ClearAgentActiveMRIfMatches(result.AgentBead, mrID)
-		result.AgentActiveMRCleared = cleared
-		result.AgentActiveMRClearErr = clearErr
+		// On a successful merge, also invalidate the source polecat's persisted
+		// cleanup_status: it may be stale ("clean") from before this merge, and
+		// gt polecat list / gt scheduler status trust that field between witness
+		// patrol sweeps (gt-h6u4). Scoped to the merged reason only — the
+		// rejected-MR case is gt-nasl's territory (it has its own candidate
+		// terminal-state fix at this same call site) and must not be preempted.
+		if normalizedMRCloseReason(opts.Reason) == string(CloseReasonMerged) {
+			cleared, clearErr := b.ForAgentBead().ClearAgentActiveMRAndMarkCleanupUnknownIfMatches(result.AgentBead, mrID)
+			result.AgentActiveMRCleared = cleared
+			result.AgentActiveMRClearErr = clearErr
+		} else {
+			cleared, clearErr := b.ForAgentBead().ClearAgentActiveMRIfMatches(result.AgentBead, mrID)
+			result.AgentActiveMRCleared = cleared
+			result.AgentActiveMRClearErr = clearErr
+		}
 	}
 	return result, nil
 }

@@ -3,7 +3,6 @@ package cmd
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -115,10 +114,7 @@ func TestPickBestAgentBead(t *testing.T) {
 		candidate("rig-wisp", agentSourceRigWisps, "open"),
 	}
 
-	got, err := pickBestAgentBead(candidates)
-	if err != nil {
-		t.Fatalf("pickBestAgentBead returned error: %v", err)
-	}
+	got := pickBestAgentBead(candidates)
 	if got == nil || got.ID != "rig-wisp" {
 		t.Fatalf("pickBestAgentBead picked %v, want rig-wisp", got)
 	}
@@ -130,28 +126,50 @@ func TestPickBestAgentBeadSkipsClosed(t *testing.T) {
 		candidate("open-rig-issue", agentSourceRigIssues, "open"),
 	}
 
-	got, err := pickBestAgentBead(candidates)
-	if err != nil {
-		t.Fatalf("pickBestAgentBead returned error: %v", err)
-	}
+	got := pickBestAgentBead(candidates)
 	if got == nil || got.ID != "open-rig-issue" {
 		t.Fatalf("pickBestAgentBead picked %v, want open-rig-issue", got)
 	}
 }
 
-func TestPickBestAgentBeadRejectsSameRankDuplicates(t *testing.T) {
+// TestPickBestAgentBeadCanonicalizesLegacyDuplicate reproduces the trader
+// rig incident (gt-xjd): a legacy bead named "<rig>-<role>" from before the
+// prefix-rig-role convention, and the canonical "<prefix>-<rig>-<role>" bead,
+// both survive registration and match the same role/rig at the same source
+// rank. Resolution must deterministically prefer the canonical-form ID
+// instead of blocking await-signal with an ambiguity error.
+func TestPickBestAgentBeadCanonicalizesLegacyDuplicate(t *testing.T) {
 	candidates := []agentBeadCandidate{
-		candidate("rig-wisp-a", agentSourceRigWisps, "open"),
-		candidate("rig-wisp-b", agentSourceRigWisps, "open"),
-		candidate("rig-issue", agentSourceRigIssues, "open"),
+		candidate("trader-refinery", agentSourceRigIssues, "open"),    // legacy, pre-prefix
+		candidate("tr-trader-refinery", agentSourceRigIssues, "open"), // canonical
 	}
 
-	got, err := pickBestAgentBead(candidates)
-	if err == nil {
-		t.Fatalf("pickBestAgentBead picked %v, want duplicate error", got)
+	got := pickBestAgentBead(candidates)
+	if got == nil || got.ID != "tr-trader-refinery" {
+		t.Fatalf("pickBestAgentBead picked %v, want canonical tr-trader-refinery", got)
 	}
-	if !strings.Contains(err.Error(), "multiple matching agent beads") {
-		t.Fatalf("error = %q, want duplicate diagnostic", err)
+
+	// Order independence: the canonicalization must not depend on input order.
+	reversed := []agentBeadCandidate{candidates[1], candidates[0]}
+	got = pickBestAgentBead(reversed)
+	if got == nil || got.ID != "tr-trader-refinery" {
+		t.Fatalf("pickBestAgentBead (reversed input) picked %v, want canonical tr-trader-refinery", got)
+	}
+}
+
+// TestPickBestAgentBeadDeterministicWhenBothCanonical covers same-rank
+// duplicates that both conform to the ID convention (e.g. a genuine
+// double-registration race). Resolution still must not error — it falls
+// back to lexicographic order so repeated calls agree.
+func TestPickBestAgentBeadDeterministicWhenBothCanonical(t *testing.T) {
+	candidates := []agentBeadCandidate{
+		candidate("rig-wisp-b", agentSourceRigWisps, "open"),
+		candidate("rig-wisp-a", agentSourceRigWisps, "open"),
+	}
+
+	got := pickBestAgentBead(candidates)
+	if got == nil || got.ID != "rig-wisp-a" {
+		t.Fatalf("pickBestAgentBead picked %v, want lexicographically first rig-wisp-a", got)
 	}
 }
 

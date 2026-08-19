@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -355,7 +356,7 @@ func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrate
 // If owned is true, the convoy is marked with the gt:owned label for caller-managed lifecycle.
 // mergeStrategy is optional: "direct", "mr", or "local" (empty = default mr).
 // Returns the created convoy ID.
-func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch string) (_ string, retErr error) {
+func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch string, refs git.WorkRefs) (_ string, retErr error) {
 	defer func() { telemetry.RecordConvoyCreate(context.Background(), beadID, retErr) }()
 	// Guard against flag-like titles propagating into convoy names (gt-e0kx5)
 	if beads.IsFlagLikeTitle(beadTitle) {
@@ -377,8 +378,12 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseB
 	convoyTitle := fmt.Sprintf("Work: %s", beadTitle)
 	prose := fmt.Sprintf("Auto-created convoy tracking %s", beadID)
 	description := beads.SetConvoyFields(&beads.Issue{Description: prose}, &beads.ConvoyFields{
-		Merge:      mergeStrategy,
-		BaseBranch: baseBranch,
+		Merge:         mergeStrategy,
+		BaseBranch:    baseBranch,
+		BaseRef:       refs.BaseRef,
+		PublishRemote: refs.PublishRemote,
+		PublishRef:    refs.PublishRef,
+		PRTargetRef:   refs.PRTargetRef,
 	})
 
 	createArgs := []string{

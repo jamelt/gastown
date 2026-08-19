@@ -342,7 +342,7 @@ func notifyRefineryMergeReady(workDir, rigName string, result *HandlerResult) {
 	townRoot, _ := workspace.Find(workDir)
 	// Emit file-based event so refinery's await-event unblocks instantly.
 	if townRoot != "" {
-		_, _ = channelevents.EmitToTown(townRoot, "refinery", "MERGE_READY", []string{
+		_, _ = channelevents.EmitToTown(townRoot, channelevents.RefineryChannel(rigName), "MERGE_READY", []string{
 			"source=witness",
 			"rig=" + rigName,
 		})
@@ -617,30 +617,44 @@ func createSwarmWisp(bd *BdCli, workDir string, payload *SwarmStartPayload) (str
 	return created.ID, nil
 }
 
-// findCleanupWisp finds an existing cleanup wisp for a polecat.
-func findCleanupWisp(bd *BdCli, workDir, polecatName string) (string, error) {
+// listWispIDsByLabel bulk-lists open wisp IDs matching the given label
+// selector (e.g. "polecat:nux,state:merge-requested" or
+// "state:merge-requested"). Shared by findCleanupWisp, findAllCleanupWisps,
+// and ReconcileMergeRequestedWisps so the bd list/--status open/--json
+// query and JSON-unmarshal-into-IDs logic exists in exactly one place.
+func listWispIDsByLabel(bd *BdCli, workDir, labelSelector string) ([]string, error) {
 	output, err := bd.Exec(workDir, "list",
-		"--label", fmt.Sprintf("polecat:%s,state:merge-requested", polecatName),
+		"--label", labelSelector,
 		"--status", "open",
 		"--json",
 	)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	// Parse JSON to get the wisp ID
 	if output == "" || output == "[]" || output == "null" {
-		return "", nil
+		return nil, nil
 	}
-
 	var items []struct {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(output), &items); err != nil {
-		return "", fmt.Errorf("parsing cleanup wisp response: %w", err)
+		return nil, fmt.Errorf("parsing wisp list: %w", err)
 	}
-	if len(items) > 0 {
-		return items[0].ID, nil
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids, nil
+}
+
+// findCleanupWisp finds an existing cleanup wisp for a polecat.
+func findCleanupWisp(bd *BdCli, workDir, polecatName string) (string, error) {
+	ids, err := listWispIDsByLabel(bd, workDir, fmt.Sprintf("polecat:%s,state:merge-requested", polecatName))
+	if err != nil {
+		return "", err
+	}
+	if len(ids) > 0 {
+		return ids[0], nil
 	}
 	return "", nil
 }
@@ -888,16 +902,6 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 		return
 	}
 	if exitType != string(ExitTypeCompleted) {
-		decision := slotOpenDecisionForNotify(workDir, townRoot, rigName, polecatName, exitType)
-		if !decision.Reusable {
-			_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_BLOCKED", []string{
-				"source=witness",
-				"rig=" + rigName,
-				"polecat=" + polecatName,
-				"exit=" + exitType,
-				"reason=" + decision.Reason,
-			})
-		}
 		return
 	}
 	if ok, reason := shouldNotifyMayorSlotOpen(workDir, rigName, polecatName); !ok {
@@ -906,13 +910,6 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	}
 	decision := slotOpenDecisionForNotify(workDir, townRoot, rigName, polecatName, exitType)
 	if !decision.Reusable {
-		_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_BLOCKED", []string{
-			"source=witness",
-			"rig=" + rigName,
-			"polecat=" + polecatName,
-			"exit=" + exitType,
-			"reason=" + decision.Reason,
-		})
 		return
 	}
 	if result, err := runSchedulerForSlotOpen(townRoot); err != nil {
@@ -931,14 +928,6 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	} else if status := schedulerStatusAfterSlot(result); status.Capacity.Max > 0 && (status.Paused || status.Capacity.Free <= 0) {
 		return
 	}
-
-	// Emit SLOT_OPEN channel event so Mayor's await-event unblocks instantly.
-	_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_OPEN", []string{
-		"source=witness",
-		"rig=" + rigName,
-		"polecat=" + polecatName,
-		"exit=" + exitType,
-	})
 
 	// Try nudge first — lightweight, no Dolt commit.
 	mayorSession := session.MayorSessionName()
@@ -973,15 +962,6 @@ func schedulerStatusAfterSlot(result slotOpenSchedulerResult) slotOpenSchedulerS
 }
 
 func notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType string, status slotOpenSchedulerStatus) {
-	_, _ = channelevents.EmitToTown(townRoot, "mayor", "SCHEDULER_OPEN", []string{
-		"source=witness",
-		"rig=" + rigName,
-		"polecat=" + polecatName,
-		"exit=" + exitType,
-		"capacity_free=" + strconv.Itoa(status.Capacity.Free),
-		"queued_ready=" + strconv.Itoa(status.QueuedReady),
-	})
-
 	mayorSession := session.MayorSessionName()
 	t := tmux.NewTmux()
 	msg := fmt.Sprintf("SCHEDULER_OPEN: %s/%s completed (exit=%s); scheduler has capacity but no eligible queued beads remain.", rigName, polecatName, exitType)
@@ -1030,6 +1010,10 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	}
 	clonePath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
 	g := git.NewGit(clonePath)
+	// Resolve the remote work is published to. With no per-bead override
+	// producer reachable here, PublishRemote resolves to "origin" (see
+	// git.ResolveWorkRefs) — identical to the previously hardcoded remote.
+	publishRemote := g.ResolveWorkRefs(rig.DefaultBranchForPath(filepath.Join(townRoot, rigName)), git.WorkRefs{}).PublishRemote
 	bd := beads.New(beads.ResolveBeadsDir(workDir))
 	var targetRefs []string
 	if branch, err := g.CurrentBranch(); err == nil {
@@ -1046,7 +1030,7 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		} else {
 			input.GitCheckFailed = true
 		}
-		if preservation, err := g.BranchPreservationStatus(branch, "origin", targetRefs); err == nil {
+		if preservation, err := g.BranchPreservationStatus(branch, publishRemote, targetRefs); err == nil {
 			input.UnpushedCommits = preservation.UnpreservedPatchCount
 		} else {
 			input.GitCheckFailed = true
@@ -1072,13 +1056,14 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		}
 	}
 	input.MQCheckRequired = input.Branch != ""
-	input.HasSubmittableWork = witnessHasSubmittableWork(clonePath, targetRefs)
+	input.HasSubmittableWork = witnessHasSubmittableWork(clonePath, publishRemote, targetRefs)
 	input.AssignedBeadTerminal = witnessIssueTerminal(rigBeads, issueID)
 	if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, input.AssignedBeadTerminal || sourceTerminal || hookTerminal, hookSafe, activeMRSafe, gitSafe) {
 		input.IgnoreCleanupStatus = true
 	}
 	input.MQNotRequired = witnessMQNotRequiredSource(rigBeads, issueID)
-	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
+	// gt-nasl: see manager.go — the terminal-bead skip caused the NEEDS_MQ_SUBMIT loop.
+	if input.MQCheckRequired && input.HasSubmittableWork && !input.MQNotRequired {
 		mr, err := rigBeads.FindMRForBranchAny(input.Branch)
 		if err != nil {
 			input.MQLookupFailed = true
@@ -1219,10 +1204,10 @@ func witnessMQNotRequiredSource(bd *beads.Beads, issueID string) bool {
 	return attachment.NoMerge || attachment.ReviewOnly || strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local")
 }
 
-func witnessHasSubmittableWork(worktreePath string, targetRefs []string) bool {
+func witnessHasSubmittableWork(worktreePath, publishRemote string, targetRefs []string) bool {
 	g := git.NewGit(worktreePath)
 	branch, _ := g.CurrentBranch()
-	status, err := g.BranchTargetStatus(branch, "origin", targetRefs)
+	status, err := g.BranchTargetStatus(branch, publishRemote, targetRefs)
 	return err == nil && status.UnpreservedPatchCount > 0
 }
 
@@ -1407,10 +1392,7 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 	}
 
 	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
+	defaultBranch := rig.DefaultBranchForPath(filepath.Join(townRoot, rigName))
 
 	// Construct polecat path, handling both new and old structures
 	// New structure: polecats/<name>/<rigname>/
@@ -1492,10 +1474,7 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName string) (bool, err
 		return false, fmt.Errorf("finding town root: %v", err)
 	}
 
-	defaultBranch := "main"
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
+	defaultBranch := rig.DefaultBranchForPath(filepath.Join(townRoot, rigName))
 
 	polecatPath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
 	if _, err := os.Stat(polecatPath); os.IsNotExist(err) {
@@ -1557,6 +1536,14 @@ const (
 	// session stayed alive with an open hook and no fresh heartbeat. This catches
 	// the post-submit/pre-exit ghost idle gap from GH#3055.
 	ZombieSubmittedStillRunning ZombieClassification = "submitted-still-running"
+	// ZombieIdleAtPromptWorking: the live session's tmux pane is idle at its
+	// input prompt while the reported state (heartbeat-effective or raw
+	// agent_state) still says "working". Defense-in-depth for the general
+	// invariant violation class fixed in gt-k2ab, independent of any single
+	// code path that might leak a stale "working" state. Flag-only — a single
+	// pane scrape is a point-in-time snapshot, not proof the session is dead.
+	// (gt-xwdn)
+	ZombieIdleAtPromptWorking ZombieClassification = "idle-at-prompt-working"
 )
 
 // ImpliesActiveWork returns true if this classification indicates the polecat
@@ -1567,11 +1554,32 @@ func (c ZombieClassification) ImpliesActiveWork() bool {
 	switch c {
 	case ZombieStuckInDone, ZombieAgentDeadInSession, ZombieBeadClosedStillRunning,
 		ZombieDoneIntentDead, ZombieSessionDeadActive, ZombieAgentSelfReportedStuck,
-		ZombieNeverHeartbeated:
+		ZombieNeverHeartbeated, ZombieIdleAtPromptWorking:
 		return true
 	default:
 		return false
 	}
+}
+
+// newIdleAtPromptWorkingZombie builds the ZombieResult for the "idle at
+// prompt but agent_state=working" invariant violation. See ZombieIdleAtPromptWorking.
+func newIdleAtPromptWorkingZombie(polecatName, agentState, hookBead, reason string) ZombieResult {
+	return ZombieResult{
+		PolecatName:    polecatName,
+		AgentState:     agentState,
+		Classification: ZombieIdleAtPromptWorking,
+		HookBead:       hookBead,
+		WasActive:      true,
+		Action:         fmt.Sprintf("flagged-for-review (%s)", reason),
+	}
+}
+
+// isIdleAtPromptWorkingAnomaly reports whether the raw agent_state field
+// claims "working" while a point-in-time tmux read says the session is idle
+// at its input prompt. Split from the tmux call so the decision logic is
+// unit-testable without a real session.
+func isIdleAtPromptWorkingAnomaly(agentState string, sessionIdle bool) bool {
+	return beads.AgentState(agentState) == AgentStateWorking && sessionIdle
 }
 
 // ZombieResult describes a detected zombie polecat and the action taken.
@@ -1760,7 +1768,18 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 				}
 				return zombie, true
 
-			case polecat.HeartbeatWorking, polecat.HeartbeatIdle:
+			case polecat.HeartbeatWorking:
+				// gt-xwdn: the heartbeat says working, but if the tmux pane
+				// itself shows the agent idle at its input prompt, the two
+				// disagree — flag the invariant violation instead of trusting
+				// the heartbeat blindly.
+				if t.IsIdle(sessionName) {
+					return newIdleAtPromptWorkingZombie(polecatName, snapState, snapHook,
+						"heartbeat=working but session idle at prompt"), true
+				}
+				return ZombieResult{}, false
+
+			case polecat.HeartbeatIdle:
 				// Fresh heartbeat, healthy state — not a zombie.
 				return ZombieResult{}, false
 			}
@@ -1866,6 +1885,16 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 				}, true
 			}
 		}
+	}
+
+	// gt-xwdn: legacy/no-heartbeat fallback for the same invariant checked
+	// above for fresh v2 heartbeats — raw agent_state says "working" but the
+	// tmux pane shows the session idle at its input prompt. Defense-in-depth
+	// against any code path (see gt-k2ab) that leaves a stale "working" state
+	// behind after the agent actually stopped.
+	if isIdleAtPromptWorkingAnomaly(snapState, t.IsIdle(sessionName)) {
+		return newIdleAtPromptWorkingZombie(polecatName, snapState, snapHook,
+			"session idle at prompt but agent_state=working"), true
 	}
 
 	return ZombieResult{}, false
@@ -2085,6 +2114,25 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	return zombie, true
 }
 
+// invalidateZombieCleanupStatus marks a confirmed-dead polecat's persisted
+// cleanup_status "unknown" so gt polecat list / gt scheduler status stop
+// trusting a self-report from before the session died (gt-h6u4). Guarded on
+// the snapshot value the caller already read (snapshotCleanupStatus): the
+// "clean"/"" branch of handleZombieRestart has no wisp-based dedup interlock
+// against two concurrent patrol scans both restarting the same zombie, so an
+// unguarded write here could race a fresh gt done self-report from the
+// session the other scan just restarted and clobber it back to "unknown".
+// The guard makes that write a no-op once cleanup_status has moved on from
+// the snapshot. Best-effort: a write failure must not block the restart that
+// follows. Package-level var so tests can override.
+var invalidateZombieCleanupStatus = _invalidateZombieCleanupStatus
+
+func _invalidateZombieCleanupStatus(townRoot, workDir, rigName, polecatName, snapshotCleanupStatus string) {
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+	_, _ = beads.New(workDir).UpdateAgentCleanupStatusIfMatches(agentBeadID, snapshotCleanupStatus, string(polecat.CleanupUnknown))
+}
+
 // isZombieState returns true if the agent state or hook bead indicates a zombie.
 // Uses typed AgentState to leverage IsActive() metadata rather than hardcoded
 // string comparisons. See gt-tsut.
@@ -2195,6 +2243,14 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	if skipRestart {
 		return
 	}
+
+	// gt-h6u4: invalidate the persisted cleanup_status now, before restart —
+	// the dead session's last self-report may predate whatever state it left
+	// behind, and gt polecat list / gt scheduler status trust that field
+	// between witness patrol sweeps. Safe unconditionally here: the session is
+	// already confirmed dead, so there is no live writer left to race with,
+	// and the new session (started below) hasn't reported anything yet.
+	invalidateZombieCleanupStatus(townRoot, workDir, rigName, polecatName, cleanupStatus)
 
 	// Restart regardless of cleanup state — the worktree is preserved.
 	if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
@@ -2743,8 +2799,8 @@ func getBeadStatus(bd *BdCli, workDir, beadID string) (string, bool) {
 
 // resetAbandonedBead resets a dead polecat's hooked bead so it can be re-dispatched.
 // If the bead is in "hooked" or "in_progress" status, it:
-//  0. Checks if the polecat's work is already on main — if so, closes
-//     the bead instead of resetting (prevents re-dispatch of completed work)
+//  0. Checks for durable successful-submission evidence and verifies the
+//     polecat's work is already on main — only then closes the bead
 //  1. Records the respawn in the witness spawn-count ledger
 //  2. Resets status to open
 //  3. Clears assignee
@@ -2768,15 +2824,27 @@ func resetAbandonedBead(bd *BdCli, workDir, rigName, hookBead, polecatName strin
 	}
 	maxRespawns := config.LoadOperationalConfig(trRoot).GetWitnessConfig().MaxBeadRespawnsV()
 
-	// Guard: if the polecat's commit is already on the default branch,
-	// the work is done — close the bead instead of resetting for re-dispatch.
-	// This prevents the spawn-storm / duplicate-work loop described in #2036.
-	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
-		reason := fmt.Sprintf("Work already on main (verified by witness, polecat %s)", polecatName)
-		if err := bd.Run(workDir, "close", hookBead, "-r", reason); err != nil {
-			fmt.Fprintf(os.Stderr, "witness: failed to close bead %s (work already on main): %v\n", hookBead, err)
+	// A fresh zero-commit branch is an ancestor of main, so ancestry alone is
+	// not completion evidence. Require the successful gt done receipt written
+	// to the polecat bead before Witness is allowed to close source work.
+	prefix := beads.GetPrefixForRig(trRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+	completion := getAgentBeadFields(bd, workDir, agentBeadID)
+	if witnessHasCompletionEvidence(completion, hookBead) {
+		if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+			reason := fmt.Sprintf("Work already on main (verified by %s/witness; polecat=%s; source=%s; mr=%s)", rigName, polecatName, hookBead, completion.MRID)
+			if err := bd.Run(workDir, "close", hookBead, "-r", reason); err != nil {
+				fmt.Fprintf(os.Stderr, "witness: failed to close bead %s (work already on main): %v\n", hookBead, err)
+			}
+			return false
 		}
-		return false
+	}
+
+	// No successful completion receipt: this is an explicit aborted dispatch,
+	// and the source must remain resumable rather than being reported complete.
+	abortReason := fmt.Sprintf("DISPATCH_ABORTED: missing successful completion evidence; actor=%s/witness; polecat=%s; source=%s", rigName, polecatName, hookBead)
+	if err := bd.Run(workDir, "comments", "add", hookBead, abortReason); err != nil {
+		fmt.Fprintf(os.Stderr, "witness: failed to record recovery provenance for %s: %v\n", hookBead, err)
 	}
 
 	// Circuit breaker (clown show #22): if this bead has already been
@@ -2864,6 +2932,20 @@ Please re-dispatch to an available polecat.`,
 	}
 
 	return true
+}
+
+// witnessHasCompletionEvidence reports whether an agent bead contains the
+// durable receipt required for Witness to turn recovery into source closure.
+// COMPLETED alone is intentionally insufficient: gt done can fail after it
+// records intent, and a zero-commit branch can still appear to be on main.
+func witnessHasCompletionEvidence(fields *beads.AgentFields, sourceIssue string) bool {
+	return fields != nil &&
+		fields.ExitType == string(ExitTypeCompleted) &&
+		fields.LastSourceIssue == sourceIssue &&
+		fields.MRID != "" &&
+		!fields.MRFailed &&
+		!fields.PushFailed &&
+		fields.CompletionTime != ""
 }
 
 // OrphanedBeadResult contains a single detected orphaned bead.
@@ -3342,26 +3424,9 @@ func findAnyCleanupWisp(bd *BdCli, workDir, polecatName string) string {
 // Used for dedup after wisp creation to detect races between concurrent patrol
 // cycles (gt-7vs1). If the query fails, returns nil (caller treats as no race).
 func findAllCleanupWisps(bd *BdCli, workDir, polecatName string) []string {
-	output, err := bd.Exec(workDir, "list",
-		"--label", fmt.Sprintf("cleanup,polecat:%s", polecatName),
-		"--status", "open",
-		"--json",
-	)
+	ids, err := listWispIDsByLabel(bd, workDir, fmt.Sprintf("cleanup,polecat:%s", polecatName))
 	if err != nil {
 		return nil
-	}
-	if output == "" || output == "[]" || output == "null" {
-		return nil
-	}
-	var items []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal([]byte(output), &items); err != nil || len(items) == 0 {
-		return nil
-	}
-	ids := make([]string, len(items))
-	for i, item := range items {
-		ids[i] = item.ID
 	}
 	return ids
 }

@@ -2692,6 +2692,27 @@ func EnsureRigIssuePrefix(townRoot, rigName string, serverMode bool, requestedPr
 	if prefix == "" {
 		prefix = issuePrefixForRigInit(townRoot, rigName)
 	}
+
+	// Refuse to initialize a database whose prefix is already claimed by a
+	// different, already-configured rig. Without this, gt dolt init-rig (or
+	// an explicit --prefix) could silently mint a second database issuing
+	// the same bead-id prefix as an existing rig, causing duplicate/
+	// conflicting bead IDs across two databases for the same codebase
+	// (gt-czpm).
+	//
+	// "hq" is the town-level rig and is routed under path "." (see
+	// install.go's AppendRoute calls), not under a path starting with "hq" —
+	// compare against that same identity so a legitimate idempotent re-init
+	// of hq's own database isn't mistaken for a different rig colliding
+	// with it.
+	collisionCheckPath := rigName
+	if rigName == "hq" {
+		collisionCheckPath = "."
+	}
+	if err := beads.CheckPrefixAvailable(townRoot, prefix+"-", collisionCheckPath); err != nil {
+		return fmt.Errorf("refusing to initialize database for rig %q: %w", rigName, err)
+	}
+
 	beadsDir, err := FindOrCreateRigBeadsDir(townRoot, rigName)
 	if err != nil {
 		return err

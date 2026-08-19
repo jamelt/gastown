@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,6 +90,20 @@ func (g *Git) WorkDir() string {
 	return g.workDir
 }
 
+// diagPath returns the best available path for diagnostic messages: workDir
+// when set, falling back to gitDir for bare-repo wrappers constructed via
+// NewGitWithDir(gitDir, "") (e.g. mq_integration.go, rig/manager.go), so a
+// timeout error always names a real path instead of an empty string.
+func (g *Git) diagPath() string {
+	if g.workDir != "" {
+		return g.workDir
+	}
+	if g.gitDir != "" {
+		return g.gitDir
+	}
+	return "(unknown)"
+}
+
 // IsRepo returns true if the workDir is a git repository.
 func (g *Git) IsRepo() bool {
 	_, err := g.run("rev-parse", "--git-dir")
@@ -96,6 +112,21 @@ func (g *Git) IsRepo() bool {
 
 // run executes a git command and returns stdout.
 func (g *Git) run(args ...string) (string, error) {
+	out, err := g.runRaw(args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// runRaw executes a git command like run, but trims only trailing newlines
+// from stdout instead of run()'s blanket strings.TrimSpace. Column-formatted
+// output such as `git status --porcelain` uses a leading space as a
+// meaningful status code (e.g. " M" = modified in the worktree only); a
+// blanket TrimSpace would eat that space on the first line and corrupt
+// parsing. Use this for any command whose output must preserve leading
+// whitespace; use run() otherwise.
+func (g *Git) runRaw(args ...string) (string, error) {
 	if err := g.guardUnsafeTownRootMutation(args); err != nil {
 		return "", err
 	}
@@ -120,13 +151,33 @@ func (g *Git) run(args ...string) (string, error) {
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return strings.TrimRight(stdout.String(), "\r\n"), nil
 }
 
 // pushTimeout is the maximum time a git push is allowed to run before being
 // killed. This prevents gt done from hanging indefinitely when the remote
 // (e.g. GitLab) is unreachable or slow.
 const pushTimeout = 60 * time.Second
+
+// networkTimeout bounds git operations that may block on a remote or on
+// submodule/LFS I/O (fetch, worktree-add from a ref) so a slow or
+// unreachable remote cannot hang the caller forever. Mirrors pushTimeout for
+// the same reason: gt-vyik, where a scheduler dispatch to a rig whose remote
+// was slow/unreachable hung `gt scheduler run` indefinitely with no bound.
+// Overridable via GT_GIT_NETWORK_TIMEOUT_SEC (matching GT_BD_TIMEOUT_SEC) so
+// tests can prove the bound fires without waiting out the real default.
+const networkTimeout = 60 * time.Second
+
+// resolveNetworkTimeout returns the configured network-bound git operation
+// timeout, honoring GT_GIT_NETWORK_TIMEOUT_SEC when set to a positive integer.
+func resolveNetworkTimeout() time.Duration {
+	if v := os.Getenv("GT_GIT_NETWORK_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return networkTimeout
+}
 
 // runWithTimeout executes a git command with a deadline. If the command does
 // not finish within the timeout, the process is killed and an error is returned.
@@ -143,7 +194,7 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	util.SetDetachedProcessGroup(cmd)
+	util.SetProcessGroup(cmd)
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
 	}
@@ -155,7 +206,7 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 	err := cmd.Run()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
+			return "", fmt.Errorf("git %s timed out after %v in %s (may be blocked on I/O or an unresponsive remote)", args[0], timeout, g.diagPath())
 		}
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}
@@ -180,9 +231,9 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	}
 
 	var cmd *exec.Cmd
+	var ctx context.Context
 	var cancel context.CancelFunc
 	if timeout > 0 {
-		var ctx context.Context
 		ctx, cancel = context.WithTimeout(context.Background(), timeout)
 		cmd = exec.CommandContext(ctx, "git", args...)
 	} else {
@@ -191,7 +242,11 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	if cancel != nil {
 		defer cancel()
 	}
-	util.SetDetachedProcessGroup(cmd)
+	if timeout > 0 {
+		util.SetProcessGroup(cmd)
+	} else {
+		util.SetDetachedProcessGroup(cmd)
+	}
 
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
@@ -204,11 +259,14 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		if timeout > 0 {
-			// Check if the context's deadline was exceeded
-			if errors.Is(err, context.DeadlineExceeded) {
-				return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
-			}
+		// Check the context directly rather than errors.Is(err,
+		// context.DeadlineExceeded): util.SetProcessGroup's Cancel hook
+		// SIGKILLs the process group, which is a non-success exit, and per
+		// os/exec's documented Cancel semantics Go does not substitute
+		// ctx.Err() into the returned error for a non-success exit — only
+		// ctx.Err() itself reliably reports the timeout in that case.
+		if ctx != nil && ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("git %s timed out after %v in %s (may be blocked on I/O or an unresponsive remote)", args[0], timeout, g.diagPath())
 		}
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}
@@ -904,20 +962,20 @@ func (g *Git) CheckoutResetBranch(branch, startPoint string) error {
 
 // Fetch fetches from the remote.
 func (g *Git) Fetch(remote string) error {
-	_, err := g.run("fetch", remote)
+	_, err := g.runWithTimeout(resolveNetworkTimeout(), "fetch", remote)
 	return err
 }
 
 // FetchPrune fetches from the remote and prunes stale remote-tracking refs.
 // This removes remote-tracking branches for branches that no longer exist on the remote.
 func (g *Git) FetchPrune(remote string) error {
-	_, err := g.run("fetch", "--prune", remote)
+	_, err := g.runWithTimeout(resolveNetworkTimeout(), "fetch", "--prune", remote)
 	return err
 }
 
 // FetchBranch fetches a specific branch from the remote.
 func (g *Git) FetchBranch(remote, branch string) error {
-	_, err := g.run("fetch", remote, branch)
+	_, err := g.runWithTimeout(resolveNetworkTimeout(), "fetch", remote, branch)
 	return err
 }
 
@@ -926,7 +984,7 @@ func (g *Git) FetchBranch(remote, branch string) error {
 // clones to add a branch that wasn't included in the initial clone.
 func (g *Git) FetchBranchShallow(remote, branch string) error {
 	refspec := branch + ":refs/remotes/" + remote + "/" + branch
-	_, err := g.run("fetch", "--depth", "1", remote, refspec)
+	_, err := g.runWithTimeout(resolveNetworkTimeout(), "fetch", "--depth", "1", remote, refspec)
 	return err
 }
 
@@ -1002,9 +1060,37 @@ func (g *Git) CleanDefaultBranchBaseRef(remote, defaultBranch string) string {
 	fetchURL, fetchErr := g.RemoteURL(remote)
 	upstreamURL, upstreamErr := g.GetUpstreamURL()
 	if fetchErr == nil && upstreamErr == nil && upstreamURL != "" && !sameGitRemoteURL(fetchURL, upstreamURL) {
+		// hq-sz6wa: basing on upstream is correct only for a rig that actually
+		// contributes UP to its parent. If pushes to upstream are disabled, work
+		// can never integrate there, so upstream is not this rig's trunk and
+		// basing on it strands every polecat at whatever the parent last
+		// published. Observed: upstream/main was 157 commits and 27 days behind
+		// origin/main, and polecats spawned today branched from July.
+		//
+		// A remote you cannot push to cannot be your integration target, so it
+		// cannot be your base. Fall through to the fetch remote in that case.
+		if !g.upstreamAcceptsPushes() {
+			return remote + "/" + defaultBranch
+		}
 		return "upstream/" + defaultBranch
 	}
 	return remote + "/" + defaultBranch
+}
+
+// disabledPushURL is the sentinel Gas Town writes to remote.<name>.pushurl to
+// fail closed on pushes to a remote that must never receive them.
+const disabledPushURL = "DISABLED"
+
+// upstreamAcceptsPushes reports whether the upstream remote can actually receive
+// work. Fails OPEN — if the push URL cannot be read we assume upstream is usable
+// and preserve the existing fork-aware behaviour, so this narrows the special
+// case rather than removing it.
+func (g *Git) upstreamAcceptsPushes() bool {
+	pushURL, err := g.GetPushURL("upstream")
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(pushURL), disabledPushURL)
 }
 
 // CleanBaseRef returns a fully qualified base ref for a target branch. Explicit
@@ -1058,6 +1144,12 @@ func pushDestinationBranch(refspec string) string {
 
 func sameGitRemoteURL(a, b string) bool {
 	return normalizeGitRemoteURL(a) == normalizeGitRemoteURL(b)
+}
+
+// SameRemoteURL reports whether two git remote URLs refer to the same
+// repository, ignoring scheme, credentials, and .git suffix differences.
+func SameRemoteURL(a, b string) bool {
+	return sameGitRemoteURL(a, b)
 }
 
 func normalizeGitRemoteURL(raw string) string {
@@ -1206,7 +1298,7 @@ type porcelainStatusEntry struct {
 
 // Status returns the current git status.
 func (g *Git) Status() (*GitStatus, error) {
-	out, err := g.run("status", "--porcelain", "-uall")
+	out, err := g.runRaw("status", "--porcelain", "-uall")
 	if err != nil {
 		return nil, err
 	}
@@ -2264,9 +2356,10 @@ func (g *Git) Cherry(upstream, head string) (string, error) {
 // The new branch is created from the current HEAD.
 // Skips LFS smudge filter during checkout (see WorktreeAddFromRef).
 func (g *Git) WorktreeAdd(path, branch string) error {
-	if _, err := g.runWithEnv(
+	if _, err := g.runWithEnvAndTimeout(
 		[]string{"worktree", "add", "-b", branch, path},
 		[]string{"GIT_LFS_SKIP_SMUDGE=1"},
+		resolveNetworkTimeout(),
 	); err != nil {
 		return err
 	}
@@ -2279,9 +2372,10 @@ func (g *Git) WorktreeAdd(path, branch string) error {
 // over NFS (~72s for 473MB). LFS files appear as pointer files initially;
 // callers can run "git lfs pull" later when LFS content is actually needed.
 func (g *Git) WorktreeAddFromRef(path, branch, startPoint string) error {
-	if _, err := g.runWithEnv(
+	if _, err := g.runWithEnvAndTimeout(
 		[]string{"worktree", "add", "-b", branch, path, startPoint},
 		[]string{"GIT_LFS_SKIP_SMUDGE=1"},
+		resolveNetworkTimeout(),
 	); err != nil {
 		return err
 	}
@@ -2291,9 +2385,10 @@ func (g *Git) WorktreeAddFromRef(path, branch, startPoint string) error {
 // WorktreeAddDetached creates a new worktree at the given path with a detached HEAD.
 // Skips LFS smudge filter during checkout (see WorktreeAddFromRef).
 func (g *Git) WorktreeAddDetached(path, ref string) error {
-	if _, err := g.runWithEnv(
+	if _, err := g.runWithEnvAndTimeout(
 		[]string{"worktree", "add", "--detach", path, ref},
 		[]string{"GIT_LFS_SKIP_SMUDGE=1"},
+		resolveNetworkTimeout(),
 	); err != nil {
 		return err
 	}
@@ -2303,9 +2398,10 @@ func (g *Git) WorktreeAddDetached(path, ref string) error {
 // WorktreeAddExisting creates a new worktree at the given path for an existing branch.
 // Skips LFS smudge filter during checkout (see WorktreeAddFromRef).
 func (g *Git) WorktreeAddExisting(path, branch string) error {
-	if _, err := g.runWithEnv(
+	if _, err := g.runWithEnvAndTimeout(
 		[]string{"worktree", "add", path, branch},
 		[]string{"GIT_LFS_SKIP_SMUDGE=1"},
+		resolveNetworkTimeout(),
 	); err != nil {
 		return err
 	}
@@ -2314,8 +2410,15 @@ func (g *Git) WorktreeAddExisting(path, branch string) error {
 
 // WorktreeAddExistingForce creates a new worktree even if the branch is already checked out elsewhere.
 // This is useful for cross-rig worktrees where multiple clones need to be on main.
+// Skips LFS smudge filter during checkout (see WorktreeAddFromRef) — matches its
+// sibling WorktreeAdd* variants so a bounded timeout doesn't false-positive on an
+// LFS-heavy resume.
 func (g *Git) WorktreeAddExistingForce(path, branch string) error {
-	if _, err := g.run("worktree", "add", "--force", path, branch); err != nil {
+	if _, err := g.runWithEnvAndTimeout(
+		[]string{"worktree", "add", "--force", path, branch},
+		[]string{"GIT_LFS_SKIP_SMUDGE=1"},
+		resolveNetworkTimeout(),
+	); err != nil {
 		return err
 	}
 	return InitSubmodules(path, g.submoduleReferencePath())
@@ -2558,6 +2661,65 @@ type BranchContamination struct {
 	Ahead  int // commits HEAD is ahead of base
 }
 
+// Contamination thresholds shared by every caller that gates on branch
+// divergence (gt done's preflight and the branch-hygiene tap guard). Behind
+// thresholds were established for GH#2220.
+// Ahead thresholds close a gap GH#2220 left open: a branch can carry commits
+// unrelated to its intended diff without ever falling behind. The known
+// contamination cases (PR #4238: ~86 ahead, PR #4257: ~98 ahead) were both
+// well past these Ahead thresholds; a small legitimate replacement/fixup
+// branch is expected to stay in the low single-to-double digits.
+const (
+	ContaminationWarnBehind  = 50
+	ContaminationBlockBehind = 200
+	ContaminationWarnAhead   = 20
+	ContaminationBlockAhead  = 50
+)
+
+// ContaminationSeverity classifies how severe a BranchContamination reading is.
+type ContaminationSeverity int
+
+const (
+	SeverityClean ContaminationSeverity = iota
+	SeverityWarn
+	SeverityBlock
+)
+
+// Evaluate classifies a contamination reading against the shared thresholds,
+// returning the worst severity found across both dimensions (Behind and
+// Ahead) plus a human-readable reason for each dimension that is at or above
+// its warn threshold.
+func (bc BranchContamination) Evaluate() (ContaminationSeverity, []string) {
+	severity := SeverityClean
+	reasons := []string{}
+
+	raise := func(s ContaminationSeverity) {
+		if s > severity {
+			severity = s
+		}
+	}
+
+	switch {
+	case bc.Behind >= ContaminationBlockBehind:
+		raise(SeverityBlock)
+		reasons = append(reasons, fmt.Sprintf("%d commits behind (block threshold: %d)", bc.Behind, ContaminationBlockBehind))
+	case bc.Behind >= ContaminationWarnBehind:
+		raise(SeverityWarn)
+		reasons = append(reasons, fmt.Sprintf("%d commits behind (warn threshold: %d)", bc.Behind, ContaminationWarnBehind))
+	}
+
+	switch {
+	case bc.Ahead >= ContaminationBlockAhead:
+		raise(SeverityBlock)
+		reasons = append(reasons, fmt.Sprintf("%d commits ahead, likely unrelated changes (block threshold: %d)", bc.Ahead, ContaminationBlockAhead))
+	case bc.Ahead >= ContaminationWarnAhead:
+		raise(SeverityWarn)
+		reasons = append(reasons, fmt.Sprintf("%d commits ahead, check for unrelated changes (warn threshold: %d)", bc.Ahead, ContaminationWarnAhead))
+	}
+
+	return severity, reasons
+}
+
 // CheckBranchContamination checks whether the current branch has diverged
 // significantly from a base ref (typically origin/main). Returns the number
 // of commits behind and ahead, letting callers decide severity thresholds.
@@ -2578,6 +2740,29 @@ func (g *Git) CheckBranchContamination(baseRef string) (BranchContamination, err
 	result.Ahead = ahead
 
 	return result, nil
+}
+
+// ResolveContaminationCheck resolves the base ref to compare against (the
+// explicit ref if given, otherwise the fork-aware default), best-effort
+// fetches its remote, and returns the resulting BranchContamination reading.
+//
+// The fetch error (if any) is returned separately rather than swallowed: the
+// tap guard ignores it silently as part of its documented fail-open
+// contract, but a future caller may want to surface it instead.
+func (g *Git) ResolveContaminationCheck(explicitBase string) (base string, contam BranchContamination, fetchErr error, err error) {
+	base = explicitBase
+	if base == "" {
+		base = g.CleanBaseRef("origin", g.RemoteDefaultBranch(), "")
+	}
+
+	remote := RemoteForRef(base)
+	if remote == "" {
+		remote = "origin"
+	}
+	fetchErr = g.Fetch(remote)
+
+	contam, err = g.CheckBranchContamination(base)
+	return base, contam, fetchErr, err
 }
 
 // StashCount returns the number of stashes belonging to the current branch.
@@ -2800,15 +2985,62 @@ func (g *Git) branchPreservationStatus(localBranch, remote string, targets []str
 		}
 	}
 
+	// gt-mv6f: if HEAD is reachable from ANY remote ref, the work is preserved and
+	// nothing is unpushed — full stop. Without this, a polecat whose branch was
+	// merged and then deleted on the remote has no exact-branch evidence, falls
+	// through to @{u}, and is judged against whatever that happens to point at. In
+	// a fork-based town @{u} is often upstream/main (the parent), which will never
+	// contain fork commits, so merged work is reported unpushed forever and the
+	// polecat is pinned at NEEDS_RECOVERY.
+	//
+	// Deliberately gated on includeExactBranch: BranchTargetStatus asks a stricter
+	// question — whether the work reached its target/custody refs — and for that,
+	// merely existing on some remote is NOT sufficient evidence.
+	if includeExactBranch {
+		if onRemote, err := g.headOnAnyRemote(); err == nil && onRemote {
+			result.Preserved = true
+			result.UnpreservedPatchCount = 0
+			result.Evidence = "remote_reachable"
+			if result.ComparisonBase == "" {
+				result.ComparisonBase = "any-remote"
+			}
+			return result, nil
+		}
+	}
+
 	for _, target := range nonEmptyUnique(targets) {
 		if ref, ok := g.resolveComparisonRef(target, remote); ok {
 			candidates = append(candidates, ref)
 		}
 	}
 
+	// gt-mv6f: with no explicit target/custody refs, the remote's default branch IS
+	// the target — "did this work reach the trunk" is the question being asked. Without
+	// this, a polecat whose work was merged and whose branch was then deleted has no
+	// candidate at all, falls through to the @{u}/pushed-branch heuristics, and is
+	// reported as having submittable work forever even though its commits are in main.
+	if len(candidates) == 0 {
+		if def, err := g.run("rev-parse", "--verify", "--quiet", remote+"/HEAD"); err == nil && strings.TrimSpace(def) != "" {
+			hasEvidence = true
+			candidates = append(candidates, remote+"/HEAD")
+		} else if def, err := g.run("rev-parse", "--verify", "--quiet", remote+"/main"); err == nil && strings.TrimSpace(def) != "" {
+			hasEvidence = true
+			candidates = append(candidates, remote+"/main")
+		}
+	}
+
 	if upstream, err := g.run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"); err == nil && strings.TrimSpace(upstream) != "" {
 		upstream = strings.TrimSpace(upstream)
-		if includeExactBranch || !isPolecatSelfUpstream(localBranch, remote, upstream) {
+		// gt-mv6f: only trust @{u} when it belongs to the remote we were asked
+		// about. Callers pass an explicit remote ("origin"); in a fork-based town
+		// a polecat branch often tracks upstream/main (the parent), which will
+		// never contain fork commits. Comparing against it reports merged work as
+		// unpreserved forever, which pins the polecat at NEEDS_RECOVERY /
+		// NEEDS_MQ_SUBMIT. Silently answering about a different remote than the
+		// one requested is wrong regardless of which question is being asked, so
+		// this guard applies to both preservation and target checks.
+		if strings.HasPrefix(upstream, remote+"/") &&
+			(includeExactBranch || !isPolecatSelfUpstream(localBranch, remote, upstream)) {
 			hasEvidence = true
 			candidates = append(candidates, upstream)
 		}
@@ -2856,6 +3088,20 @@ func (g *Git) branchPreservationStatus(localBranch, remote string, targets []str
 	return result, fmt.Errorf("no usable comparison refs")
 }
 
+// headOnAnyRemote reports whether HEAD is reachable from any remote-tracking ref.
+//
+// gt-mv6f: this is the ground truth for "is this work preserved somewhere other
+// than this worktree". Reachability from any remote means the commits exist off
+// this machine, regardless of which branch survived — merged-and-deleted polecat
+// branches are the common case, and for those the exact remote branch is gone.
+func (g *Git) headOnAnyRemote() (bool, error) {
+	out, err := g.run("for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/remotes/")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 func isPolecatSelfUpstream(localBranch, remote, upstream string) bool {
 	return strings.HasPrefix(localBranch, "polecat/") && upstream == remote+"/"+localBranch
 }
@@ -2892,7 +3138,13 @@ func comparisonRefCandidates(ref, remote string) []string {
 		return []string{ref}
 	}
 	if !strings.Contains(ref, "/") && remote != "upstream" {
-		return []string{"upstream/" + ref, remote + "/" + ref, ref}
+		// gt-mv6f: prefer the REQUESTED remote over upstream. A bare target like
+		// "main" means the trunk of the remote the caller named. Resolving it to
+		// upstream/main first is wrong in a fork-based town: the parent never
+		// receives fork commits, so merged work compares as unpreserved forever and
+		// the polecat is pinned at NEEDS_MQ_SUBMIT. upstream is kept as a fallback
+		// for towns where it genuinely is the trunk.
+		return []string{remote + "/" + ref, "upstream/" + ref, ref}
 	}
 	return []string{remote + "/" + ref, ref}
 }
@@ -3041,6 +3293,20 @@ func isBeadsPath(path string) bool {
 	return strings.Contains(path, ".beads/") || strings.Contains(path, ".beads\\")
 }
 
+// AgentRuntimeDirs lists the config/scaffolding directories that coding-agent
+// tools write into a worktree (agent instructions, generated skill/tool
+// config). None of it is bead-scoped work, so it must be excluded from both
+// checkpoint/gt-done "real work" detection (runtimeArtifactRoot below) and
+// the gitignore patterns seeded into fresh worktrees (rig.gasTownIgnorePatterns,
+// which composes this list with its own extras the same way it composes
+// gasTownLocalExcludePatterns with ".beads/").
+//
+// Add a new agent tool's directory here, not by copy-pasting a literal into
+// both call sites separately — that drift is what let checkpoint_dog
+// auto-commit a Codex-CLI polecat's untemplated ".codex"/".agents" scaffolding
+// as if it were real work (gt-gvjc).
+var AgentRuntimeDirs = []string{".claude", ".opencode", ".codex", ".agents"}
+
 // runtimeArtifactRoot returns the path that should be reset when a runtime artifact
 // is staged. Directory artifacts return the directory root so large trees like
 // nested node_modules are unstaged with one pathspec instead of thousands.
@@ -3053,8 +3319,11 @@ func runtimeArtifactRoot(path string) (string, bool) {
 
 	parts := strings.Split(bare, "/")
 	for i, part := range parts {
+		if slices.Contains(AgentRuntimeDirs, part) {
+			return strings.Join(parts[:i+1], "/") + "/", true
+		}
 		switch part {
-		case ".beads", ".claude", ".opencode", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "coverage", "htmlcov":
+		case ".beads", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "coverage", "htmlcov":
 			return strings.Join(parts[:i+1], "/") + "/", true
 		}
 	}
@@ -3325,11 +3594,21 @@ func InitSubmodules(repoPath string, referencePath ...string) error {
 		}
 	}
 
-	cmd := exec.Command("git", args...)
-	util.SetDetachedProcessGroup(cmd)
+	// Bounded like the WorktreeAdd* callers that invoke this (gt-vyik): an
+	// uninitialized submodule can require its own remote fetch, which is
+	// otherwise unbounded.
+	timeout := resolveNetworkTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	util.SetProcessGroup(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("git submodule update timed out after %v in %s (may be blocked on I/O or an unresponsive remote)", timeout, repoPath)
+		}
 		return fmt.Errorf("initializing submodules: %s", strings.TrimSpace(stderr.String()))
 	}
 	return nil

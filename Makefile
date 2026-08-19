@@ -1,9 +1,16 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path clean test test-makefile test-e2e-container check-up-to-date
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag check-install-path warn-if-install-symlink repoint-gastown-symlink clean test test-makefile test-e2e-container check-up-to-date
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
 BUILD_DIR := .
 INSTALL_DIR := $(HOME)/.local/bin
+# GASTOWN_BIN_DIR: some hosts also keep a versioned-symlink layout here
+# (gt -> gt-<commit>) that resolves ahead of INSTALL_DIR in PATH. Left
+# unrepointed, PATH keeps resolving whatever commit it last pointed at and
+# every install/rebuild is silently a no-op (gt-svqh). repoint-gastown-symlink
+# is a no-op when this directory doesn't exist, so hosts without this layout
+# are unaffected.
+GASTOWN_BIN_DIR := $(HOME)/.local/gastown/bin
 E2E_IMAGE ?= gastown-test
 E2E_BUILD_FLAGS ?=
 E2E_RUN_FLAGS ?= --rm
@@ -93,14 +100,41 @@ endif
 
 check-install-path:
 	@resolved=$$(command -v $(BINARY) 2>/dev/null || true); \
-	if [ "$$resolved" != "$(INSTALL_DIR)/$(BINARY)" ]; then \
+	if [ "$$resolved" != "$(INSTALL_DIR)/$(BINARY)" ] && [ "$$resolved" != "$(GASTOWN_BIN_DIR)/$(BINARY)" ]; then \
 		echo "Warning: $(BINARY) resolves to $${resolved:-nothing in PATH}, not $(INSTALL_DIR)/$(BINARY)"; \
 		echo "  Add this before other PATH entries in your shell profile:"; \
 		echo '  export PATH="$(INSTALL_DIR):$$PATH"'; \
 	fi
 
+# warn-if-install-symlink: If the install target is currently a symlink, say so
+# before it gets overwritten. install/safe-install always leave a regular file
+# there; a symlink means something outside this repo (a systemd unit, another
+# script) pointed at that symlink's target expecting it to track the install --
+# it silently stops tracking the moment we overwrite it (gt-5nzu).
+warn-if-install-symlink:
+	@if [ -L $(INSTALL_DIR)/$(BINARY) ]; then \
+		echo "Note: $(INSTALL_DIR)/$(BINARY) was a symlink to $$(readlink $(INSTALL_DIR)/$(BINARY)); replacing it with a regular file. Anything else still pointed at that symlink target (a systemd unit, another script) will now diverge from this install."; \
+	fi
+
+# repoint-gastown-symlink: publish a versioned copy of the just-installed
+# binary into GASTOWN_BIN_DIR and atomically repoint its `gt` symlink at it,
+# so a host using that layout never ends up running a stale commit merely
+# because PATH resolves it ahead of INSTALL_DIR. Publish-then-swap (never
+# rm+recreate) so `gt` always resolves to a working binary, even mid-update.
+repoint-gastown-symlink:
+	@if [ -d $(GASTOWN_BIN_DIR) ]; then \
+		VER=$$($(INSTALL_DIR)/$(BINARY) version --verbose 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@'); \
+		if [ -z "$$VER" ]; then VER=$(COMMIT); fi; \
+		cp $(INSTALL_DIR)/$(BINARY) $(GASTOWN_BIN_DIR)/$(BINARY)-$$VER.tmp; \
+		mv $(GASTOWN_BIN_DIR)/$(BINARY)-$$VER.tmp $(GASTOWN_BIN_DIR)/$(BINARY)-$$VER; \
+		ln -sfn $(GASTOWN_BIN_DIR)/$(BINARY)-$$VER $(GASTOWN_BIN_DIR)/$(BINARY).new; \
+		mv -T $(GASTOWN_BIN_DIR)/$(BINARY).new $(GASTOWN_BIN_DIR)/$(BINARY); \
+		echo "Repointed $(GASTOWN_BIN_DIR)/$(BINARY) -> $(BINARY)-$$VER"; \
+	fi
+
 install: check-up-to-date build
 	@mkdir -p $(INSTALL_DIR)
+	@$(MAKE) --no-print-directory warn-if-install-symlink
 	@rm -f $(INSTALL_DIR)/$(BINARY)
 	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
 	@# Nuke any stale go-install binaries that shadow the canonical location
@@ -111,6 +145,7 @@ install: check-up-to-date build
 		fi; \
 	done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@$(MAKE) --no-print-directory repoint-gastown-symlink
 	@$(MAKE) --no-print-directory check-install-path
 	@# Restart daemon so it picks up the new binary.
 	@# A stale daemon is a recurring source of bugs (wrong session prefixes, etc.)
@@ -132,6 +167,7 @@ install: check-up-to-date build
 # the new binary on their next natural cycle/handoff.
 safe-install: check-up-to-date check-forward-only build
 	@mkdir -p $(INSTALL_DIR)
+	@$(MAKE) --no-print-directory warn-if-install-symlink
 	@# Atomic-ish replace: copy to temp then move (move is atomic on same filesystem)
 	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY).new
 	@mv $(INSTALL_DIR)/$(BINARY).new $(INSTALL_DIR)/$(BINARY)
@@ -143,6 +179,7 @@ safe-install: check-up-to-date check-forward-only build
 		fi; \
 	done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY) (daemon NOT restarted)"
+	@$(MAKE) --no-print-directory repoint-gastown-symlink
 	@$(MAKE) --no-print-directory check-install-path
 	@echo "Sessions will pick up new binary on next cycle."
 
@@ -187,6 +224,9 @@ test-makefile:
 	bash -n plugins/stuck-agent-dog/run.sh
 	bash -n plugins/stuck-agent-dog/run_test.sh
 	bash plugins/stuck-agent-dog/run_test.sh
+	bash -n plugins/rebuild-gt/run.sh
+	bash -n plugins/rebuild-gt/run_test.sh
+	bash plugins/rebuild-gt/run_test.sh
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:

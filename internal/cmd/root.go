@@ -77,6 +77,7 @@ var beadsExemptCommands = map[string]bool{
 	"health":        true, // Health check doesn't require beads
 	"upgrade":       true, // Post-install migration orchestrator
 	"heartbeat":     true, // Heartbeat state update — must be fast and dependency-free
+	"activate":      true, // Runtime recovery must work even when beads is unavailable
 }
 
 // Commands exempt from the town root branch warning.
@@ -93,6 +94,7 @@ var branchCheckExemptCommands = map[string]bool{
 	"git-init":    true, // Git setup
 	"upgrade":     true, // Post-install migration
 	"scheduler":   true, // Daemon hot path; scheduler handles beads internally
+	"activate":    true, // Activation validates its own exact integrated source
 }
 
 // persistentPreRun runs before every command.
@@ -190,8 +192,12 @@ func isRoleCommand(cmd *cobra.Command) bool {
 }
 
 func isDoneCommand(cmd *cobra.Command) bool {
+	// Match the top-level `gt done` command specifically, not any command
+	// merely named "done" — e.g. `gt dog done`, `gt mol step done`, and
+	// `gt wl done` are unrelated commands that happen to share the name and
+	// must not be subjected to gt done's polecat-only identity checks.
 	for c := cmd; c != nil; c = c.Parent() {
-		if c.Name() == "done" {
+		if c == doneCmd {
 			return true
 		}
 	}

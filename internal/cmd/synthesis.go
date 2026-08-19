@@ -230,7 +230,11 @@ func runSynthesisStart(cmd *cobra.Command, args []string) error {
 
 	// Sling to target rig
 	fmt.Printf("  Slinging to %s...\n", targetRig)
-	if err := slingSynthesis(synthesisID, targetRig); err != nil {
+	synthesisAgent := ""
+	if f != nil && f.Synthesis != nil {
+		synthesisAgent = f.Synthesis.Agent
+	}
+	if err := slingSynthesis(synthesisID, targetRig, synthesisAgent); err != nil {
 		return fmt.Errorf("slinging synthesis: %w", err)
 	}
 
@@ -561,6 +565,11 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 		desc.WriteString(synDesc)
 		desc.WriteString("\n\n")
 	}
+	if f != nil && f.Synthesis != nil && f.Synthesis.Agent != "" {
+		current := desc.String()
+		desc.Reset()
+		desc.WriteString(workflowAgentDescription(current, f.Synthesis.Agent))
+	}
 
 	// Add collected leg outputs
 	desc.WriteString("## Leg Outputs\n\n")
@@ -631,8 +640,11 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 }
 
 // slingSynthesis slings the synthesis bead to a rig.
-func slingSynthesis(beadID, targetRig string) error {
+func slingSynthesis(beadID, targetRig, agent string) error {
 	slingArgs := []string{"sling", beadID, targetRig}
+	if agent != "" {
+		slingArgs = append(slingArgs, "--agent", agent)
+	}
 	slingCmd := exec.Command("gt", slingArgs...)
 	slingCmd.Stdout = os.Stdout
 	slingCmd.Stderr = os.Stderr
@@ -728,7 +740,11 @@ func TriggerSynthesisIfReady(convoyID, targetRig string) error {
 		return fmt.Errorf("creating synthesis bead: %w", err)
 	}
 
-	if err := slingSynthesis(synthesisID, targetRig); err != nil {
+	synthesisAgent := ""
+	if f != nil && f.Synthesis != nil {
+		synthesisAgent = f.Synthesis.Agent
+	}
+	if err := slingSynthesis(synthesisID, targetRig, synthesisAgent); err != nil {
 		return fmt.Errorf("slinging synthesis: %w", err)
 	}
 

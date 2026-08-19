@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`gt mail send --from` no longer permits sender impersonation** — `--from`
+  is now restricted to `convoy/<id>` overrides (the convoy notification
+  subsystem's synthetic actor, the only legitimate use in the codebase); any
+  other value is rejected with an error naming the detected identity instead
+  of silently forging the message's `From` (and, transitively, the `bd
+  --actor` audit attribution routed through it) (gt-p7gu).
+- **`gt mail send` no longer trusts a bare `GT_ROLE` override** — the `--from`
+  fix above still left a wider hole: any local caller could run `GT_ROLE=
+  overseer gt mail send ...` (no `--from` needed) and forge the same sender/
+  actor attribution, since `GT_ROLE` is a self-reported env var nothing
+  verified. Sending now cross-checks the `GT_ROLE` claim against the identity
+  of the tmux session the process is actually running in (resolved via
+  kernel process ancestry, not another env var); a mismatch is rejected
+  instead of trusted, unless it's the recognized `convoy/<id>` synthetic
+  actor. Verification is skipped (unchanged prior behavior) when no tmux
+  session can be resolved, e.g. tests, CI, human terminals (gt-9z0y).
+
+- **Scheduler `paused_by` no longer records a bare `"unknown"` actor** — when
+  Gas Town role detection fails, `detectActor()` now falls back to an
+  OS-identity string (`unknown(user@host)`) instead of the uninspectable
+  literal `"unknown"`, leaving a forensic trail for future incident review.
+  Not an authentication mechanism — `$USER`/hostname are as forgeable as
+  `GT_ROLE` (gt-h0ie).
+
 ## [1.2.1] - 2026-06-06
 
 ### Fixed

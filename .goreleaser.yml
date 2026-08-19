@@ -47,7 +47,12 @@ builds:
     main: ./cmd/gt
     binary: gt
     env:
-      - CGO_ENABLED=1
+      # CGO_ENABLED=0: CGO cross-compilation to darwin from the linux runner
+      # requires an osxcross toolchain we don't have; go-icu-regex (CGO-only,
+      # pulled in via beads' embedded Dolt engine) is unreachable in this
+      # build, so beads.OpenBestAvailable falls back to server mode (see
+      # beads_nocgo.go) — the same tradeoff setup-bd already accepts.
+      - CGO_ENABLED=0
     goos:
       - darwin
     goarch:
@@ -63,7 +68,7 @@ builds:
     main: ./cmd/gt
     binary: gt
     env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     goos:
       - darwin
     goarch:
@@ -79,9 +84,10 @@ builds:
     main: ./cmd/gt
     binary: gt
     env:
-      - CGO_ENABLED=1
-      - CC=x86_64-w64-mingw32-gcc
-      - CXX=x86_64-w64-mingw32-g++
+      # CGO_ENABLED=0: the mingw-w64 cross-compiler has no matching ICU4C
+      # dev headers/libs for go-icu-regex (CGO-only, see darwin targets
+      # above for why this is safe to drop).
+      - CGO_ENABLED=0
     goos:
       - windows
     goarch:

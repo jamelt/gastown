@@ -1,6 +1,6 @@
-description = "Per-rig worker monitor patrol loop.\n\nThe Witness is the Pit Boss for your rig. You watch polecats, nudge them toward\ncompletion, verify clean git state before kills, and escalate stuck workers.\n\n**You do NOT do implementation work.** Your job is oversight, not coding.\n\n## Persistent Polecat Model (gt-4ac)\n\nPolecats persist after work completion — sandbox is preserved for reuse:\n\n```\nPolecat lifecycle: spawning → working → mr_submitted → idle (sandbox preserved)\nMR lifecycle:      created → queued → processed → merged (Refinery handles)\n```\n\nOnce a polecat calls gt done and submits an MR, it transitions to idle state.\nThe MR lifecycle continues independently in the Refinery. The polecat is NOT\nnuked — its sandbox is preserved for reuse by future slings.\n\n**CRITICAL**: Do NOT nuke polecats with pending MRs. The refinery needs the\nremote branch to exist to process the merge. Nuking deletes the remote branch\nand orphans the MR. See gt-6a9d.\n\n**Key principle**: Polecat lifecycle is separate from MR lifecycle. Polecats\ngo idle after work, they are NOT destroyed.\n\n## Restart-First Policy (gt-dsgp)\n\nThe witness NEVER nukes polecats automatically. When a polecat is stuck, hung,\nor has a dead agent process, the witness RESTARTS the session instead of nuking.\nThis preserves the polecat's worktree and branch, preventing work loss.\n\n- Dead agent process → restart session\n- Hung session (no output 30+ min) → restart session\n- Stuck in gt done → restart session\n- Done polecat (bead closed) → leave alone (sandbox preserved)\n- Polecat with pending MR → leave alone (refinery handles)\n\nNuking only happens via explicit `gt polecat nuke` command from a human or Mayor.\n\n## Design Philosophy\n\nThis patrol follows Gas Town principles:\n- **Discovery over tracking**: Observe reality each cycle, with minimal agent-bead state for duration tracking\n- **Beads over mail**: survey-workers discovers completion state from agent bead metadata (gt-w0br); inbox-check POLECAT_DONE is fallback only\n- **Persistent by default**: Clean polecats go idle, sandbox preserved for reuse (gt-4ac)\n- **Cleanup wisps for merge tracking**: Created when MR is pending in refinery\n- **Task tool for parallelism**: Subagents inspect polecats, not molecule arms\n- **Swim lane discipline**: Only close wisps YOU created. Wisp lifecycle for non-witness wisps is the reaper Dog's job. Report orphaned foreign wisps — never close them.\n\n## Patrol Shape (Linear)\n\n```\ninbox-check ─► process-cleanups ─► check-refinery ─► survey-workers\n                                                            │\n         ┌──────────────────────────────────────────────────┘\n         ▼\n  check-timer-gates ─► check-swarm ─► patrol-cleanup ─► context-check ─► loop-or-exit\n```\n\nNo dynamic arms. No fanout gates. No persistent nudge counters.\nState is discovered each cycle from reality (tmux, beads, mail).\n\n## Abbreviated Patrol Mode (Idle Effort Tuning)\n\nWhen `await-signal` outputs `EFFORT: reduced`, run an ABBREVIATED patrol.\nThis happens when idle_cycles >= {{idle_effort_threshold}} (no activity detected).\n\nAbbreviated patrol rules:\n- **inbox-check**: Run `gt mail drain` only. Skip individual message processing unless drain reports new HELP messages.\n- **process-cleanups**: Skip entirely (say \"Abbreviated: skipping cleanups\").\n- **check-refinery**: Quick `gt session status` checks only. Skip queue health analysis and deacon health.\n- **survey-workers**: Run `gt patrol scan --notify` only. Skip orphaned bead detection.\n- **check-timer-gates**: Skip entirely.\n- **check-swarm-completion**: Skip entirely.\n- **patrol-cleanup**: Skip entirely.\n- **context-check**: Quick self-assessment only (one sentence).\n- **loop-or-exit**: Normal (await-signal as usual).\n\nWhen `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mode).\n\nThe goal: idle cycles should burn ~10% of the tokens a full patrol uses."
+description = "Per-rig worker monitor patrol loop.\n\nThe Witness is the Pit Boss for your rig. You watch polecats, nudge them toward\ncompletion, verify clean git state before kills, and escalate stuck workers.\n\n**You do NOT do implementation work.** Your job is oversight, not coding.\n\n## Persistent Polecat Model (gt-4ac)\n\nPolecats persist after work completion — sandbox is preserved for reuse:\n\n```\nPolecat lifecycle: spawning → working → mr_submitted → idle (sandbox preserved)\nMR lifecycle:      created → queued → processed → merged (Refinery handles)\n```\n\nOnce a polecat calls gt done and submits an MR, it transitions to idle state.\nThe MR lifecycle continues independently in the Refinery. The polecat is NOT\nnuked — its sandbox is preserved for reuse by future slings.\n\n**CRITICAL**: Do NOT nuke polecats with pending MRs. The refinery needs the\nremote branch to exist to process the merge. Nuking deletes the remote branch\nand orphans the MR. See gt-6a9d.\n\n**Key principle**: Polecat lifecycle is separate from MR lifecycle. Polecats\ngo idle after work, they are NOT destroyed.\n\n## Restart-First Policy (gt-dsgp)\n\nThe witness NEVER nukes polecats automatically. When a polecat is stuck, hung,\nor has a dead agent process, the witness RESTARTS the session instead of nuking.\nThis preserves the polecat's worktree and branch, preventing work loss.\n\n- Dead agent process → restart session\n- Hung session (no output 30+ min) → restart session\n- Stuck in gt done → restart session\n- Done polecat (bead closed) → leave alone (sandbox preserved)\n- Polecat with pending MR → leave alone (refinery handles)\n\nNuking only happens via explicit `gt polecat nuke` command from a human or Mayor.\n\n## Design Philosophy\n\nThis patrol follows Gas Town principles:\n- **Discovery over tracking**: Observe reality each cycle, with minimal agent-bead state for duration tracking\n- **Beads over mail**: survey-workers discovers completion state from agent bead metadata (gt-w0br); inbox-check POLECAT_DONE is fallback only\n- **Persistent by default**: Clean polecats go idle, sandbox preserved for reuse (gt-4ac)\n- **Cleanup wisps for merge tracking**: Created when MR is pending in refinery\n- **Task tool for parallelism**: Subagents inspect polecats, not molecule arms\n- **Swim lane discipline**: Only close wisps YOU created. Wisp lifecycle for non-witness wisps is the reaper Dog's job. Report orphaned foreign wisps — never close them.\n\n## Patrol Shape (Linear)\n\n```\ninbox-check ─► process-cleanups ─► check-refinery ─► survey-workers\n                                                            │\n         ┌──────────────────────────────────────────────────┘\n         ▼\n  check-recovery-sweep ─► check-timer-gates ─► check-swarm ─► patrol-cleanup ─► context-check ─► loop-or-exit\n```\n\nNo dynamic arms. No fanout gates. No persistent nudge counters.\nState is discovered each cycle from reality (tmux, beads, mail).\n\n## Abbreviated Patrol Mode (Idle Effort Tuning)\n\nWhen `await-signal` outputs `EFFORT: reduced`, run an ABBREVIATED patrol.\nThis happens when idle_cycles >= {{idle_effort_threshold}} (no activity detected).\n\nAbbreviated patrol rules:\n- **inbox-check**: Run `gt mail drain` only. Skip individual message processing unless drain reports new HELP messages.\n- **process-cleanups**: Skip entirely (say \"Abbreviated: skipping cleanups\").\n- **check-refinery**: Quick `gt session status` checks only. Skip queue health analysis and deacon health.\n- **survey-workers**: Run `gt patrol scan --notify` only. Skip orphaned bead detection.\n- **check-recovery-sweep**: Run in full, every cycle. Never skip — a silently-dropped sweep is the exact failure mode this step exists to prevent (gt-sl5c).\n- **check-timer-gates**: Skip entirely.\n- **check-swarm-completion**: Skip entirely.\n- **patrol-cleanup**: Skip entirely.\n- **context-check**: Quick self-assessment only (one sentence).\n- **loop-or-exit**: Normal (await-signal as usual).\n\nWhen `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mode).\n\nThe goal: idle cycles should burn ~10% of the tokens a full patrol uses."
 formula = 'mol-witness-patrol'
-version = 14
+version = 16
 
 [vars]
 [vars.wisp_type]
@@ -31,7 +31,7 @@ needs = ['inbox-check']
 title = 'Process pending cleanup wisps'
 
 [[steps]]
-description = "Check refinery, mayor, and deacon health.\n\n**Step 1: Check refinery session**\n```bash\ngt session status <rig>/refinery\n```\n\nIf MRs waiting AND refinery not running:\n```bash\ngt session start <rig>/refinery\ngt mail send <rig>/refinery -s \"PATROL: Wake up\" -m \"Merge requests in queue. Please process.\"\ngt mol step emit-event --channel refinery --type PATROL_WAKE \\\n  --payload source=witness --payload queue_depth=<N>\n```\n\n**Event emission**: Always emit a file event when waking the refinery.\nThis ensures the refinery's `await-event` unblocks instantly instead of\nwaiting for its next timeout cycle.\n\n**Step 2: Queue health analysis**\n\nRun the full queue view to get raw data for every open MR:\n```bash\ngt refinery ready --all --json\n```\n\nThis returns all open MRs with timestamps, assignees, and branch existence data.\nUse your judgment to assess the queue — there are no hardcoded thresholds.\n\n**What to look for:**\n\n- **Stale claimed MRs**: MRs with a non-empty `Assignee` but old `UpdatedAt`.\n  Consider the queue size, time of day, and typical processing time.\n  A claimed MR that hasn't been updated in a while may indicate a stuck refinery.\n\n- **Orphaned branches**: MRs where both `BranchExistsLocal` and `BranchExistsRemote`\n  are false. The source branch may have been deleted while the MR bead is still open.\n  These likely need to be closed or investigated.\n\n- **Queue depth**: A large number of unclaimed MRs may indicate the refinery is down\n  or overwhelmed. Consider waking it or escalating.\n\n**Step 3: Check mayor health**\n\n⚠️ **The mayor may be running via Agent Client Protocol (ACP)** instead of tmux.\nUse the built-in status check which is ACP-aware:\n\n```bash\ngt mayor status --running\n```\n\nIf `false`, the mayor is dead. Escalate via `gt escalate` (severity HIGH):\n```bash\ngt escalate -s HIGH \"Mayor dead - session not found (TMUX or ACP)\"\n```\n\n**Step 4: Check deacon health (gt-p7k: heartbeat-aware dead-check)**\n\n⚠️ **The deacon tmux session is named `hq-deacon`** (NOT `deacon`).\nTown-level agents use the `hq-` prefix.\n\nUse `gt deacon status --json` to check BOTH session existence AND heartbeat freshness.\nDo NOT alert based on session absence alone — the daemon may be restarting the deacon,\nwhich causes a brief window where the session is down but the heartbeat is still fresh.\n\n```bash\ngt deacon status --json\n```\n\nInterpret the JSON output:\n- `running: true` → Deacon is alive. No action needed.\n- `running: false` AND heartbeat `fresh: true` (age < 5 min) → Deacon is likely\n  restarting (daemon killed a stuck session and is respawning). **Do NOT alert.**\n  Log the observation and move on. The daemon handles restart automatically.\n- `running: false` AND heartbeat `stale: true` or `very_stale: true` (age >= 5 min)\n  → Deacon is genuinely down. Escalate to Mayor:\n```bash\ngt mail send mayor/ -s \"ALERT: Deacon session hq-deacon is down\" \\\n  -m \"Deacon tmux session (hq-deacon) not found.\nHeartbeat age: <age_seconds>s (stale).\nDetected during witness patrol.\nPlease restart the deacon.\"\n```\n- `running: false` AND no heartbeat (heartbeat field is null) → Deacon has never\n  started or heartbeat file is missing. Escalate to Mayor.\n\nThis prevents false DEACON_DOWN alerts during brief restart windows.\n\n**Step 5: Escalate if needed**\n\nIf you identify problems, escalate to Deacon with specific MR IDs and context:\n```bash\ngt mail send deacon/ -s \"QUEUE_HEALTH: <summary>\" \\\n  -m \"MR IDs: <ids>\nObservation: <what you found>\nRecommendation: <what should happen>\"\n```"
+description = "Check refinery, mayor, and deacon health.\n\n**Step 1: Check refinery session**\n```bash\ngt session status <rig>/refinery\n```\n\nIf MRs waiting AND refinery not running:\n```bash\ngt session start <rig>/refinery\ngt mail send <rig>/refinery -s \"PATROL: Wake up\" -m \"Merge requests in queue. Please process.\"\ngt mol step emit-event --channel refinery-{{rig}} --type PATROL_WAKE \\\n  --payload source=witness --payload queue_depth=<N>\n```\n\n**Event emission**: Always emit a file event when waking the refinery.\nThis ensures the refinery's `await-event` unblocks instantly instead of\nwaiting for its next timeout cycle.\n\n**Step 2: Queue health analysis**\n\nRun the full queue view to get raw data for every open MR:\n```bash\ngt refinery ready --all --json\n```\n\nThis returns all open MRs with timestamps, assignees, and branch existence data.\nUse your judgment to assess the queue — there are no hardcoded thresholds.\n\n**What to look for:**\n\n- **Stale claimed MRs**: MRs with a non-empty `Assignee` but old `UpdatedAt`.\n  Consider the queue size, time of day, and typical processing time.\n  A claimed MR that hasn't been updated in a while may indicate a stuck refinery.\n\n- **Orphaned branches**: MRs where both `BranchExistsLocal` and `BranchExistsRemote`\n  are false. The source branch may have been deleted while the MR bead is still open.\n  These likely need to be closed or investigated.\n\n- **Queue depth**: A large number of unclaimed MRs may indicate the refinery is down\n  or overwhelmed. Consider waking it or escalating.\n\n**Step 3: Check mayor health**\n\n⚠️ **The mayor may be running via Agent Client Protocol (ACP)** instead of tmux.\nUse the built-in status check which is ACP-aware:\n\n```bash\ngt mayor status --running\n```\n\nIf `false`, the mayor is dead. Escalate via `gt escalate` (severity HIGH):\n```bash\ngt escalate -s HIGH \"Mayor dead - session not found (TMUX or ACP)\"\n```\n\n**Step 4: Check deacon health (gt-p7k: heartbeat-aware dead-check)**\n\n⚠️ **The deacon tmux session is named `hq-deacon`** (NOT `deacon`).\nTown-level agents use the `hq-` prefix.\n\nUse `gt deacon status --json` to check BOTH session existence AND heartbeat freshness.\nDo NOT alert based on session absence alone — the daemon may be restarting the deacon,\nwhich causes a brief window where the session is down but the heartbeat is still fresh.\n\n```bash\ngt deacon status --json\n```\n\nInterpret the JSON output:\n- `running: true` → Deacon is alive. No action needed.\n- `running: false` AND heartbeat `fresh: true` (age < 5 min) → Deacon is likely\n  restarting (daemon killed a stuck session and is respawning). **Do NOT alert.**\n  Log the observation and move on. The daemon handles restart automatically.\n- `running: false` AND heartbeat `stale: true` or `very_stale: true` (age >= 5 min)\n  → Deacon is genuinely down. Escalate to Mayor:\n```bash\ngt mail send mayor/ -s \"ALERT: Deacon session hq-deacon is down\" \\\n  -m \"Deacon tmux session (hq-deacon) not found.\nHeartbeat age: <age_seconds>s (stale).\nDetected during witness patrol.\nPlease restart the deacon.\"\n```\n- `running: false` AND no heartbeat (heartbeat field is null) → Deacon has never\n  started or heartbeat file is missing. Escalate to Mayor.\n\nThis prevents false DEACON_DOWN alerts during brief restart windows.\n\n**Step 5: Escalate if needed**\n\nIf you identify problems, escalate to Deacon with specific MR IDs and context:\n```bash\ngt mail send deacon/ -s \"QUEUE_HEALTH: <summary>\" \\\n  -m \"MR IDs: <ids>\nObservation: <what you found>\nRecommendation: <what should happen>\"\n```"
 id = 'check-refinery'
 needs = ['process-cleanups']
 title = 'Check refinery, mayor, and deacon health'
@@ -43,9 +43,99 @@ needs = ['check-refinery']
 title = 'Inspect all active polecats'
 
 [[steps]]
+description = """
+Sweep every polecat in the rig for recovery/MQ-submit blockers that `gt patrol
+scan` does not surface. This is a CONTROL LOOP, not a one-shot check — run it
+every cycle and re-escalate for as long as the condition persists (gt-sl5c).
+
+**Why this exists**: `gt polecat list` labels can say a polecat is
+SAFE_TO_NUKE/idle/reusable while `gt polecat check-recovery` returns
+NEEDS_MQ_SUBMIT or NEEDS_RECOVERY for the same identity. Trusting the
+optimistic label reports healthy capacity for a rig that cannot actually
+dispatch. Always compute usable capacity from check-recovery verdicts, never
+from list labels.
+
+## Step 1: Enumerate polecats
+
+```bash
+gt polecat list {{rig}} --json
+```
+
+## Step 2: Check recovery status for every polecat
+
+For each polecat name from Step 1:
+```bash
+gt polecat check-recovery {{rig}}/<name> --json --reconcile-cleanup
+```
+Collect the `verdict` field for each (SAFE_TO_NUKE, PENDING_MR, NEEDS_RECOVERY,
+or NEEDS_MQ_SUBMIT), along with `branch` and `issue`.
+
+**Always pass `--reconcile-cleanup` (gt-2ggu)**: `gt polecat list` and the
+scheduler's capacity count read the polecat's *persisted* `cleanup_status`
+bead field directly — they do not recompute it live. That field is written
+once by `gt done` and is never refreshed afterward, so a polecat that later
+becomes genuinely clean (e.g. its branch merges) keeps a stale non-clean
+`cleanup_status` forever unless something writes the correction back.
+`--reconcile-cleanup` is a no-op unless this sweep's own live verdict is
+SAFE_TO_NUKE; when it is, it persists `cleanup_status=clean` on the agent
+bead so `list` and scheduler capacity agree with this sweep's verdict on
+their next read instead of permanently reporting the polecat as
+idle-recovery-needed. Without this flag, a clean SAFE_TO_NUKE polecat is
+diagnosed correctly here every cycle but never becomes reusable.
+
+**Parallelism**: Use Task tool subagents to check multiple polecats concurrently.
+
+## Step 3: Escalate if any verdict is NEEDS_MQ_SUBMIT or NEEDS_RECOVERY
+
+If ANY polecat returns NEEDS_MQ_SUBMIT or NEEDS_RECOVERY, escalate to Mayor
+with the full per-polecat list (not just the first offender) — check-recovery
+already printed the branch and issue, include them verbatim:
+
+```bash
+gt mail send mayor/ -s "RECOVERY_SWEEP: <N> polecat(s) need attention in {{rig}}" \\
+  -m "Verdicts from gt polecat check-recovery sweep:
+<name>: <verdict> branch=<branch> issue=<issue>
+<name>: <verdict> branch=<branch> issue=<issue>
+...
+
+NEEDS_MQ_SUBMIT: work is pushed but never submitted to the merge queue.
+NEEDS_RECOVERY: cleanup predicates require manual recovery.
+
+If a branch name doesn't match the expected polecat/<name>/<issue>+<hash>
+shape, 'gt mq submit' cannot infer the source issue from the branch alone —
+submit with --issue <issue> using the issue id above."
+```
+
+🚨 **Do NOT run `gt mq submit` or otherwise auto-submit from the witness.**
+Submitting is a lifecycle action with merge consequences. Escalate and let
+Mayor decide — the witness's job is to make the condition loud, not fix it.
+
+## Step 4: Re-escalate every cycle while the condition persists
+
+This step runs every patrol cycle, not just once. If the same polecat(s)
+still show NEEDS_MQ_SUBMIT or NEEDS_RECOVERY on the next sweep, send the
+escalation again. Do NOT suppress repeat escalations or track "already
+reported" state — a one-shot report followed by silence is exactly the
+failure mode this step exists to prevent (a rig stalled for ~2 days on a
+single unrepeated report; see gt-sl5c). The condition clearing (verdict
+becomes SAFE_TO_NUKE or PENDING_MR on a later sweep) is what stops the
+escalations, not a report counter.
+
+## Step 5: If all verdicts are healthy
+
+No escalation needed. Any SAFE_TO_NUKE polecat with a stale `cleanup_status`
+was already reconciled to `clean` by Step 2's `--reconcile-cleanup`, so it
+will show up as reusable in `gt polecat list` / `gt scheduler status` on
+their next read. Continue to the next step.
+"""
+id = 'check-recovery-sweep'
+needs = ['survey-workers']
+title = 'Sweep polecats for NEEDS_MQ_SUBMIT / NEEDS_RECOVERY'
+
+[[steps]]
 description = "Check for expired timer gates and escalate as needed.\n\nTimer gates are async wait conditions with a timeout. When the timeout expires,\nthe gate should be escalated to the overseer for human intervention.\n\n**Step 1: Run timer gate check**\n```bash\nbd gate check --type=timer --escalate\n```\n\nThis command:\n1. Finds all open gate issues with await_type=timer\n2. Checks if `now > created_at + timeout`\n3. Escalates expired gates via `gt escalate` (HIGH severity)\n4. Reports summary of gate status\n\n**Step 2: Review output**\n\nIf expired gates were found and escalated:\n- The escalation creates an audit trail bead\n- Overseer will be notified via mail\n- Gate remains open until manually resolved\n\nIf no expired gates:\n- Continue patrol normally\n\n**Note**: Timer gates do NOT auto-close on expiration. They escalate.\nThis ensures human oversight of timeout conditions.\n\n**Parallelism**: This is a single command, no parallel execution needed."
 id = 'check-timer-gates'
-needs = ['survey-workers']
+needs = ['check-recovery-sweep']
 title = 'Check timer gates for expiration'
 
 [[steps]]
@@ -117,6 +207,8 @@ After await-signal returns, check the EFFORT directive in the output:
 - process-cleanups: SKIP
 - check-refinery: Quick session status checks only
 - survey-workers: `gt patrol scan --notify` only, skip orphan bead detection
+- check-recovery-sweep: RUN (never skip — a silently-dropped sweep is the exact
+  failure mode this step exists to prevent, gt-sl5c)
 - check-timer-gates: SKIP
 - check-swarm-completion: SKIP
 - patrol-cleanup: SKIP

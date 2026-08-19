@@ -1,23 +1,45 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 const polecatAdmissionReservationTTL = 30 * time.Minute
+
+// schedulerInventoryTimeout bounds the aggregate time a polecat capacity
+// snapshot may spend querying rig databases. Each bd subprocess call is
+// already capped individually (see beads.resolveBdSubprocessTimeout), but
+// that alone doesn't bound a loop over many rig databases: several slow
+// rigs can still sum well past what's tolerable while the caller holds the
+// scheduler dispatch lock (gt-5p9). Override via
+// GT_SCHEDULER_INVENTORY_TIMEOUT_SEC for testing or unusual town sizes.
+const schedulerInventoryTimeout = 45 * time.Second
+
+func resolveSchedulerInventoryTimeout() time.Duration {
+	if v := os.Getenv("GT_SCHEDULER_INVENTORY_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return schedulerInventoryTimeout
+}
 
 var acquirePolecatAdmissionFn = acquirePolecatAdmission
 
@@ -114,7 +136,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 		return nil, polecatCapacitySnapshot{}, err
 	}
 	if max <= 0 {
-		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, nil
+		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}, nil
 	}
 
 	lock, err := acquirePolecatAdmissionLock(townRoot)
@@ -179,7 +201,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 	if err != nil {
 		return polecatCapacitySnapshot{}, err
 	}
-	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}
+	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}
 	if max <= 0 {
 		return snapshot, nil
 	}
@@ -196,6 +218,15 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		return snapshot, fmt.Errorf("listing tmux sessions for polecat capacity: %w", err)
 	}
 	sessions := newPolecatSessionSet(sessionNames)
+
+	// Bound the aggregate time spent below querying rig databases. Every
+	// bd call under this context inherits whatever's left of this deadline
+	// (in addition to its own per-call timeout), so a stalled or slow rig
+	// database can't hold the caller's lock indefinitely just because each
+	// individual bd call eventually times out on its own (gt-5p9).
+	ctx, cancel := context.WithTimeout(context.Background(), resolveSchedulerInventoryTimeout())
+	defer cancel()
+
 	for rigName := range rigsConfig.Rigs {
 		rigPath := filepath.Join(townRoot, rigName)
 		if _, err := os.Stat(rigPath); err != nil {
@@ -212,7 +243,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 			continue
 		}
 
-		rigBeads := beads.New(rigPath)
+		rigBeads := beads.New(rigPath).WithContext(ctx)
 		agents, err := rigBeads.ListAgentBeads()
 		if err != nil {
 			return snapshot, fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
@@ -221,12 +252,23 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		if err != nil {
 			return snapshot, fmt.Errorf("listing active polecat work for %s capacity: %w", rigName, err)
 		}
+		inventoryManager := polecat.NewManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), tmuxClient)
 		prefix := beads.GetPrefixForRig(townRoot, rigName)
+		fieldsByName := make(map[string]*beads.AgentFields, len(polecatNames))
 		for _, name := range polecatNames {
 			agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, name)
-			issue := agents[agentID]
-			fields := parsePolecatAgentFields(issue)
-			applyAgentFieldsToCapacitySnapshot(&snapshot, rigName, name, fields, activeWork[name], sessions)
+			fieldsByName[name] = parsePolecatAgentFields(agents[agentID])
+		}
+		mqIndex := buildPolecatMQIndex(rigBeads, fieldsByName)
+		for _, name := range polecatNames {
+			fields := fieldsByName[name]
+			workEvidence := assessPolecatAssignedIssueWork(activeWork[name])
+			item := buildPolecatInventoryItemFromEvidence(rigName, name, fields, workEvidence, sessions, mqIndex)
+			if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" && !item.SessionRunning && !workEvidence.BlocksCleanup {
+				assessment := inventoryManager.WorkstateDispositionForPolecat(name, item.State, item.Issue)
+				item = applyLegacyCleanupCompatibility(item, fields, workEvidence, assessment)
+			}
+			applyWorkstateDispositionToCapacitySnapshot(&snapshot, item.State, item.Disposition)
 		}
 	}
 
@@ -262,8 +304,8 @@ func listPolecatDirectoryNames(rigPath string) ([]string, error) {
 	return names, nil
 }
 
-func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) {
-	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions)
+func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet, mq polecatMQIndex) {
+	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions, mq)
 	applyWorkstateDispositionToCapacitySnapshot(snapshot, item.State, item.Disposition)
 }
 

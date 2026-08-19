@@ -19,6 +19,8 @@ type AttachmentFields struct {
 	AttachedArgs     string   // Natural language args passed via gt sling --args (no-tmux mode)
 	AttachedVars     []string // Formula variables passed via gt sling --var
 	DispatchedBy     string   // Agent ID that dispatched this work (for completion notification)
+	DispatchContext  string   // Durable scheduler context/receipt ID for this assignment
+	DispatchActor    string   // Agent that executed the dispatch transition
 	NoMerge          bool     // If true, gt done skips merge queue (for upstream PRs/human review)
 	ReviewOnly       bool     // If true, assignee must evaluate and report back — no merge/commit/push
 	Mode             string   // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
@@ -76,6 +78,12 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 			hasFields = true
 		case "dispatched_by", "dispatched-by", "dispatchedby":
 			fields.DispatchedBy = value
+			hasFields = true
+		case "dispatch_context", "dispatch-context", "dispatchcontext":
+			fields.DispatchContext = value
+			hasFields = true
+		case "dispatch_actor", "dispatch-actor", "dispatchactor":
+			fields.DispatchActor = value
 			hasFields = true
 		case "no_merge", "no-merge", "nomerge":
 			fields.NoMerge = strings.ToLower(value) == "true"
@@ -137,6 +145,12 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 	if fields.DispatchedBy != "" {
 		lines = append(lines, "dispatched_by: "+fields.DispatchedBy)
 	}
+	if fields.DispatchContext != "" {
+		lines = append(lines, "dispatch_context: "+fields.DispatchContext)
+	}
+	if fields.DispatchActor != "" {
+		lines = append(lines, "dispatch_actor: "+fields.DispatchActor)
+	}
 	if fields.NoMerge {
 		lines = append(lines, "no_merge: true")
 	}
@@ -188,6 +202,12 @@ func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
 		"dispatched_by":     true,
 		"dispatched-by":     true,
 		"dispatchedby":      true,
+		"dispatch_context":  true,
+		"dispatch-context":  true,
+		"dispatchcontext":   true,
+		"dispatch_actor":    true,
+		"dispatch-actor":    true,
+		"dispatchactor":     true,
 		"no_merge":          true,
 		"no-merge":          true,
 		"nomerge":           true,
@@ -266,6 +286,10 @@ type ConvoyFields struct {
 	Molecule             string // Associated molecule/swarm ID
 	Merge                string // Merge strategy
 	BaseBranch           string // Target branch for polecats (e.g., "feat/extraction-review")
+	BaseRef              string // Explicit base ref override (e.g., "upstream/main"); resolved via git.ResolveWorkRefs when empty
+	PublishRemote        string // Remote polecats push work to; resolved via git.ResolveWorkRefs when empty
+	PublishRef           string // Branch name pushed to PublishRemote, if different from the local branch name
+	PRTargetRef          string // "<remote>/<branch>" a PR/MR from this convoy's work ultimately merges into
 	Watchers             string // Comma-separated mail notification addresses (added via gt convoy watch)
 	NudgeWatchers        string // Comma-separated nudge notification addresses (added via gt convoy watch --nudge)
 	CompletionNotifiedAt string // RFC3339 timestamp when completion notifications were claimed/sent
@@ -313,6 +337,18 @@ func ParseConvoyFields(issue *Issue) *ConvoyFields {
 			hasFields = true
 		case "base_branch", "base-branch", "basebranch":
 			fields.BaseBranch = value
+			hasFields = true
+		case "base_ref", "base-ref", "baseref":
+			fields.BaseRef = value
+			hasFields = true
+		case "publish_remote", "publish-remote", "publishremote":
+			fields.PublishRemote = value
+			hasFields = true
+		case "publish_ref", "publish-ref", "publishref":
+			fields.PublishRef = value
+			hasFields = true
+		case "pr_target_ref", "pr-target-ref", "prtargetref":
+			fields.PRTargetRef = value
 			hasFields = true
 		case "watchers":
 			fields.Watchers = value
@@ -474,6 +510,18 @@ func FormatConvoyFields(fields *ConvoyFields) string {
 	if fields.BaseBranch != "" {
 		lines = append(lines, "base_branch: "+fields.BaseBranch)
 	}
+	if fields.BaseRef != "" {
+		lines = append(lines, "base_ref: "+fields.BaseRef)
+	}
+	if fields.PublishRemote != "" {
+		lines = append(lines, "publish_remote: "+fields.PublishRemote)
+	}
+	if fields.PublishRef != "" {
+		lines = append(lines, "publish_ref: "+fields.PublishRef)
+	}
+	if fields.PRTargetRef != "" {
+		lines = append(lines, "pr_target_ref: "+fields.PRTargetRef)
+	}
 	if fields.Watchers != "" {
 		lines = append(lines, "Watchers: "+fields.Watchers)
 	}
@@ -561,6 +609,18 @@ func SetConvoyFields(issue *Issue, fields *ConvoyFields) string {
 		"base_branch":            true,
 		"base-branch":            true,
 		"basebranch":             true,
+		"base_ref":               true,
+		"base-ref":               true,
+		"baseref":                true,
+		"publish_remote":         true,
+		"publish-remote":         true,
+		"publishremote":          true,
+		"publish_ref":            true,
+		"publish-ref":            true,
+		"publishref":             true,
+		"pr_target_ref":          true,
+		"pr-target-ref":          true,
+		"prtargetref":            true,
 		"watchers":               true,
 		"nudge_watchers":         true,
 		"nudge-watchers":         true,
@@ -620,6 +680,8 @@ func SetConvoyFields(issue *Issue, fields *ConvoyFields) string {
 type MRFields struct {
 	Branch      string // Source branch name (e.g., "polecat/Nux/gt-xyz")
 	Target      string // Target branch (e.g., "main" or "integration/gt-epic")
+	Remote      string // Remote Target lives on, e.g. "origin"; empty means "origin" (legacy default)
+	TargetRepo  string // "owner/repo" the MR/PR ultimately merges into, when it differs from the rig's own remote (fork PR flow)
 	SourceIssue string // The work item being merged (e.g., "gt-xyz")
 	Worker      string // Who did the work
 	Rig         string // Which rig
@@ -627,7 +689,7 @@ type MRFields struct {
 	PRURL       string // Recorded pull request URL, if one exists for this MR
 	PRNumber    int    // Recorded pull request number, scoped to the target repo
 	MergeCommit string // SHA of merge commit (set on close)
-	CloseReason string // Reason for closing: merged, rejected, conflict, superseded
+	CloseReason string // Reason for closing: merged, rejected, conflict, superseded, no-op
 	AgentBead   string // Agent bead ID that created this MR (for traceability)
 
 	// Conflict resolution fields (for priority scoring)
@@ -683,6 +745,12 @@ func ParseMRFields(issue *Issue) *MRFields {
 			hasFields = true
 		case "target":
 			fields.Target = value
+			hasFields = true
+		case "remote":
+			fields.Remote = value
+			hasFields = true
+		case "target_repo", "target-repo", "targetrepo":
+			fields.TargetRepo = value
 			hasFields = true
 		case "source_issue", "source-issue", "sourceissue":
 			fields.SourceIssue = value
@@ -770,6 +838,12 @@ func FormatMRFields(fields *MRFields) string {
 	if fields.Target != "" {
 		lines = append(lines, "target: "+fields.Target)
 	}
+	if fields.Remote != "" {
+		lines = append(lines, "remote: "+fields.Remote)
+	}
+	if fields.TargetRepo != "" {
+		lines = append(lines, "target_repo: "+fields.TargetRepo)
+	}
 	if fields.SourceIssue != "" {
 		lines = append(lines, "source_issue: "+fields.SourceIssue)
 	}
@@ -837,6 +911,10 @@ func SetMRFields(issue *Issue, fields *MRFields) string {
 	mrKeys := map[string]bool{
 		"branch":            true,
 		"target":            true,
+		"remote":            true,
+		"target_repo":       true,
+		"target-repo":       true,
+		"targetrepo":        true,
 		"source_issue":      true,
 		"source-issue":      true,
 		"sourceissue":       true,

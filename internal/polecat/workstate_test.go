@@ -19,6 +19,24 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "cleanup-has_unpushed", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed"},
 		},
 		{
+			// hq-f2n8c: this case previously asserted NEEDS_RECOVERY on a missing
+			// cleanup_status alone. That was the town-wide capacity leak: the value
+			// is only obtainable through a repair path that this same predicate
+			// refused to run, so a polecat that acquired it could never shed it and
+			// whole rigs settled at reusable=0. Missing metadata with a successful,
+			// clean git check is now reusable — the git predicates carry the safety
+			// argument. The GitCheckFailed case immediately below still fails closed,
+			// which is where the real fail-closed guarantee lives.
+			name: "missing legacy cleanup with clean git defers to git and is reusable",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: ""},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, CountsTowardCapacity: false, ReuseStatus: "idle-clean"},
+		},
+		{
+			name: "missing cleanup plus git uncertainty consumes capacity",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: "", GitCheckFailed: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "cleanup-unknown", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"cleanup_status=<missing>", "git_state=unknown"}},
+		},
+		{
 			name: "protected active work fails closed without capacity",
 			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, ActiveWorkBlocker: "assigned_work=gt-blocked status=blocked"},
 			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "active-work", NeedsRecovery: true, CountsTowardCapacity: false, ReuseStatus: "idle-recovery-needed"},
@@ -122,6 +140,11 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 			name: "stalled active work preserves blocker",
 			in:   WorkstateInput{State: StateStalled, CleanupStatus: CleanupClean, ActiveWorkBlocker: "assigned_work=gt-open status=open", ActiveWorkCountsTowardCapacity: true},
 			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "not-idle", NeedsRecovery: true, CountsTowardCapacity: true, Blockers: []string{"assigned_work=gt-open status=open"}},
+		},
+		{
+			name: "review-needed without active work still names its predicate",
+			in:   WorkstateInput{State: StateReviewNeeded, CleanupStatus: CleanupClean},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "not-idle", NeedsRecovery: true, CountsTowardCapacity: true, Blockers: []string{"state=review-needed"}},
 		},
 	}
 

@@ -28,16 +28,16 @@ Creates a JSON file at ~/gt/events/<channel>/<timestamp>.event:
   {"type": "...", "channel": "...", "timestamp": "...", "payload": {...}}
 
 EXAMPLES:
-  # Emit a MERGE_READY event for the refinery
-  gt mol step emit-event --channel refinery --type MERGE_READY \
+  # Emit a MERGE_READY event for a rig's refinery (channels are per-rig — see gt-v5d4)
+  gt mol step emit-event --channel refinery-gastown --type MERGE_READY \
     --payload polecat=nux --payload branch=polecat/nux/gt-iw7m
 
   # Emit a PATROL_WAKE event
-  gt mol step emit-event --channel refinery --type PATROL_WAKE \
+  gt mol step emit-event --channel refinery-gastown --type PATROL_WAKE \
     --payload source=witness --payload queue_depth=3
 
   # Emit an MQ_SUBMIT event
-  gt mol step emit-event --channel refinery --type MQ_SUBMIT \
+  gt mol step emit-event --channel refinery-gastown --type MQ_SUBMIT \
     --payload branch=feat/new-feature --payload mr_id=bd-42`,
 	RunE: runMoleculeEmitEvent,
 }

@@ -93,14 +93,14 @@ exit 0
 		t.Fatalf("read mail log: %v", err)
 	}
 	log := string(data)
-	if got := strings.Count(log, "mail send"); got != 2 {
-		t.Fatalf("mail sends = %d, want 2; log:\n%s", got, string(data))
+	if got := strings.Count(log, "mail send"); got != 1 {
+		t.Fatalf("mail sends = %d, want 1; log:\n%s", got, string(data))
 	}
-	if got := strings.Count(log, "--from convoy/hq-cv-dup"); got != 2 {
-		t.Fatalf("mail sends with convoy sender = %d, want 2; log:\n%s", got, log)
+	if got := strings.Count(log, "--from convoy/hq-cv-dup"); got != 1 {
+		t.Fatalf("mail sends with convoy sender = %d, want 1; log:\n%s", got, log)
 	}
-	if got := strings.Count(log, "--no-notify"); got != 2 {
-		t.Fatalf("mail sends with --no-notify = %d, want 2; log:\n%s", got, log)
+	if got := strings.Count(log, "--no-notify"); got != 1 {
+		t.Fatalf("mail sends with --no-notify = %d, want 1; log:\n%s", got, log)
 	}
 	nudgeData, err := os.ReadFile(nudgeLogPath)
 	if err != nil {
@@ -202,12 +202,17 @@ exit 0
 		t.Fatalf("read order log: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
+	// The convoy-completion claim (update + its JSONL export mirror) is made
+	// atomically BEFORE any notification is sent — see
+	// internal/convoy.ClaimCompletionNotification. This ordering, not the
+	// mail-then-update ordering used before that fix, is what makes the
+	// claim safe under concurrent callers (CLI, deacon sweep, refinery).
 	want := strings.Join([]string{
 		"close",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-		"mail",
 		"update",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
+		"mail",
 	}, "\n")
 	if got != want {
 		t.Fatalf("operation order mismatch:\n got:\n%s\nwant:\n%s", got, want)
@@ -279,10 +284,14 @@ exit 0
 		t.Fatalf("read order log: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
+	// The claim (update + JSONL export mirror) happens before mail is sent;
+	// the mirror export intentionally fails in this test and that failure
+	// must not block the claim or the notification — see claimUnlocked in
+	// internal/convoy/completion.go.
 	want := strings.Join([]string{
-		"mail",
 		"update",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
+		"mail",
 	}, "\n")
 	if got != want {
 		t.Fatalf("operation order mismatch:\n got:\n%s\nwant:\n%s", got, want)
@@ -379,9 +388,9 @@ exit 0
 		"close",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-		"mail",
 		"update",
 		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
+		"mail",
 	}, "\n")
 	if got != want {
 		t.Fatalf("operation order mismatch:\n got:\n%s\nwant:\n%s", got, want)

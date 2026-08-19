@@ -36,26 +36,84 @@ type PatrolConfig struct {
 // Remaining stale beads are cleaned by burnPreviousPatrolWisps at cycle end.
 const maxStalePurgePerRun = 5
 
+// normalizePatrolAssignee returns the canonical assignee identity for a role.
+// Town-level agents (deacon) get a trailing slash to match the format used
+// by buildAgentIdentity() and resolveSelfTarget(). Rig-level agents already
+// include the rig prefix (e.g. "gastown/witness").
+func normalizePatrolAssignee(cfg PatrolConfig) string {
+	a := cfg.Assignee
+	if a == "deacon" {
+		return "deacon/"
+	}
+	if a == "mayor" {
+		return "mayor/"
+	}
+	return a
+}
+
+// resolvePatrolViaHandoff attempts to find the active patrol via the agent's
+// handoff bead attached_molecule field — the same authoritative source used
+// by gt hook and gt prime. Returns the patrol bead or nil.
+func resolvePatrolViaHandoff(b *beads.Beads, cfg PatrolConfig) *beads.Issue {
+	role := extractRoleFromIdentity(cfg.Assignee)
+	handoff, err := b.FindHandoffBead(role)
+	if err != nil || handoff == nil {
+		return nil
+	}
+	attachment := beads.ParseAttachmentFields(handoff)
+	if attachment == nil || attachment.AttachedMolecule == "" {
+		return nil
+	}
+	molID := attachment.AttachedMolecule
+	bead, showErr := b.Show(molID)
+	if showErr != nil || bead == nil {
+		return nil
+	}
+	if !strings.HasPrefix(bead.Title, cfg.PatrolMolName) {
+		return nil
+	}
+	// Verify it's actually active (has open children or is freshly created).
+	hasOpen, checkErr := checkHasOpenChildren(b, molID)
+	if checkErr != nil || !hasOpen {
+		return nil
+	}
+	return bead
+}
+
 // findActivePatrol finds an active patrol molecule for the role.
 // Returns the patrol ID, display line, and whether one was found.
 // Returns an error if discovery fails (e.g. transient bd failure),
 // so callers can distinguish "no patrol" from "discovery failed"
 // and avoid auto-spawning duplicates.
 //
-// Patrol molecules are intentionally hooked to the agent (hooked status).
-// This function looks up hooked patrols and distinguishes active ones
-// (with open/in_progress children) from stale ones (all children closed,
-// e.g. after a squash that didn't close the root). Stale patrols are
-// cleaned up incrementally (up to maxStalePurgePerRun per call); any
-// remaining stale beads are cleaned by burnPreviousPatrolWisps at cycle end.
+// Resolution order (convergent, single source of truth):
+//  1. Agent's handoff bead attached_molecule field — the same authoritative
+//     source used by gt hook and gt prime. This eliminates the heuristic
+//     scan that can pick the wrong (stale) patrol when children are deleted
+//     by compact/gc operations.
+//  2. Fallback: scan all hooked patrols with the checkHasOpenChildren
+//     heuristic. This handles old patrols created before the handoff bead
+//     convention was established, and patrols in rig-level beads dirs.
+//
+// Stale patrols are cleaned up incrementally (up to maxStalePurgePerRun per
+// call); any remaining stale beads are cleaned by burnPreviousPatrolWisps
+// at cycle end.
 func findActivePatrol(cfg PatrolConfig) (patrolID, patrolLine string, found bool, err error) {
 	b := cfg.Beads
 	if b == nil {
 		b = beads.New(cfg.BeadsDir)
 	}
 
-	// Find active patrol beads for this agent across durable issues and wisps.
-	hookedBeads, listErr := listAssignedActiveWorkAcrossStatuses(b, cfg.Assignee)
+	// Authoritative resolution via handoff bead (same source as gt hook/gt prime).
+	if active := resolvePatrolViaHandoff(b, cfg); active != nil {
+		return active.ID, formatBeadLine(active), true, nil
+	}
+
+	// Normalize assignee for scan consistency.
+	assignee := normalizePatrolAssignee(cfg)
+
+	// Fallback: scan hooked patrols.
+	hookedBeads, listErr := listAssignedActiveWorkAcrossStatuses(b, assignee)
 	if listErr != nil {
 		return "", "", false, fmt.Errorf("listing active patrol work: %w", listErr)
 	}
@@ -160,7 +218,7 @@ func burnPreviousPatrolWisps(cfg PatrolConfig) {
 	}
 
 	// Find all active patrol beads for this agent across durable issues and wisps.
-	hookedBeads, err := listAssignedActiveWorkAcrossStatuses(b, cfg.Assignee)
+	hookedBeads, err := listAssignedActiveWorkAcrossStatuses(b, normalizePatrolAssignee(cfg))
 	if err != nil {
 		style.PrintWarning("burn: could not list active patrol work: %v", err)
 		return

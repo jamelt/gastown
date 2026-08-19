@@ -134,12 +134,179 @@ func TestBuildPolecatInventoryItem(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			item := buildPolecatInventoryItem("gastown", tt.polecatName, tt.fields, tt.activeWork, sessions)
+			item := buildPolecatInventoryItem("gastown", tt.polecatName, tt.fields, tt.activeWork, sessions, polecatMQIndex{})
 			if item.State != tt.wantState || item.Issue != tt.wantIssue || item.Disposition.Verdict != tt.wantVerdict || item.Disposition.Reusable != tt.wantReusable || item.Disposition.NeedsRecovery != tt.wantRecovery || item.Disposition.CountsTowardCapacity != tt.wantCapacity {
 				t.Fatalf("item = %+v disposition=%+v", item, item.Disposition)
 			}
 		})
 	}
+}
+
+// TestBuildPolecatInventoryItemMQIndex proves gt-h6u4's fix: a polecat with an
+// unsubmitted branch is no longer reported reusable by list/capacity just
+// because cleanup_status is clean. Before the fix, buildPolecatInventoryItem
+// never set WorkstateInput.MQCheckRequired, so NEEDS_MQ_SUBMIT was
+// structurally unreachable regardless of the branch/MR state below.
+func TestBuildPolecatInventoryItemMQIndex(t *testing.T) {
+	setupPolecatTestRegistry(t)
+	sessions := polecatSessionSet{}
+	branch := "polecat/synth/gt-work+abc123"
+
+	t.Run("unsubmitted branch is not reusable", func(t *testing.T) {
+		fields := &beads.AgentFields{
+			AgentState:    string(beads.AgentStateIdle),
+			CleanupStatus: string(polecat.CleanupClean),
+			Branch:        branch,
+		}
+		mq := polecatMQIndex{mrByBranch: map[string]*beads.Issue{}, sourceIssues: map[string]*beads.Issue{}}
+
+		item := buildPolecatInventoryItem("gastown", "synth", fields, nil, sessions, mq)
+
+		if item.Disposition.Reusable {
+			t.Fatalf("disposition = %+v, want Reusable=false for unsubmitted branch", item.Disposition)
+		}
+		if item.Disposition.Verdict != polecat.WorkstateVerdictNeedsMQSubmit {
+			t.Fatalf("verdict = %q, want %q", item.Disposition.Verdict, polecat.WorkstateVerdictNeedsMQSubmit)
+		}
+	})
+
+	t.Run("submitted branch remains reusable", func(t *testing.T) {
+		fields := &beads.AgentFields{
+			AgentState:    string(beads.AgentStateIdle),
+			CleanupStatus: string(polecat.CleanupClean),
+			Branch:        branch,
+		}
+		mrIssue := &beads.Issue{ID: "gt-mr-1", Status: string(beads.StatusOpen), Description: beads.FormatMRFields(&beads.MRFields{Branch: branch})}
+		mq := polecatMQIndex{
+			mrByBranch:   map[string]*beads.Issue{branch: mrIssue},
+			sourceIssues: map[string]*beads.Issue{},
+		}
+
+		item := buildPolecatInventoryItem("gastown", "synth", fields, nil, sessions, mq)
+
+		if !item.Disposition.Reusable {
+			t.Fatalf("disposition = %+v, want Reusable=true once an MR exists for the branch", item.Disposition)
+		}
+	})
+
+	t.Run("mq lookup failure fails closed", func(t *testing.T) {
+		fields := &beads.AgentFields{
+			AgentState:    string(beads.AgentStateIdle),
+			CleanupStatus: string(polecat.CleanupClean),
+			Branch:        branch,
+		}
+		mq := polecatMQIndex{lookupFailed: true}
+
+		item := buildPolecatInventoryItem("gastown", "synth", fields, nil, sessions, mq)
+
+		if item.Disposition.Reusable {
+			t.Fatalf("disposition = %+v, want Reusable=false on mq lookup failure", item.Disposition)
+		}
+		if item.Disposition.Reason != "mq-lookup-failed" {
+			t.Fatalf("reason = %q, want mq-lookup-failed", item.Disposition.Reason)
+		}
+	})
+
+	t.Run("closed source bead with unsubmitted branch still needs mq submit", func(t *testing.T) {
+		// A terminal (closed) source bead says nothing about whether the branch
+		// still carries pushed-but-unsubmitted work — it must not be read as
+		// SAFE_TO_NUKE for stranded work (gt-6mhu).
+		fields := &beads.AgentFields{
+			AgentState:      string(beads.AgentStateIdle),
+			CleanupStatus:   string(polecat.CleanupClean),
+			Branch:          branch,
+			LastSourceIssue: "gt-src-closed",
+		}
+		sourceIssue := &beads.Issue{ID: "gt-src-closed", Status: string(beads.StatusClosed)}
+		mq := polecatMQIndex{
+			mrByBranch:   map[string]*beads.Issue{},
+			sourceIssues: map[string]*beads.Issue{"gt-src-closed": sourceIssue},
+		}
+
+		item := buildPolecatInventoryItem("gastown", "synth", fields, nil, sessions, mq)
+
+		if item.Disposition.Verdict != polecat.WorkstateVerdictNeedsMQSubmit {
+			t.Fatalf("verdict = %q, want %q (terminal source bead must not mask stranded pushed work)", item.Disposition.Verdict, polecat.WorkstateVerdictNeedsMQSubmit)
+		}
+		if item.Disposition.Reusable {
+			t.Fatalf("disposition = %+v, want Reusable=false for stranded work behind a closed source bead", item.Disposition)
+		}
+	})
+}
+
+type fakePolecatMQIndexSource struct {
+	mrs        []*beads.Issue
+	mrErr      error
+	issues     map[string]*beads.Issue
+	showErr    error
+	gotShowIDs []string
+}
+
+func (f *fakePolecatMQIndexSource) ListMergeRequests(beads.ListOptions) ([]*beads.Issue, error) {
+	return f.mrs, f.mrErr
+}
+
+func (f *fakePolecatMQIndexSource) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	f.gotShowIDs = ids
+	if f.showErr != nil {
+		return nil, f.showErr
+	}
+	return f.issues, nil
+}
+
+// TestBuildPolecatMQIndex proves the batching this fix relies on: the newest
+// MR for a branch wins the dedup, and source-issue terminal/attachment state
+// is threaded through via one bulk ShowMultiple call rather than a per-polecat
+// bd.Show (gt-h6u4).
+func TestBuildPolecatMQIndex(t *testing.T) {
+	t.Run("newest MR for a branch wins", func(t *testing.T) {
+		older := &beads.Issue{ID: "gt-mr-old", CreatedAt: "2026-01-01T00:00:00Z", Description: beads.FormatMRFields(&beads.MRFields{Branch: "polecat/synth/gt-work"})}
+		newer := &beads.Issue{ID: "gt-mr-new", CreatedAt: "2026-02-01T00:00:00Z", Description: beads.FormatMRFields(&beads.MRFields{Branch: "polecat/synth/gt-work"})}
+		src := &fakePolecatMQIndexSource{mrs: []*beads.Issue{older, newer}, issues: map[string]*beads.Issue{}}
+
+		idx := buildPolecatMQIndex(src, nil)
+
+		got := idx.mrByBranch["polecat/synth/gt-work"]
+		if got == nil || got.ID != "gt-mr-new" {
+			t.Fatalf("mrByBranch[...] = %v, want gt-mr-new", got)
+		}
+	})
+
+	t.Run("source issue terminal and no-merge flow through", func(t *testing.T) {
+		fields := &beads.AgentFields{LastSourceIssue: "gt-src-1"}
+		sourceIssue := &beads.Issue{
+			ID:          "gt-src-1",
+			Status:      string(beads.StatusClosed),
+			Description: "no_merge: true\n",
+		}
+		src := &fakePolecatMQIndexSource{
+			mrs:    nil,
+			issues: map[string]*beads.Issue{"gt-src-1": sourceIssue},
+		}
+
+		idx := buildPolecatMQIndex(src, map[string]*beads.AgentFields{"synth": fields})
+
+		if len(src.gotShowIDs) != 1 || src.gotShowIDs[0] != "gt-src-1" {
+			t.Fatalf("ShowMultiple called with %v, want [gt-src-1]", src.gotShowIDs)
+		}
+
+		input := &polecat.WorkstateInput{Branch: "polecat/synth/gt-work"}
+		applyMQIndexToWorkstateInput(input, fields, idx)
+		if !input.AssignedBeadTerminal {
+			t.Error("AssignedBeadTerminal = false, want true for a closed source issue")
+		}
+		if !input.MQNotRequired {
+			t.Error("MQNotRequired = false, want true for a no_merge source issue")
+		}
+	})
+
+	t.Run("lookup errors mark the index failed", func(t *testing.T) {
+		src := &fakePolecatMQIndexSource{mrErr: errors.New("bd list failed")}
+		idx := buildPolecatMQIndex(src, nil)
+		if !idx.lookupFailed {
+			t.Error("lookupFailed = false, want true when ListMergeRequests errors")
+		}
+	})
 }
 
 func TestBuildPolecatInventoryItemActiveWorkLookupErrorFailsClosed(t *testing.T) {
@@ -149,6 +316,7 @@ func TestBuildPolecatInventoryItemActiveWorkLookupErrorFailsClosed(t *testing.T)
 		&beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean)},
 		polecatActiveWorkLookupError(errors.New("bd failed")),
 		polecatSessionSet{},
+		polecatMQIndex{},
 	)
 
 	if item.Disposition.Reusable || item.Disposition.SafeToNuke || !item.Disposition.NeedsRecovery || item.Disposition.CountsTowardCapacity {
@@ -159,6 +327,68 @@ func TestBuildPolecatInventoryItemActiveWorkLookupErrorFailsClosed(t *testing.T)
 	}
 	if len(item.Disposition.Blockers) != 1 || !strings.Contains(item.Disposition.Blockers[0], "lookup_error") {
 		t.Fatalf("blockers = %v, want lookup_error", item.Disposition.Blockers)
+	}
+}
+
+func TestApplyLegacyCleanupCompatibilityUpgradeAndRestart(t *testing.T) {
+	fields := &beads.AgentFields{AgentState: string(beads.AgentStateDone)}
+	assessed := polecat.DecideWorkstate(polecat.WorkstateInput{
+		State:         polecat.StateDone,
+		CleanupStatus: polecat.CleanupClean,
+		Branch:        "polecat/legacy/completed",
+	})
+
+	classify := func(sessions polecatSessionSet) polecatInventoryItem {
+		item := buildPolecatInventoryItemFromEvidence("gastown", "legacy", fields, polecatActiveWorkEvidence{}, sessions, polecatMQIndex{})
+		return applyLegacyCleanupCompatibility(item, fields, polecatActiveWorkEvidence{}, assessed)
+	}
+
+	// The legacy metadata-only classifier is fail-closed but no longer reserves
+	// capacity solely because the optional field is absent.
+	before := buildPolecatInventoryItemFromEvidence("gastown", "legacy", fields, polecatActiveWorkEvidence{}, nil, polecatMQIndex{})
+	if !before.Disposition.NeedsRecovery || before.Disposition.CountsTowardCapacity {
+		t.Fatalf("legacy pre-compat disposition = %+v", before.Disposition)
+	}
+
+	for _, phase := range []string{"after-upgrade", "after-daemon-restart"} {
+		t.Run(phase, func(t *testing.T) {
+			got := classify(newPolecatSessionSet(nil))
+			if !got.Disposition.Reusable || got.Disposition.Verdict != polecat.WorkstateVerdictSafeToNuke {
+				t.Fatalf("disposition = %+v, want reusable after read-only reconciliation", got.Disposition)
+			}
+			if got.CleanupProvenance != legacyCleanupReadOnlyProvenance {
+				t.Fatalf("cleanup provenance = %q", got.CleanupProvenance)
+			}
+		})
+	}
+}
+
+func TestApplyLegacyCleanupCompatibilityFailsClosed(t *testing.T) {
+	legacyDone := &beads.AgentFields{AgentState: string(beads.AgentStateDone)}
+	cleanAssessment := polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: polecat.CleanupClean})
+	tests := []struct {
+		name       string
+		fields     *beads.AgentFields
+		work       polecatActiveWorkEvidence
+		sessions   polecatSessionSet
+		assessment polecat.WorkstateDisposition
+	}{
+		{name: "missing agent bead", fields: nil, assessment: cleanAssessment},
+		{name: "live session", fields: legacyDone, sessions: polecatSessionSet{polecatSessionKey("gastown", "legacy"): "gt-legacy"}, assessment: cleanAssessment},
+		{name: "active work", fields: legacyDone, work: polecatActiveWorkEvidence{BlocksCleanup: true, RequiresRestart: true, CountsTowardCapacity: true, Blocker: "assigned_work=gt-open status=open", AssignedIssue: "gt-open"}, assessment: cleanAssessment},
+		{name: "hooked work evidence", fields: legacyDone, assessment: polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: polecat.CleanupClean, HookBead: "gt-open"})},
+		{name: "dirty worktree evidence", fields: legacyDone, assessment: polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: "", GitDirty: true})},
+		{name: "uncertain worktree evidence", fields: legacyDone, assessment: polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: "", GitCheckFailed: true})},
+		{name: "pending mr evidence", fields: legacyDone, assessment: polecat.DecideWorkstate(polecat.WorkstateInput{State: polecat.StateDone, CleanupStatus: polecat.CleanupClean, ActiveMRBlocker: "active_mr=gt-mr status=open"})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := buildPolecatInventoryItemFromEvidence("gastown", "legacy", tt.fields, tt.work, tt.sessions, polecatMQIndex{})
+			got := applyLegacyCleanupCompatibility(item, tt.fields, tt.work, tt.assessment)
+			if got.Disposition.Reusable {
+				t.Fatalf("disposition unexpectedly reusable: %+v", got.Disposition)
+			}
+		})
 	}
 }
 

@@ -104,7 +104,13 @@ focus = "Leaked credentials"
 title = "Security Report"
 description = "Combine all findings"
 depends_on = ["sast", "deps", "secrets"]
+agent = "claude-opus" # Optional dedicated convergence/synthesis runtime
 ```
+
+Workflow formulas may set top-level `agent = "..."`. Gas Town persists that
+selection on dependency-blocked steps so later convoy-manager dispatches keep
+the same runtime. Convoy synthesis can select a separate `[synthesis].agent`,
+allowing inexpensive independent legs and a stronger convergence chair.
 
 ### Expansion
 

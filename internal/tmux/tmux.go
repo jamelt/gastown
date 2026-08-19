@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/telemetry"
+	"github.com/steveyegge/gastown/internal/testguard"
 )
 
 // sessionNudgeLocks serializes nudges to the same session.
@@ -170,7 +171,7 @@ func BuildCommand(args ...string) *exec.Cmd {
 // BuildCommandContext is like BuildCommand but honors a context for cancellation.
 func BuildCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	allArgs := []string{"-u"}
-	if sock := GetDefaultSocket(); sock != "" {
+	if sock := resolvedSocketName(); sock != "" {
 		allArgs = append(allArgs, "-L", sock)
 	}
 	allArgs = append(allArgs, args...)
@@ -196,17 +197,40 @@ const noTownSocket = "gt-no-town-socket"
 const EnvAgentReady = "GT_AGENT_READY"
 
 // NewTmux creates a new Tmux wrapper using the initialized town socket.
-// Falls back to GT_TOWN_SOCKET env var (set by cross-socket tmux bindings).
+// Falls back to explicit socket env vars when registry init did not run.
 // Empty socket means use the default tmux server.
 func NewTmux() *Tmux {
-	sock := GetDefaultSocket()
-	if sock == "" {
-		// GT_TOWN_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
-		// so that "gt agents menu" / "gt feed" invoked from a personal terminal still
-		// target the correct town server even when InitRegistry was not called.
-		sock = os.Getenv("GT_TOWN_SOCKET")
+	return &Tmux{socketName: resolvedSocketName()}
+}
+
+// resolvedSocketName returns the tmux socket this process should use.
+// InitRegistry normally sets the package default via SetDefaultSocket. When a
+// command runs outside a discoverable workspace (InitRegistry never ran, or
+// found no town root), fall back to explicit socket env overrides instead of
+// silently targeting tmux's default server — which has a different set of
+// sessions/windows and produces "can't find window" errors. (GH#3761)
+func resolvedSocketName() string {
+	if sock := GetDefaultSocket(); sock != "" {
+		return sock
 	}
-	return &Tmux{socketName: sock}
+
+	// GT_TOWN_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
+	// so commands invoked from a personal terminal still target the right town
+	// even when InitRegistry was not called.
+	if sock := os.Getenv("GT_TOWN_SOCKET"); sock != "" {
+		return sock
+	}
+
+	// GT_TMUX_SOCKET is the user-facing override normally consumed by
+	// InitRegistry (see session.InitRegistry). If InitRegistry did not run,
+	// honor an explicit socket name here too. "default"/"auto" require a town
+	// root to resolve into a real socket name, so they are not literal names.
+	switch sock := os.Getenv("GT_TMUX_SOCKET"); sock {
+	case "", "default", "auto":
+		return ""
+	default:
+		return sock
+	}
 }
 
 // NewTmuxWithSocket creates a Tmux wrapper that targets a named socket.
@@ -217,11 +241,34 @@ func NewTmuxWithSocket(socket string) *Tmux {
 	return &Tmux{socketName: socket}
 }
 
+// runSubprocessTimeout caps how long a single tmux subprocess may run before
+// being killed. Without this, every t.run call used context.Background()
+// (no deadline): a wedged tmux server could hang dispatch and mail paths
+// indefinitely (e.g. isHookedAgentDeadFn -> HasSession on every sling
+// dispatch, injectStartPrompt -> NudgePane). Mirrors bdSubprocessTimeout /
+// networkTimeout. Override via GT_TMUX_TIMEOUT_SEC for testing or unusual
+// workloads. gt-h8bj.
+const runSubprocessTimeout = 15 * time.Second
+
+// resolveRunSubprocessTimeout returns the configured tmux subprocess
+// timeout, honoring the GT_TMUX_TIMEOUT_SEC env var override (must parse as
+// a positive integer).
+func resolveRunSubprocessTimeout() time.Duration {
+	if v := os.Getenv("GT_TMUX_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return runSubprocessTimeout
+}
+
 // run executes a tmux command and returns stdout.
 // All commands include -u flag for UTF-8 support regardless of locale settings.
 // See: https://github.com/steveyegge/gastown/issues/1219
 func (t *Tmux) run(args ...string) (string, error) {
-	return t.runContext(context.Background(), args...)
+	ctx, cancel := context.WithTimeout(context.Background(), resolveRunSubprocessTimeout())
+	defer cancel()
+	return t.runContext(ctx, args...)
 }
 
 func (t *Tmux) commandContext(ctx context.Context, args ...string) *exec.Cmd {
@@ -246,6 +293,9 @@ func (t *Tmux) runContext(ctx context.Context, args ...string) (string, error) {
 
 	err := cmd.Run()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("tmux %s timed out (tmux server may be unresponsive): %w", args[0], ctx.Err())
+		}
 		return "", t.wrapError(err, stderr.String(), args)
 	}
 
@@ -278,6 +328,15 @@ func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 }
 
 func (t *Tmux) createNewSession(name, workDir string, env map[string]string) error {
+	// Fail closed before a test binary can create a session on a socket that
+	// isn't a recognized isolated-test socket (see TestMain in this repo's
+	// packages for the "gt-test-" naming convention). This stops a stale
+	// worktree's test run from creating real sessions on the live town
+	// socket it inherited. See gt-8ik.
+	if err := testguard.RequireIsolatedSocket("tmux new-session "+name, t.socketName); err != nil {
+		return err
+	}
+
 	if err := t.ensureNewSessionSocketSafe(); err != nil {
 		return err
 	}
@@ -3379,13 +3438,20 @@ func (t *Tmux) WaitForRuntimeReady(session string, rc *config.RuntimeConfig, tim
 	}
 
 	deadline := time.Now().Add(timeout)
+	var lastLines []string
+	var lastCaptureErr error
+	captureAttempts, captureFailures := 0, 0
 	for time.Now().Before(deadline) {
 		// Capture last few lines of the pane
 		lines, err := t.CapturePaneLines(session, 10)
+		captureAttempts++
 		if err != nil {
+			lastCaptureErr = err
+			captureFailures++
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
+		lastLines = lines
 		// Look for runtime prompt indicator at start of line
 		for _, line := range lines {
 			if matchesPromptPrefix(line, rc.Tmux.ReadyPromptPrefix) {
@@ -3394,7 +3460,30 @@ func (t *Tmux) WaitForRuntimeReady(session string, rc *config.RuntimeConfig, tim
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("timeout waiting for runtime prompt")
+	return fmt.Errorf("timeout waiting for runtime prompt: %s", timeoutDiagnosis(session, lastLines, lastCaptureErr, captureAttempts, captureFailures))
+}
+
+// timeoutDiagnosis summarizes what WaitForRuntimeReady last observed before
+// giving up, so a "timeout waiting for runtime prompt" failure is actionable
+// instead of opaque. Distinguishes two different root causes that both
+// surfaced as the same bare message (gt-zpfn): the tmux pane never became
+// capturable at all (session/process never came up — consistent with
+// resource pressure preventing spawn), versus the pane was capturable but
+// never printed the ready prompt (agent process is up but slow or stuck,
+// e.g. a large prime context or a blocking dialog).
+func timeoutDiagnosis(session string, lastLines []string, lastCaptureErr error, captureAttempts, captureFailures int) string {
+	if captureAttempts > 0 && captureFailures == captureAttempts {
+		return fmt.Sprintf("pane %q was never capturable in %d attempt(s), last error: %v (session/process likely never started — check for resource pressure)",
+			session, captureAttempts, lastCaptureErr)
+	}
+	if len(lastLines) == 0 {
+		return fmt.Sprintf("pane %q produced no output", session)
+	}
+	tail := lastLines
+	if len(tail) > 3 {
+		tail = tail[len(tail)-3:]
+	}
+	return fmt.Sprintf("pane %q last showed: %q", session, strings.Join(tail, " | "))
 }
 
 // DefaultReadyPromptPrefix is the Claude Code prompt prefix used for idle detection.

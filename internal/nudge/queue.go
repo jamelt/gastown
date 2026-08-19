@@ -22,6 +22,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // Priority levels for nudge delivery.
@@ -135,6 +136,58 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 	}
 
 	return nil
+}
+
+// enqueueUniqueLockTimeout bounds how long EnqueueUniqueByKindThread waits to
+// acquire the per-session dedup lock before giving up on dedup and enqueueing
+// unconditionally — a possible duplicate reminder is preferable to blocking
+// the caller (mail send/reply) indefinitely on a stuck lock holder.
+const enqueueUniqueLockTimeout = 3 * time.Second
+
+// EnqueueUniqueByKindThread enqueues a nudge only if no other queued (not yet
+// claimed/delivered) nudge already exists for the same Kind+ThreadID pair.
+// Existing queue files are inspected under a per-session flock so concurrent
+// enqueue calls (e.g. a retried mail send after a transient failure) cannot
+// both observe "no existing reminder" and both write one.
+//
+// Returns (written=true) if a new nudge was enqueued, (false) if an existing
+// one for the same Kind+ThreadID already covers it.
+func EnqueueUniqueByKindThread(townRoot, session string, nudge QueuedNudge) (bool, error) {
+	if nudge.Kind == "" || nudge.ThreadID == "" {
+		return true, Enqueue(townRoot, session, nudge)
+	}
+
+	dir := queueDir(townRoot, session)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return false, fmt.Errorf("creating nudge queue dir: %w", err)
+	}
+
+	unlock, acquired, lockErr := lock.FlockTryAcquireWithTimeout(filepath.Join(dir, ".unique.lock"), enqueueUniqueLockTimeout)
+	if lockErr == nil && acquired {
+		defer unlock()
+	}
+	// On timeout or lock error, fall through and enqueue unconditionally
+	// rather than blocking the caller — see enqueueUniqueLockTimeout.
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("reading nudge queue: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil {
+			continue
+		}
+		var existing QueuedNudge
+		if json.Unmarshal(data, &existing) == nil && existing.Kind == nudge.Kind && existing.ThreadID == nudge.ThreadID {
+			return false, nil
+		}
+	}
+
+	return true, Enqueue(townRoot, session, nudge)
 }
 
 // Requeue writes previously drained nudges back to the queue for later delivery.
@@ -316,6 +369,12 @@ func QueueLen(townRoot, session string) int {
 // RemoveKindByThread deletes queued nudges for a session that match both the
 // provided kind and thread ID. It only removes queued .json files, leaving any
 // in-flight claimed files alone so concurrent drainers can finish safely.
+//
+// Known gap (gt-gy9x): a nudge already claimed by an in-flight Drain at the
+// moment this runs is not removed and will still be delivered, even if the
+// caller's intent (e.g. a satisfied reply-reminder) has already been met.
+// EnqueueUniqueByKindThread prevents duplicate *enqueues* but does not close
+// this delivery-side race.
 func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 	if kind == "" || threadID == "" {
 		return 0, nil
@@ -332,17 +391,18 @@ func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 
 	removed := 0
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		name := entry.Name()
+		if entry.IsDir() || !(strings.HasSuffix(name, ".json") || strings.Contains(name, ".claimed")) {
 			continue
 		}
 
-		path := filepath.Join(dir, entry.Name())
+		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return removed, fmt.Errorf("reading queued nudge %s: %w", entry.Name(), err)
+			return removed, fmt.Errorf("reading queued nudge %s: %w", name, err)
 		}
 
 		var n QueuedNudge
@@ -357,7 +417,7 @@ func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return removed, fmt.Errorf("removing queued nudge %s: %w", entry.Name(), err)
+			return removed, fmt.Errorf("removing queued nudge %s: %w", name, err)
 		}
 		removed++
 	}

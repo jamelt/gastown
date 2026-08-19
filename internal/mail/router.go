@@ -73,11 +73,27 @@ func NewRouterWithTownRoot(workDir, townRoot string) *Router {
 	}
 }
 
+// notifyWaitTimeout bounds how long WaitPendingNotifications blocks. Each
+// in-flight notification goroutine's tmux calls are individually bounded
+// (see tmux.Tmux.run), but this gives WaitPendingNotifications its own
+// backstop so a caller can never block indefinitely here regardless of how
+// many notifications are in flight or what they end up waiting on. gt-h8bj.
+const notifyWaitTimeout = 30 * time.Second
+
 // WaitPendingNotifications blocks until all in-flight async notifications
-// have completed. CLI commands should call this before exiting to avoid
-// losing notifications that are still being delivered.
+// have completed, or notifyWaitTimeout elapses, whichever comes first.
+// CLI commands should call this before exiting to avoid losing
+// notifications that are still being delivered.
 func (r *Router) WaitPendingNotifications() {
-	r.notifyWg.Wait()
+	done := make(chan struct{})
+	go func() {
+		r.notifyWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(notifyWaitTimeout):
+	}
 }
 
 // isListAddress returns true if the address uses list:name syntax.
@@ -240,6 +256,9 @@ func (r *Router) buildLabels(msg *Message) []string {
 	}
 	labels = append(labels, "from:"+msg.From)
 	labels = append(labels, "msg-type:"+string(msg.Type))
+	if msg.ResponsePolicy != ResponsePolicyAuto {
+		labels = append(labels, "response-policy:"+string(msg.ResponsePolicy))
+	}
 	labels = append(labels, DeliverySendLabels()...)
 	if msg.ThreadID != "" {
 		labels = append(labels, "thread:"+msg.ThreadID)
@@ -1597,9 +1616,8 @@ func (r *Router) GetMailbox(address string) (*Mailbox, error) {
 //     the next turn boundary.
 //  3. For the overseer (human operator), always use a visible banner.
 //
-// After a successful notification, a deferred reply-reminder nudge is also
-// enqueued (after a configurable delay, default 30s) to prompt the recipient
-// to reply via gt mail send rather than in chat.
+// After a successful response-required notification, a deferred reply-reminder
+// nudge is also enqueued (after a configurable delay, default 30s).
 //
 // Supports mayor/, deacon/, rig/crew/name, rig/polecats/name, and rig/name addresses.
 // Respects agent DND/muted state - skips notification if recipient has DND enabled.
@@ -1792,20 +1810,54 @@ func prioritySeverityLabel(priority Priority) string {
 	}
 }
 
+// ShouldEnqueueReplyReminder is the central structured policy for response
+// reminders. Explicit policy wins. Otherwise only actionable message types
+// require a response; informational notifications and replies are terminal.
+// Subjects and bodies are deliberately ignored.
+func ShouldEnqueueReplyReminder(msg *Message) bool {
+	if msg == nil {
+		return false
+	}
+	switch msg.ResponsePolicy {
+	case ResponsePolicyRequired:
+		return true
+	case ResponsePolicyNone:
+		return false
+	}
+	switch msg.Type {
+	case TypeTask, TypeEscalation, TypeScavenge:
+		return true
+	default:
+		return false
+	}
+}
+
 // enqueueReplyReminder queues a deferred nudge reminding the recipient to reply
 // via gt mail send rather than in chat. Best-effort: errors are logged, not returned.
 //
 // Skipped when:
 //   - No town root (can't use nudge queue)
-//   - Message type is TypeReply (recipient is already replying)
+//   - Structured response policy says no response is required
 //   - Sender is not a direct mail address that can receive a reply
 //   - Configured delay is zero or negative (feature disabled)
+//
+// Enqueueing is deduplicated by Kind+ThreadID (see EnqueueUniqueByKindThread)
+// so a retried send after a transient failure cannot queue a second reminder
+// for the same thread.
 func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if r.townRoot == "" {
 		return
 	}
-	if msg.Type == TypeReply {
-		return // Already a reply — reminder would be redundant
+	if !ShouldEnqueueReplyReminder(msg) {
+		// Explicitly terminal messages may be retries of receipts created before
+		// response policy was persisted. Remove only the queued prompt for this
+		// session/thread; the durable mail record remains untouched.
+		if msg != nil && msg.ResponsePolicy == ResponsePolicyNone && msg.ThreadID != "" {
+			if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, "reply-reminder", msg.ThreadID); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to suppress terminal reply reminder for %s: %v\n", sessionID, err)
+			}
+		}
+		return
 	}
 	if !senderCanReceiveReply(msg.From) {
 		return
@@ -1822,7 +1874,7 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 		ThreadID:     msg.ThreadID,
 		DeliverAfter: time.Now().Add(delay),
 	}
-	if err := nudge.Enqueue(r.townRoot, sessionID, reminder); err != nil {
+	if _, err := nudge.EnqueueUniqueByKindThread(r.townRoot, sessionID, reminder); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to enqueue reply reminder for %s: %v\n", sessionID, err)
 	}
 }
@@ -1871,14 +1923,29 @@ func validReplyAddressPart(part string) bool {
 // recipient identity and thread. This is best-effort cleanup after a successful
 // reply send so satisfied threads do not keep re-nudging.
 func (r *Router) ClearReplyReminders(address, threadID string) error {
+	return r.clearThreadNudgeKinds(address, threadID, "reply-reminder")
+}
+
+// ClearThreadNudges removes every queued nudge for the given recipient and
+// thread — both the escalation wakeup nudge and the reply reminder. Used when an
+// escalation is acknowledged or closed so its queued prompts stop firing even
+// though the recipient never sent a mail reply on the thread (ack/close are not
+// mail replies, so the reply-path cleanup never runs for them).
+func (r *Router) ClearThreadNudges(address, threadID string) error {
+	return r.clearThreadNudgeKinds(address, threadID, "reply-reminder", "escalation")
+}
+
+func (r *Router) clearThreadNudgeKinds(address, threadID string, kinds ...string) error {
 	if r.townRoot == "" || threadID == "" {
 		return nil
 	}
 
 	var firstErr error
 	for _, sessionID := range AddressToSessionIDs(address) {
-		if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, "reply-reminder", threadID); err != nil && firstErr == nil {
-			firstErr = err
+		for _, kind := range kinds {
+			if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, kind, threadID); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr
