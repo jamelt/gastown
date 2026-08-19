@@ -1,0 +1,86 @@
+{
+  "schema_version": "pr-sheriff-evidence/v1",
+  "policy_version": "pr-sheriff-run-2026-06-04",
+  "generated_at": "2026-08-19T00:00:00Z",
+  "run_id": "gt-pr-4143-sheriff-review",
+  "subject": {
+    "forge": "github",
+    "repo_id": "gastownhall/gastown",
+    "default_branch": "main",
+    "change_type": "confirmatory_review",
+    "change_id": "pr-4143",
+    "url": "https://github.com/gastownhall/gastown/pull/4143",
+    "title": "fix(daemon): parse bd show --children envelope so molecule steps close (#4142)",
+    "author": "dickeyf",
+    "author_tier": "unknown (pr-sheriff-config.json and mol-pr-sheriff-patrol formula not present in this workspace; not needed for this disposition)",
+    "draft": false,
+    "state": "closed",
+    "merged": false,
+    "closed_at": "2026-07-17T16:40:48Z",
+    "head_sha": "14adfda9cbeb044e25227359369672e68ebc8483"
+  },
+  "superseded_by": [
+    {
+      "pr": 4507,
+      "title": "fix(daemon): converge children schema envelope parsing",
+      "state": "MERGED",
+      "merged_at": "2026-07-15T18:54:06Z",
+      "merge_commit": "0cb66de72ad7c907b3bf886a0803f03eb790bfc5",
+      "ancestor_of_upstream_main": true
+    },
+    {
+      "pr": 4521,
+      "title": "test(daemon): cover children parser error branches",
+      "state": "MERGED",
+      "merged_at": "2026-07-17T16:40:09Z",
+      "merge_commit": "5ffa55a2bc03fa1110ea0b1495bfa26bbe6b66f3",
+      "ancestor_of_upstream_main": true
+    }
+  ],
+  "related_cluster": {
+    "pr_4327": "CLOSED, superseded, same disposition pattern, verified independently",
+    "pr_4449": "CLOSED, superseded, same disposition pattern, verified independently",
+    "pr_4498": "CLOSED, superseded (original PR carried forward into #4507), verified independently"
+  },
+  "related_issue": {
+    "number": 4142,
+    "state": "OPEN",
+    "fix_merged": true,
+    "fix_commit": "0cb66de72ad7c907b3bf886a0803f03eb790bfc5",
+    "auto_close_keyword_present": false,
+    "recommendation": "close as fixed by #4507; not executed by this bead"
+  },
+  "research_legs": {
+    "count": 15,
+    "completed": 15,
+    "summary": "All 15 independent research legs converged: PR #4143 genuinely closed/superseded; #4507 and #4521 genuinely merged and ancestors of upstream/main; parseChildrenJSON fix on upstream/main verified correct and fail-closed by direct code read; TestParseChildrenJSON verified passing 16/16 by actually running it against a throwaway upstream/main worktree; no regression risk at the 2 real call sites; #4327/#4449/#4498 independently confirmed closed with matching disposition; issue #4142 confirmed still open with no auto-close keyword in either replacement PR; Co-authored-by trailers on #4507/#4521 confirmed to credit Sean Bearden, Anthony Wong, and Claude but not dickeyf; no gt-4507-credit bead locatable in local bd/Dolt tracker; no prior pr-sheriff-evidence exists for this PR cluster (net-new review, not duplicate); pr-sheriff-config.json and mol-pr-sheriff-patrol formula confirmed absent from this workspace; no dangling local branches/worktrees; CI status history for #4143 shows only label-automation checks, no substantive CI signal either way."
+  },
+  "pre_decision_review_legs": {
+    "count": 5,
+    "completed": 5,
+    "confirm": 2,
+    "object_on_wording_only": 3,
+    "summary": "3 of 5 legs OBJECTed, but every objection was scoped narrowly to strengthening the write-up of the attribution finding (state it as a confirmed, checkable promise that was not kept, not a soft maybe-gap; name dickeyf explicitly; note the gt-4507-credit gate itself as unverifiable/possibly-failed) and to explicitly cross-referencing prior bead gt-i4z0's 2026-07-06 block/defer_human_review verdict and explaining why it is now moot rather than overruled. No leg objected to the core disposition (no code changes needed; PR #4143 correctly closed as superseded). Both write-up upgrades were incorporated into report.md findings 6 and 7 before this bead was closed."
+  },
+  "post_implementation_review_legs": {
+    "applicable": false,
+    "reason": "no code change, no replacement PR, no cherry-pick performed by this bead"
+  },
+  "prior_sheriff_history": {
+    "gt-i4z0": {
+      "closed_at": "2026-07-06",
+      "verdict": "block / defer_human_review",
+      "reconciliation": "moot, not overruled — #4143 was in fact never merged as-is, consistent with gt-i4z0's finding; it was instead superseded by an independently-developed, verified-better replacement"
+    },
+    "other_duplicate_titled_beads": ["gt-we2z", "gt-eors", "gt-cm6n", "gt-d141", "gt-pr-sheriff-4143", "hq-cv-vbh5y"],
+    "note": "all pre-date the 2026-07-15/17 merges of #4507/#4521 or are convoy/routing artifacts; none supersede this review"
+  },
+  "final_verdict": "no_action_required_code / recommend_downstream_action_non_code",
+  "merge_path_allowed": "not_applicable",
+  "required_next_actions": [
+    "overseer: close GitHub issue #4142 as fixed by #4507 (commit 0cb66de72)",
+    "overseer: remedy or escalate the dickeyf Co-authored-by attribution gap on #4143's replacement commits, and review the apparently-uninspectable gt-4507-credit attribution gate"
+  ],
+  "no_refinery_mq_route_used": true,
+  "no_github_write_performed": true
+}
