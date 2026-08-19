@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -127,6 +130,40 @@ type scheduledBeadInfo struct {
 	Blocked   bool   `json:"blocked,omitempty"`
 }
 
+// dispatchLockStatus reports the current scheduler-dispatch.lock state for
+// `gt scheduler status`, so a wedged or stale dispatch lock (gt-jpib) is
+// visible without reading .runtime/ by hand.
+type dispatchLockStatus struct {
+	PID        int    `json:"pid,omitempty"`
+	Hostname   string `json:"hostname,omitempty"`
+	AcquiredAt string `json:"acquired_at,omitempty"`
+	AgeSeconds int64  `json:"age_seconds,omitempty"`
+	Stale      bool   `json:"stale,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// loadSchedulerDispatchLockStatus reads the dispatch lock for display.
+// Returns nil when unlocked (the common case) so callers can omit it from
+// output entirely. A corrupt lock file is reported via Error rather than
+// failing the whole status command — status must stay usable precisely when
+// an operator is diagnosing a wedged or corrupted lock.
+func loadSchedulerDispatchLockStatus(townRoot string) *dispatchLockStatus {
+	info, err := lock.New(schedulerDispatchLockPath(townRoot)).Read()
+	if err != nil {
+		if errors.Is(err, lock.ErrNotLocked) {
+			return nil
+		}
+		return &dispatchLockStatus{Error: err.Error()}
+	}
+	return &dispatchLockStatus{
+		PID:        info.PID,
+		Hostname:   info.Hostname,
+		AcquiredAt: info.AcquiredAt.Format(time.RFC3339),
+		AgeSeconds: int64(time.Since(info.AcquiredAt).Round(time.Second).Seconds()),
+		Stale:      info.IsStaleAfter(schedulerDispatchLockTTL),
+	}
+}
+
 func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -157,6 +194,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			ActivePolecats int                     `json:"active_polecats"`
 			Capacity       polecatCapacitySnapshot `json:"capacity"`
 			LastDispatchAt string                  `json:"last_dispatch_at,omitempty"`
+			DispatchLock   *dispatchLockStatus     `json:"dispatch_lock,omitempty"`
 			Beads          []scheduledBeadInfo     `json:"beads"`
 		}{
 			Paused:         state.Paused,
@@ -165,6 +203,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			ActivePolecats: capacitySnapshot.ActiveSessions,
 			Capacity:       capacitySnapshot,
 			LastDispatchAt: state.LastDispatchAt,
+			DispatchLock:   loadSchedulerDispatchLockStatus(townRoot),
 			Beads:          scheduled,
 		}
 		for _, b := range scheduled {
@@ -204,6 +243,23 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 		)
 	} else {
 		fmt.Printf("  Capacity:  direct dispatch (scheduler.max_polecats=%d)\n", capacitySnapshot.Max)
+	}
+	if dl := loadSchedulerDispatchLockStatus(townRoot); dl != nil {
+		host := ""
+		if dl.Hostname != "" {
+			host = " on " + dl.Hostname
+		}
+		switch {
+		case dl.Error != "":
+			fmt.Printf("  Dispatch:  %s lock file unreadable (%s): %s\n",
+				style.Warning.Render("⚠"), schedulerDispatchLockPath(townRoot), dl.Error)
+		case dl.Stale:
+			fmt.Printf("  Dispatch:  %s stale lock (PID %d%s, held %s — previous dispatch likely crashed; clears on next run)\n",
+				style.Warning.Render("⚠"), dl.PID, host, time.Duration(dl.AgeSeconds)*time.Second)
+		default:
+			fmt.Printf("  Dispatch:  running (PID %d%s, held %s)\n",
+				dl.PID, host, time.Duration(dl.AgeSeconds)*time.Second)
+		}
 	}
 	if state.LastDispatchAt != "" {
 		fmt.Printf("  Last dispatch: %s (%d beads)\n", state.LastDispatchAt, state.LastDispatchCount)
