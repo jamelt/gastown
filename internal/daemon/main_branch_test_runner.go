@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -79,7 +80,7 @@ type rigGateConfig struct {
 // loadRigGateConfig reads the merge_queue section from a rig's config.json
 // to discover what test/gate commands to run.
 func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
-	configPath := filepath.Join(rigPath, "config.json")
+	configPath := config.RigSettingsPath(rigPath)
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
