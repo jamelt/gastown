@@ -90,7 +90,7 @@ type polecatMQIndex struct {
 
 // polecatMQIndexSource is the subset of *beads.Beads that buildPolecatMQIndex
 // needs. It lets tests fake the batched MR/source-issue lookups without a
-// real bd binary, mirroring mrFinder/issueShower elsewhere in this package.
+// real bd binary, mirroring issueShower elsewhere in this package.
 type polecatMQIndexSource interface {
 	ListMergeRequests(opts beads.ListOptions) ([]*beads.Issue, error)
 	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
