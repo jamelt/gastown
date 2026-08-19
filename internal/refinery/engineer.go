@@ -1461,18 +1461,32 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		// (which shows "closed" and destroys the PR audit trail).
 		expectedHead := strings.TrimSpace(mr.CommitSHA)
 		remoteDeleteSafe := true
+		deleteHead := expectedHead
 		if isPolecat {
 			if e.git.HasOpenPullRequest(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: mr.Branch, HeadSHA: expectedHead}) {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", mr.Branch)
-			} else if err := e.git.DeleteRemoteBranchIfAt("origin", mr.Branch, expectedHead); err != nil {
+			} else if tip, err := e.git.PushRemoteBranchTip("origin", mr.Branch); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to read remote branch tip %s: %v\n", mr.Branch, err)
+				remoteDeleteSafe = false
+			} else if remoteTip := strings.TrimSpace(tip); remoteTip == "" {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Remote branch already gone: %s\n", mr.Branch)
+			} else if err := e.git.VerifyPushedCommitReachableFromPushTarget("origin", mr.Target, remoteTip); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: remote branch %s tip %s not proven on %s: %v\n", mr.Branch, remoteTip, mr.Target, err)
+				remoteDeleteSafe = false
+			} else if err := e.git.DeleteRemoteBranchIfAt("origin", mr.Branch, remoteTip); err != nil {
+				// expectedHead (mr.CommitSHA) is captured at MR-submit time and goes
+				// stale if a conflict-resolution push later lands a new commit on the
+				// same branch, so the delete's compare-and-swap must target the
+				// branch's current remote tip instead (gt-twuj / gt-q5qb).
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to delete remote branch %s: %v\n", mr.Branch, err)
 				remoteDeleteSafe = false
 			} else {
+				deleteHead = remoteTip
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Deleted remote branch: %s\n", mr.Branch)
 			}
 		}
 		if remoteDeleteSafe {
-			if err := e.deleteLocalBranchIfAt(mr.Branch, expectedHead); err != nil {
+			if err := e.deleteLocalBranchIfAt(mr.Branch, deleteHead); err != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to delete local branch %s: %v\n", mr.Branch, err)
 			} else {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Deleted local branch: %s\n", mr.Branch)
