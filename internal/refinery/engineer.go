@@ -499,6 +499,27 @@ type ProcessResult struct {
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
 	NoMerge        bool // MR/source is intentionally not merge-eligible, not a build failure
 	NeedsApproval  bool // PR exists but lacks required approving review (merge_strategy=pr)
+	NoOp           bool // Source branch had 0 commits ahead of target — nothing merged (gt-v2zr)
+}
+
+// mrIsNoOpMerge reports whether merging the submitted head into base produces no
+// new commit — i.e. head is already contained in base (0 commits ahead). Such an
+// MR merges nothing: `git merge --no-ff` prints "Already up to date" and creates
+// no commit, so HEAD stays at the unrelated target tip. Recording that tip as the
+// MR's merge commit asserts false provenance (gt-v2zr). The check fails open
+// (returns false) so a git error never blocks a legitimate merge.
+func (e *Engineer) mrIsNoOpMerge(head, base string) bool {
+	head = strings.TrimSpace(head)
+	base = strings.TrimSpace(base)
+	if head == "" || base == "" {
+		return false
+	}
+	contained, err := e.git.IsAncestor(head, base)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: no-op ancestry check failed (%s in %s): %v\n", shortSHA(head), shortSHA(base), err)
+		return false
+	}
+	return contained
 }
 
 // doMerge performs the actual git merge operation.
@@ -549,6 +570,16 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	if err := e.git.Pull("origin", target); err != nil {
 		// Pull might fail if nothing to pull, that's ok
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pull from origin/%s: %v (continuing)\n", target, err)
+	}
+
+	// If the submitted head is already contained in the target, the local merge
+	// below is a no-op that leaves HEAD at the unrelated target tip; record it as a
+	// no-op instead of stamping that tip as this MR's merge commit (gt-v2zr). Scoped
+	// to the local merge path: PR-mode merges go through the VCS provider, which
+	// takes its merge SHA from the provider and will not merge an empty PR.
+	if e.config.MergeStrategy != "pr" && e.mrIsNoOpMerge(mergeRef, "HEAD") {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: source branch %s has no commits ahead of %s — nothing to merge (no-op)\n", mr.ID, branch, target)
+		return ProcessResult{Success: true, NoOp: true}
 	}
 
 	// Step 3: Check for merge conflicts (using local branch)
@@ -1338,8 +1369,20 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 		if err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not resolve origin/%s HEAD: %v (falling through to normal gates)\n", mr.Target, err)
 		} else if targetHead == mr.PreVerifiedBase {
-			_, _ = fmt.Fprintln(e.output, "[Engineer] Pre-verification valid — target unchanged, skipping gates (fast-path)")
-			skipGates = true
+			// Defensive: the attestation is only trustworthy if the submitted commit
+			// is actually based on the attested base. A false attestation (branch
+			// behind target, never rebased) records the current target HEAD as its
+			// base, so target-unchanged alone is not enough — verify ancestry before
+			// bypassing the integrated-tree gates (gt-fi6e).
+			if based, ancErr := e.submittedCommitBasedOn(mr, mr.PreVerifiedBase); ancErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification unverifiable — %v (running gates normally)\n", ancErr)
+			} else if !based {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification rejected — submitted commit %s is not based on attested base %s (running gates normally)\n",
+					shortSHA(mr.CommitSHA), shortSHA(mr.PreVerifiedBase))
+			} else {
+				_, _ = fmt.Fprintln(e.output, "[Engineer] Pre-verification valid — target unchanged, skipping gates (fast-path)")
+				skipGates = true
+			}
 		} else {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification stale — target moved (%s → %s), running gates normally\n",
 				mr.PreVerifiedBase[:min(8, len(mr.PreVerifiedBase))], targetHead[:min(8, len(targetHead))])
@@ -1374,9 +1417,15 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		return false
 	}
 
-	// Update and close the MR bead
+	// Update and close the MR bead. A no-op merge (source branch contributed no
+	// commits — already merged or empty) closes with close_reason=no-op and no
+	// merge commit, so the record never claims a merge that did not happen (gt-v2zr).
+	mrCloseReason := string(CloseReasonMerged)
+	if result.NoOp {
+		mrCloseReason = string(CloseReasonNoop)
+	}
 	if mr.ID != "" && !e.isSyntheticMergeMechanicsMR(mr) {
-		if err := e.closeMRWithReason(mr, string(CloseReasonMerged), result.MergeCommit); err != nil {
+		if err := e.closeMRWithReason(mr, mrCloseReason, result.MergeCommit); err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Post-merge cleanup failed for %s: %v\n", mr.ID, err)
 			return false
 		}
@@ -1389,6 +1438,7 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		Target:      mr.Target,
 		SourceIssue: workBeadID,
 		MergeCommit: result.MergeCommit,
+		NoOp:        result.NoOp,
 	})
 
 	// 1.2. Close conflict-resolution tasks that this land has made moot (hq-jnap).
@@ -1411,18 +1461,32 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		// (which shows "closed" and destroys the PR audit trail).
 		expectedHead := strings.TrimSpace(mr.CommitSHA)
 		remoteDeleteSafe := true
+		deleteHead := expectedHead
 		if isPolecat {
 			if e.git.HasOpenPullRequest(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: mr.Branch, HeadSHA: expectedHead}) {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", mr.Branch)
-			} else if err := e.git.DeleteRemoteBranchIfAt("origin", mr.Branch, expectedHead); err != nil {
+			} else if tip, err := e.git.PushRemoteBranchTip("origin", mr.Branch); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to read remote branch tip %s: %v\n", mr.Branch, err)
+				remoteDeleteSafe = false
+			} else if remoteTip := strings.TrimSpace(tip); remoteTip == "" {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Remote branch already gone: %s\n", mr.Branch)
+			} else if err := e.git.VerifyPushedCommitReachableFromPushTarget("origin", mr.Target, remoteTip); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: remote branch %s tip %s not proven on %s: %v\n", mr.Branch, remoteTip, mr.Target, err)
+				remoteDeleteSafe = false
+			} else if err := e.git.DeleteRemoteBranchIfAt("origin", mr.Branch, remoteTip); err != nil {
+				// expectedHead (mr.CommitSHA) is captured at MR-submit time and goes
+				// stale if a conflict-resolution push later lands a new commit on the
+				// same branch, so the delete's compare-and-swap must target the
+				// branch's current remote tip instead (gt-twuj / gt-q5qb).
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to delete remote branch %s: %v\n", mr.Branch, err)
 				remoteDeleteSafe = false
 			} else {
+				deleteHead = remoteTip
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Deleted remote branch: %s\n", mr.Branch)
 			}
 		}
 		if remoteDeleteSafe {
-			if err := e.deleteLocalBranchIfAt(mr.Branch, expectedHead); err != nil {
+			if err := e.deleteLocalBranchIfAt(mr.Branch, deleteHead); err != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to delete local branch %s: %v\n", mr.Branch, err)
 			} else {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Deleted local branch: %s\n", mr.Branch)
@@ -1447,8 +1511,30 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 	}
 
 	// 5. Log success
-	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
+	if result.NoOp {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ No-op (nothing to merge): %s\n", mr.ID)
+	} else {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
+	}
 	return true
+}
+
+// submittedCommitBasedOn reports whether the MR's submitted commit descends from
+// (or equals) base. It resolves the commit SHA first so synthetic MRs are handled,
+// and returns an error when either object is unavailable so callers can fall back
+// to full gates rather than trusting an unverifiable attestation (gt-fi6e).
+func (e *Engineer) submittedCommitBasedOn(mr *MRInfo, base string) (bool, error) {
+	if err := e.ensureMRInfoCommitSHA(mr); err != nil {
+		return false, err
+	}
+	if e.git == nil {
+		return false, fmt.Errorf("git client is missing")
+	}
+	commit := strings.TrimSpace(mr.CommitSHA)
+	if commit == "" {
+		return false, fmt.Errorf("missing submitted commit_sha")
+	}
+	return e.git.IsAncestor(strings.TrimSpace(base), commit)
 }
 
 func (e *Engineer) ensureMRInfoCommitSHA(mr *MRInfo) error {
@@ -1746,6 +1832,9 @@ func normalizedMRCloseReason(closeReason string) string {
 	}
 	if strings.HasPrefix(lower, "conflict") {
 		return string(CloseReasonConflict)
+	}
+	if strings.HasPrefix(lower, "no-op") || strings.HasPrefix(lower, "noop") {
+		return string(CloseReasonNoop)
 	}
 	return closeReason
 }

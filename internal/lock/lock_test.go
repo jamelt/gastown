@@ -2,7 +2,9 @@ package lock
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,17 +13,19 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	workerDir := "/tmp/test-worker"
-	l := New(workerDir)
+	lockPath := "/tmp/test-worker/.runtime/agent.lock"
+	l := New(lockPath)
 
-	if l.workerDir != workerDir {
-		t.Errorf("workerDir = %q, want %q", l.workerDir, workerDir)
+	if l.lockPath != lockPath {
+		t.Errorf("lockPath = %q, want %q", l.lockPath, lockPath)
 	}
+}
 
-	expectedPath := filepath.Join(workerDir, ".runtime", "agent.lock")
-	if l.lockPath != expectedPath {
-		t.Errorf("lockPath = %q, want %q", l.lockPath, expectedPath)
-	}
+// agentLockPath builds the agent-identity lock path tests use to exercise
+// Lock via the <workerDir>/.runtime/agent.lock convention that New's single
+// production caller (cmd.acquireIdentityLock) follows.
+func agentLockPath(workerDir string) string {
+	return filepath.Join(workerDir, ".runtime", "agent.lock")
 }
 
 func TestLockInfo_IsStale(t *testing.T) {
@@ -46,6 +50,32 @@ func TestLockInfo_IsStale(t *testing.T) {
 	}
 }
 
+func TestLockInfo_IsStaleAfter(t *testing.T) {
+	alivePID := os.Getpid()
+	tests := []struct {
+		name       string
+		pid        int
+		acquiredAt time.Time
+		maxAge     time.Duration
+		wantStale  bool
+	}{
+		{"dead pid, no ttl", 999999999, time.Now(), 0, true},
+		{"dead pid, within ttl", 999999999, time.Now(), time.Hour, true},
+		{"alive pid, no ttl", alivePID, time.Now().Add(-2 * time.Hour), 0, false},
+		{"alive pid, within ttl", alivePID, time.Now(), time.Hour, false},
+		{"alive pid, ttl exceeded", alivePID, time.Now().Add(-2 * time.Hour), time.Hour, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &LockInfo{PID: tt.pid, AcquiredAt: tt.acquiredAt}
+			if got := info.IsStaleAfter(tt.maxAge); got != tt.wantStale {
+				t.Errorf("IsStaleAfter(%v) = %v, want %v", tt.maxAge, got, tt.wantStale)
+			}
+		})
+	}
+}
+
 func TestLock_AcquireAndRelease(t *testing.T) {
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
@@ -53,7 +83,7 @@ func TestLock_AcquireAndRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l := New(workerDir)
+	l := New(agentLockPath(workerDir))
 
 	// Acquire lock
 	err := l.Acquire("test-session")
@@ -93,7 +123,7 @@ func TestLock_AcquireAlreadyHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l := New(workerDir)
+	l := New(agentLockPath(workerDir))
 
 	// Acquire lock first time
 	if err := l.Acquire("session-1"); err != nil {
@@ -137,7 +167,7 @@ func TestLock_AcquireStaleLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l := New(workerDir)
+	l := New(agentLockPath(workerDir))
 
 	// Should acquire by cleaning up stale lock
 	if err := l.Acquire("new-session"); err != nil {
@@ -159,6 +189,72 @@ func TestLock_AcquireStaleLock(t *testing.T) {
 	l.Release()
 }
 
+func TestLock_AcquireTTL(t *testing.T) {
+	tmpDir := t.TempDir()
+	workerDir := filepath.Join(tmpDir, "worker")
+	runtimeDir := filepath.Join(workerDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := agentLockPath(workerDir)
+
+	// Dead-PID locks are reclaimed by AcquireTTL exactly like Acquire,
+	// regardless of the TTL value.
+	t.Run("reclaims dead PID", func(t *testing.T) {
+		staleLock := LockInfo{PID: 999999999, AcquiredAt: time.Now(), SessionID: "dead-session"}
+		data, _ := json.Marshal(staleLock)
+		if err := os.WriteFile(lockPath, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		l := New(lockPath)
+		if err := l.AcquireTTL("new-session", time.Hour); err != nil {
+			t.Fatalf("AcquireTTL() with dead-PID lock error = %v", err)
+		}
+		l.Release()
+	})
+
+	// A live-but-foreign PID past the TTL is reclaimed by AcquireTTL, but a
+	// plain Acquire (TTL=0, PID-liveness only) must refuse it — proves the
+	// TTL backstop only kicks in for the AcquireTTL caller, leaving Acquire's
+	// existing (agent-identity-lock) semantics unchanged.
+	t.Run("TTL reclaims a stale-but-alive foreign PID, plain Acquire does not", func(t *testing.T) {
+		// A real subprocess gives an alive PID we don't own, without the
+		// macOS permission issues of signaling PID 1 (see TestProcessExists).
+		cmd := exec.Command("sleep", "30")
+		if err := cmd.Start(); err != nil {
+			t.Skipf("could not start helper subprocess: %v", err)
+		}
+		defer func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}()
+
+		oldLock := LockInfo{PID: cmd.Process.Pid, AcquiredAt: time.Now().Add(-time.Hour), SessionID: "other-session"}
+		data, _ := json.Marshal(oldLock)
+		if err := os.WriteFile(lockPath, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		l := New(lockPath)
+
+		if err := l.Acquire("new-session"); !errors.Is(err, ErrLocked) {
+			t.Fatalf("Acquire() against a live foreign PID = %v, want ErrLocked", err)
+		}
+
+		if err := l.AcquireTTL("new-session", time.Minute); err != nil {
+			t.Fatalf("AcquireTTL() past TTL = %v, want nil (reclaimed)", err)
+		}
+		info, err := l.Read()
+		if err != nil {
+			t.Fatalf("Read() after AcquireTTL: %v", err)
+		}
+		if info.PID != os.Getpid() || info.SessionID != "new-session" {
+			t.Errorf("after reclaim: PID=%d SessionID=%q, want PID=%d SessionID=%q",
+				info.PID, info.SessionID, os.Getpid(), "new-session")
+		}
+		l.Release()
+	})
+}
+
 func TestLock_Read(t *testing.T) {
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
@@ -167,7 +263,7 @@ func TestLock_Read(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l := New(workerDir)
+	l := New(agentLockPath(workerDir))
 
 	// Test reading non-existent lock
 	_, err := l.Read()
@@ -216,7 +312,7 @@ func TestLock_Check(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l := New(workerDir)
+	l := New(agentLockPath(workerDir))
 
 	// Check when unlocked
 	if err := l.Check(); err != nil {
@@ -270,7 +366,7 @@ func TestLock_Status(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l := New(workerDir)
+	l := New(agentLockPath(workerDir))
 
 	// Unlocked status
 	status := l.Status()
@@ -315,7 +411,7 @@ func TestLock_ForceRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l := New(workerDir)
+	l := New(agentLockPath(workerDir))
 	if err := l.Acquire("test"); err != nil {
 		t.Fatal(err)
 	}
@@ -657,7 +753,7 @@ func TestLock_ReleaseNonExistent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l := New(workerDir)
+	l := New(agentLockPath(workerDir))
 
 	// Releasing a non-existent lock should not error
 	if err := l.Release(); err != nil {
@@ -685,7 +781,7 @@ func TestLock_CheckCleansUpStaleLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l := New(workerDir)
+	l := New(agentLockPath(workerDir))
 
 	// Check should clean up stale lock and return nil
 	if err := l.Check(); err != nil {

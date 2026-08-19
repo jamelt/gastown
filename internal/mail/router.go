@@ -73,11 +73,27 @@ func NewRouterWithTownRoot(workDir, townRoot string) *Router {
 	}
 }
 
+// notifyWaitTimeout bounds how long WaitPendingNotifications blocks. Each
+// in-flight notification goroutine's tmux calls are individually bounded
+// (see tmux.Tmux.run), but this gives WaitPendingNotifications its own
+// backstop so a caller can never block indefinitely here regardless of how
+// many notifications are in flight or what they end up waiting on. gt-h8bj.
+const notifyWaitTimeout = 30 * time.Second
+
 // WaitPendingNotifications blocks until all in-flight async notifications
-// have completed. CLI commands should call this before exiting to avoid
-// losing notifications that are still being delivered.
+// have completed, or notifyWaitTimeout elapses, whichever comes first.
+// CLI commands should call this before exiting to avoid losing
+// notifications that are still being delivered.
 func (r *Router) WaitPendingNotifications() {
-	r.notifyWg.Wait()
+	done := make(chan struct{})
+	go func() {
+		r.notifyWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(notifyWaitTimeout):
+	}
 }
 
 // isListAddress returns true if the address uses list:name syntax.
@@ -1907,14 +1923,29 @@ func validReplyAddressPart(part string) bool {
 // recipient identity and thread. This is best-effort cleanup after a successful
 // reply send so satisfied threads do not keep re-nudging.
 func (r *Router) ClearReplyReminders(address, threadID string) error {
+	return r.clearThreadNudgeKinds(address, threadID, "reply-reminder")
+}
+
+// ClearThreadNudges removes every queued nudge for the given recipient and
+// thread — both the escalation wakeup nudge and the reply reminder. Used when an
+// escalation is acknowledged or closed so its queued prompts stop firing even
+// though the recipient never sent a mail reply on the thread (ack/close are not
+// mail replies, so the reply-path cleanup never runs for them).
+func (r *Router) ClearThreadNudges(address, threadID string) error {
+	return r.clearThreadNudgeKinds(address, threadID, "reply-reminder", "escalation")
+}
+
+func (r *Router) clearThreadNudgeKinds(address, threadID string, kinds ...string) error {
 	if r.townRoot == "" || threadID == "" {
 		return nil
 	}
 
 	var firstErr error
 	for _, sessionID := range AddressToSessionIDs(address) {
-		if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, "reply-reminder", threadID); err != nil && firstErr == nil {
-			firstErr = err
+		for _, kind := range kinds {
+			if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, kind, threadID); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr

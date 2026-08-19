@@ -391,17 +391,18 @@ func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 
 	removed := 0
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		name := entry.Name()
+		if entry.IsDir() || !(strings.HasSuffix(name, ".json") || strings.Contains(name, ".claimed")) {
 			continue
 		}
 
-		path := filepath.Join(dir, entry.Name())
+		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return removed, fmt.Errorf("reading queued nudge %s: %w", entry.Name(), err)
+			return removed, fmt.Errorf("reading queued nudge %s: %w", name, err)
 		}
 
 		var n QueuedNudge
@@ -416,7 +417,7 @@ func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return removed, fmt.Errorf("removing queued nudge %s: %w", entry.Name(), err)
+			return removed, fmt.Errorf("removing queued nudge %s: %w", name, err)
 		}
 		removed++
 	}

@@ -167,6 +167,12 @@ type AgentFailoverConfig struct {
 
 	// MaxPerSession caps provider changes for one live tmux session. Default: 2.
 	MaxPerSession int `json:"max_per_session,omitempty"`
+
+	// IncludeNearLimit lets failover act on near-limit warning signals
+	// (approaching, not yet at, the hard quota wall), not just confirmed
+	// hard limits. Off by default: a session only fails over once it has
+	// actually hit the wall.
+	IncludeNearLimit bool `json:"include_near_limit,omitempty"`
 }
 
 // WebTimeoutsConfig configures command execution timeouts for the web dashboard.

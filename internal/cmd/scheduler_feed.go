@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -31,7 +32,7 @@ var (
 
 var schedulerFeedCmd = &cobra.Command{
 	Use:   "feed",
-	Short: "Survey ready beads across rigs and schedule eligible work into the queue",
+	Short: "Survey ready beads across rigs and town, schedule eligible work into the queue",
 	Long: `Feed connects 'bd ready' to the scheduler.
 
 Without this command, the scheduler only dispatches work that has already
@@ -39,19 +40,23 @@ been explicitly scheduled (via 'gt sling' or 'gt scheduler run'). Nothing
 surveys ready work and pulls it into the queue when capacity frees up, so
 dispatch runs only as long as a human keeps hand-slinging beads.
 
-Feed surveys ready beads across every rig, skips ineligible ones (already
-scheduled, blocked, deferred, epics/convoys, hq-1s4w hard-prohibition
-categories — production, trading-money-policy, credentials, destructive
-migrations, human-decision — signaled via labels like "human", "risk:money",
-"area:security", "gt:needs-human", beads requiring a platform this host
-doesn't have), and schedules up to --max-per-rig eligible beads per rig,
-bounded by town-wide free polecat capacity. Every decision — fed or
-skipped, and why — is logged.
+Feed surveys ready beads across every rig and the town-level database,
+skips ineligible ones (already scheduled, blocked, deferred, epics/convoys,
+hq-1s4w hard-prohibition categories — production, trading-money-policy,
+credentials, destructive migrations, human-decision — signaled via labels
+like "human", "risk:money", "area:security", "gt:needs-human", beads
+requiring a platform this host doesn't have), and schedules up to
+--max-per-rig eligible beads per rig, bounded by town-wide free polecat
+capacity. Every decision — fed or skipped, and why — is logged.
 
 Feed only acts when the scheduler is in deferred-dispatch mode
 (scheduler.max_polecats > 0); in direct-dispatch mode there is no queue to
-feed. Feed does not survey town-level (hq-*) beads: scheduleBead only
-targets rigs, so town-level ready work is out of scope for now.
+feed. Town-level (hq-*) ready beads are surveyed and reported with an explicit
+diagnostic: they are visible but not dispatchable (dispatch ends in spawning a
+rig-scoped polecat, and town beads have no owning rig or polecat pool). To
+dispatch town-level work, route each bead to its owning rig with 'gt bead move',
+or close it if it is coordination-only. Every town-level ready bead receives a
+decision entry — never silence.
 
   gt scheduler feed              # Feed eligible ready beads
   gt scheduler feed --dry-run    # Preview without scheduling
@@ -259,6 +264,42 @@ func runSchedulerFeed(townRoot string, maxPerRig int, dryRun bool) (feedResult, 
 		}
 	}
 
+	townBeadsPath := filepath.Join(townRoot, constants.DirMayor, constants.DirRig, constants.DirBeads)
+	townIssues, err := readyIssuesForSource(townRoot, "town", townBeadsPath)
+	if err != nil {
+		result.Decisions = append(result.Decisions, feedDecision{
+			Rig: "town", Action: "skipped", Reason: fmt.Sprintf("ready scan failed: %v", err),
+		})
+	} else {
+		townIds := make([]string, len(townIssues))
+		for i, iss := range townIssues {
+			townIds[i] = iss.ID
+		}
+		townScheduled := areScheduled(townIds)
+		townLabelsByID := batchFetchBeadInfoByIDs(townRoot, townIds)
+
+		for _, issue := range townIssues {
+			if townScheduled[issue.ID] {
+				result.Decisions = append(result.Decisions, feedDecision{
+					ID: issue.ID, Rig: "town", Action: "skipped", Reason: "already scheduled",
+				})
+				continue
+			}
+
+			effective := effectiveIssueForFeed(issue, townLabelsByID)
+			if reason, skip := feedSkipReason(effective); skip {
+				result.Decisions = append(result.Decisions, feedDecision{
+					ID: issue.ID, Rig: "town", Action: "skipped", Reason: reason,
+				})
+				continue
+			}
+
+			result.Decisions = append(result.Decisions, feedDecision{
+				ID: issue.ID, Rig: "town", Action: "skipped", Reason: "town-level bead: no owning rig for dispatch (use 'gt bead move' to route to owning rig)",
+			})
+		}
+	}
+
 	return result, nil
 }
 
@@ -272,6 +313,10 @@ func effectiveIssueForFeed(issue *beads.Issue, labelsByID map[string]beadStatusI
 	effective := *issue
 	if info, ok := labelsByID[issue.ID]; ok {
 		effective.Labels = info.Labels
+		// bd ready --json returns sparse dependency entries (no parent
+		// issue_type), so the molecule-machinery skip below can only see a
+		// step bead's molecule parent via the batch bd-show overlay.
+		effective.Dependencies = info.Dependencies
 	}
 	return &effective
 }
@@ -289,6 +334,9 @@ func feedSkipReason(issue *beads.Issue) (string, bool) {
 	if issue.Status == "blocked" {
 		return "status: blocked", true
 	}
+	if hasLabel(issue.Labels, capacity.LabelSchedulerCleared) {
+		return "explicitly cleared from scheduler, needs fresh sling", true
+	}
 	if isDeferredBead(&beadInfo{
 		Status:      issue.Status,
 		Description: issue.Description,
@@ -297,6 +345,14 @@ func feedSkipReason(issue *beads.Issue) (string, bool) {
 	}
 	if isEpicOrConvoyIssue(issue) {
 		return "epic/convoy container, not dispatchable work", true
+	}
+	// gt-6va3: a stale formula-molecule container or one of its materialized
+	// step beads (parent-child edge to a molecule) is scaffolding, not real
+	// work. Skip early for a clean feed decision; scheduleBead/executeSling
+	// also reject it as defense-in-depth. Requires the bd-show dependency
+	// overlay (see effectiveIssueForFeed) for the step-bead case.
+	if beads.IsMoleculeContainerOrStep(issue) {
+		return "formula molecule machinery, not dispatchable work", true
 	}
 	if reason, blocked := requiresHumanDecision(issue); blocked {
 		return reason, true
@@ -399,4 +455,32 @@ func platformIncompatible(issue *beads.Issue) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// checkHardProhibition is the hq-1s4w gate for every dispatch entry point
+// that hooks a bead to an agent, not just the feeder. requiresHumanDecision
+// was originally consulted only by feedSkipReason (gt-j3xq), which the
+// feeder calls before scheduleBead — a gap its own doc comment named
+// explicitly: "gt sling itself does not consult it". gt-b2qi: a human or
+// automation running gt sling (or anything that reaches scheduleBead,
+// runSling's direct-dispatch path, or executeSling) could dispatch a
+// credentials/production/money-policy/human-decision bead with no gate at
+// all. confirmed must come from an explicit, single-bead
+// --confirm-human-approved flag — never honored for batch/convoy/epic/queue
+// dispatch (executeSling always passes false), because hq-1s4w requires
+// fresh, per-dispatch approval and a bulk operation cannot attest that for
+// each bead it touches. platformIncompatible is never overridable: the work
+// cannot run on this host regardless of approval.
+func checkHardProhibition(title, description string, labels []string, confirmed bool) error {
+	issue := &beads.Issue{Title: title, Description: description, Labels: labels}
+	if reason, incompatible := platformIncompatible(issue); incompatible {
+		return fmt.Errorf("cannot dispatch: %s", reason)
+	}
+	if confirmed {
+		return nil
+	}
+	if reason, blocked := requiresHumanDecision(issue); blocked {
+		return fmt.Errorf("bead requires fresh human approval before dispatch (%s); a human must review this exact bead and re-run with --confirm-human-approved", reason)
+	}
+	return nil
 }

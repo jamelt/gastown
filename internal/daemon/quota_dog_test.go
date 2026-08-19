@@ -90,3 +90,35 @@ func TestQuotaDogRunsAccountRotationBeforeProviderFailover(t *testing.T) {
 		t.Fatalf("quota dog actions = %v, want [rotate failover]", actions)
 	}
 }
+
+func TestQuotaDogFailureEscalation(t *testing.T) {
+	d := &Daemon{}
+
+	if got := d.getQuotaDogFailures("rotate"); got != 0 {
+		t.Fatalf("expected 0 failures before any recorded, got %d", got)
+	}
+
+	for i := 1; i < quotaDogFailureEscalationThreshold; i++ {
+		d.recordQuotaDogFailure("rotate")
+		if got := d.getQuotaDogFailures("rotate"); got != i {
+			t.Fatalf("expected %d consecutive failures, got %d", i, got)
+		}
+	}
+
+	// One more failure should reach the escalation threshold.
+	d.recordQuotaDogFailure("rotate")
+	if got := d.getQuotaDogFailures("rotate"); got != quotaDogFailureEscalationThreshold {
+		t.Fatalf("expected %d consecutive failures, got %d", quotaDogFailureEscalationThreshold, got)
+	}
+
+	// A different action tracks independently.
+	if got := d.getQuotaDogFailures("failover"); got != 0 {
+		t.Fatalf("expected failover to be unaffected by rotate failures, got %d", got)
+	}
+
+	// Success resets the counter.
+	d.resetQuotaDogFailures("rotate")
+	if got := d.getQuotaDogFailures("rotate"); got != 0 {
+		t.Fatalf("expected 0 failures after reset, got %d", got)
+	}
+}

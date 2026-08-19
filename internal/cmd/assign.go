@@ -95,6 +95,17 @@ func runAssign(_ *cobra.Command, args []string) error {
 
 	agentID := rigName + "/crew/" + crewName
 
+	// hq-1s4w hard-prohibition guard (gt-kzr8). No override flag here: unlike
+	// gt sling, gt assign is documented as a low-friction shortcut ("gt assign
+	// dave ...") with no approval step, which makes it exactly the kind of
+	// command that gets looped over many crew members in a script — the
+	// opposite of the fresh, single-bead review hq-1s4w requires. A bead that
+	// needs human review must be created and dispatched via
+	// gt sling <bead-id> <rig>/crew/<name> --confirm-human-approved instead.
+	if err := checkHardProhibition(title, assignDescription, assignLabels, false); err != nil {
+		return fmt.Errorf("%w\nTo assign this bead, create it manually (bd create) and dispatch it with: gt sling <bead-id> %s --confirm-human-approved", err, agentID)
+	}
+
 	if assignDryRun {
 		fmt.Printf("Would create bead: %q (type=%s, priority=%s)\n", title, assignType, assignPriority)
 		fmt.Printf("Would hook to: %s\n", agentID)

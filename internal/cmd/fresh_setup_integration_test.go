@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 var freshSetupIntegrationCounter atomic.Int32
@@ -95,7 +96,7 @@ func TestFreshInstallRigPolecatHookIntegration(t *testing.T) {
 	}
 
 	withWorkingDir(t, hqPath, func() {
-		convoyID, err := createAutoConvoy(issue.ID, issue.Title, false, "mr", "main")
+		convoyID, err := createAutoConvoy(issue.ID, issue.Title, false, "mr", "main", git.WorkRefs{})
 		if err != nil {
 			t.Fatalf("create auto convoy: %v", err)
 		}

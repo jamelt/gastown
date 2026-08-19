@@ -49,8 +49,9 @@ func TestRunQuotaDogLoop_NotStarvedBySlowSiblingDog(t *testing.T) {
 	d.ctx = ctx
 
 	done := make(chan struct{})
+	d.dogWg.Add(1)
 	go func() {
-		d.runQuotaDogLoop(ctx)
+		d.runDogLoop(ctx, "quota_dog", func() time.Duration { return quotaDogInterval(d.patrolConfig) }, d.runQuotaDog)
 		close(done)
 	}()
 

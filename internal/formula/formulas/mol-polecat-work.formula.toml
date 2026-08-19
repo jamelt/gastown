@@ -257,9 +257,22 @@ head SHA before completing:
 HEAD_SHA=$(git rev-parse HEAD)
 bd comments add {{issue}} "PR-SHERIFF-EVIDENCE: review complete
 head_sha: ${HEAD_SHA}
-verdict: <pass|block>
+verdict: <pass|block|defer_human_review>
 summary: <brief findings>"
 ```
+
+If your verdict is a stable, terminal one — nothing new since the last round,
+and the actual blocker is external (e.g. a human merge decision) — do not
+exit with `--status DEFERRED` after posting evidence. A DEFERRED bead stays
+open/reassignable, so the next zombie-patrol cycle redispatches it, a new
+polecat reaches the identical verdict, and the cycle repeats indefinitely
+(gt-624k). Instead close it once your evidence is posted:
+```bash
+bd close {{issue}} --reason="no-changes: <verdict> — nothing new since last review, blocked on <external event>"
+gt done
+```
+Reserve `--status DEFERRED` for review work that is genuinely incomplete and
+will be resumed (e.g. you ran out of time partway through).
 
 **Commit frequently (for code tasks):**
 ```bash
@@ -326,8 +339,17 @@ git log origin/{{base_branch}}..HEAD --oneline
 This MUST show at least 1 commit. If it shows NOTHING:
 - You have NOT completed your implementation. Do NOT close this step.
 - Go back to the implement step and do the work.
-- If the task genuinely requires no code changes (already fixed upstream, etc.),
-  run `gt done --status DEFERRED` and skip remaining steps.
+- If the task genuinely requires no code changes and your finding is terminal
+  (already fixed upstream, can't reproduce, not applicable — nothing will
+  change on a re-run): `bd close {{issue}} --reason="no-changes: <brief
+  explanation>"` then `gt done`. This is the Completion Protocol's "bead has
+  nothing to implement" exception. Do NOT use `--status DEFERRED` here — a
+  DEFERRED bead is left open/reassignable, so the witness zombie patrol
+  redispatches it to a new polecat, which reaches the same terminal finding
+  and defers again, forever (gt-624k).
+- If the task is genuinely paused and more work will happen later (e.g.
+  blocked on an external event you expect to resolve), `gt done --status
+  DEFERRED` is correct and skips remaining steps.
 - Do NOT proceed to review or build with zero commits.
 
 **5. VERIFY clean working tree:**
@@ -539,9 +561,17 @@ gt done --pre-verified --target {{base_branch}}
 # For code tasks without pre-verification (gates skipped or failed):
 gt done --target {{base_branch}}
 
-# For report-only tasks (no commits — audits, reviews, research):
+# For report-only tasks (no commits — audits, reviews, research) with a
+# terminal finding (nothing to implement, verdict won't change on a re-run):
+bd close {{issue}} --reason="no-changes: <brief explanation>"
+gt done --cleanup-status clean
+
+# For report-only tasks that are genuinely paused and will resume later:
 gt done --status DEFERRED
 ```
+Do not use `--status DEFERRED` for a terminal report-only finding — it leaves
+the bead open for redispatch, and the next polecat reaches the same verdict
+and defers again, forever (gt-624k).
 
 You should see output like:
 ```

@@ -49,6 +49,15 @@ type SlingContextFields struct {
 // LabelSlingContext is the label used to identify sling context beads.
 const LabelSlingContext = "gt:sling-context"
 
+// LabelSchedulerCleared marks a work bead whose sling context was explicitly
+// removed via `gt scheduler clear`. The feeder must never re-enqueue a bead
+// carrying this label — only an explicit `gt sling` (which creates a fresh
+// sling context directly, not through the feeder) may lift it. Without this
+// marker, closing a sling context is indistinguishable from "never
+// scheduled": the next feed cycle sees the bead as ready and unscheduled and
+// recreates the context it was just cleared from (gt-5ti).
+const LabelSchedulerCleared = "gt:scheduler-cleared"
+
 // Labels that mark inter-agent messaging beads. These are never polecat work
 // and must not be dispatched to rig polecats.
 const (
@@ -196,21 +205,24 @@ func PlanDispatch(availableCapacity, batchSize int, ready []PendingBead) Dispatc
 		}
 	}
 
-	// Dispatch up to the smallest of capacity, batchSize, and readyBeads count
-	toDispatch := batchSize
-	if availableCapacity < toDispatch {
-		toDispatch = availableCapacity
-	}
+	// Dispatch up to the available capacity, respecting ready count
+	// If batchSize is 1 (default), fill capacity. If explicitly set higher, use that.
+	toDispatch := availableCapacity
 	if len(ready) < toDispatch {
 		toDispatch = len(ready)
 	}
-
-	reason := "batch"
-	if availableCapacity < batchSize && availableCapacity < len(ready) {
-		reason = "capacity"
+	// Only cap by batchSize if it's explicitly set higher than 1
+	if batchSize > 1 && batchSize < toDispatch {
+		toDispatch = batchSize
 	}
-	if len(ready) < batchSize && len(ready) < availableCapacity {
+
+	reason := "capacity"
+	if len(ready) < availableCapacity {
 		reason = "ready"
+	}
+	// Only mention batch if batchSize was a limiting factor and it's > 1
+	if batchSize > 1 && batchSize < availableCapacity && batchSize < len(ready) {
+		reason = "batch"
 	}
 
 	skipped := len(ready) - toDispatch + msgSkipped

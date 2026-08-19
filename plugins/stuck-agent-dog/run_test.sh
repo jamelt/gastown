@@ -180,6 +180,24 @@ case "${1:-}" in
     ;;
   escalate)
     printf '%s\n' "$*" >> "$TEST_STATE/escalate.log"
+    fp=""
+    want_json=false
+    args=("$@")
+    idx=0
+    while [ "$idx" -lt "${#args[@]}" ]; do
+      case "${args[$idx]}" in
+        --fingerprint) fp="${args[$((idx + 1))]}" ;;
+        --json) want_json=true ;;
+      esac
+      idx=$((idx + 1))
+    done
+    mkdir -p "$TEST_STATE/escalate_seen"
+    if [ -n "$fp" ] && [ -f "$TEST_STATE/escalate_seen/$fp" ]; then
+      [ "$want_json" = true ] && printf '{"status":"duplicate_suppressed","fingerprint":"%s"}\n' "$fp"
+      exit 0
+    fi
+    [ -n "$fp" ] && touch "$TEST_STATE/escalate_seen/$fp"
+    [ "$want_json" = true ] && printf '{"status":"ok","id":"hq-esc-test","fingerprint":"%s"}\n' "$fp"
     exit 0
     ;;
 esac
@@ -362,7 +380,8 @@ test_dead_agent_restarts_one() {
   assert_file_contains "$TEST_STATE/kill.log" "gt-alpha" "dead agent: killed target session"
   assert_line_count "$TEST_STATE/mail.log" 1 "dead agent: one restart mail"
   assert_file_contains "$TEST_STATE/mail.log" "gastown/witness" "dead agent: mailed rig witness"
-  assert_file_empty "$TEST_STATE/escalate.log" "dead agent: no mass-death escalation"
+  assert_file_not_contains "$TEST_STATE/escalate.log" "stuck-agent-dog:mass-death" "dead agent: no mass-death escalation"
+  assert_file_contains "$TEST_STATE/escalate.log" "--fingerprint stuck-agent-dog:polecat:zombie:gastown:alpha:gt-hook-alpha" "dead agent: per-incident escalation fingerprint"
 }
 
 test_in_progress_hook_restarts_one() {
@@ -373,7 +392,8 @@ test_in_progress_hook_restarts_one() {
 
   assert_line_count "$TEST_STATE/kill.log" 1 "in_progress hook: one session kill"
   assert_line_count "$TEST_STATE/mail.log" 1 "in_progress hook: one restart mail"
-  assert_file_empty "$TEST_STATE/escalate.log" "in_progress hook: no mass-death escalation"
+  assert_file_not_contains "$TEST_STATE/escalate.log" "stuck-agent-dog:mass-death" "in_progress hook: no mass-death escalation"
+  assert_file_contains "$TEST_STATE/escalate.log" "--fingerprint stuck-agent-dog:polecat:zombie:gastown:alpha:gt-hook-alpha" "in_progress hook: per-incident escalation fingerprint"
 }
 
 test_dead_session_restarts_one() {
@@ -384,7 +404,30 @@ test_dead_session_restarts_one() {
   assert_file_empty "$TEST_STATE/kill.log" "dead session: no session kill"
   assert_line_count "$TEST_STATE/mail.log" 1 "dead session: one restart mail"
   assert_file_contains "$TEST_STATE/mail.log" "RESTART_POLECAT: gastown/beta" "dead session: restart requested"
-  assert_file_empty "$TEST_STATE/escalate.log" "dead session: no mass-death escalation"
+  assert_file_not_contains "$TEST_STATE/escalate.log" "stuck-agent-dog:mass-death" "dead session: no mass-death escalation"
+  assert_file_contains "$TEST_STATE/escalate.log" "--fingerprint stuck-agent-dog:polecat:crashed:gastown:beta:gt-hook-beta" "dead session: per-incident escalation fingerprint"
+}
+
+test_repeat_crash_dedupes_restart_mail() {
+  setup_case
+  add_polecat beta session-dead
+  run_script
+  run_script
+
+  assert_line_count "$TEST_STATE/mail.log" 1 "repeat crash: restart mail sent only once"
+  assert_line_count "$TEST_STATE/escalate.log" 2 "repeat crash: escalate called on every run"
+  assert_file_contains "$TEST_STATE/output.log" "already escalated for this crash" "repeat crash: second run logged suppression"
+}
+
+test_repeat_zombie_dedupes_restart_mail_but_kills_every_run() {
+  setup_case
+  add_polecat alpha agent-dead
+  run_script
+  run_script
+
+  assert_line_count "$TEST_STATE/kill.log" 2 "repeat zombie: session killed every run"
+  assert_line_count "$TEST_STATE/mail.log" 1 "repeat zombie: restart mail sent only once"
+  assert_file_contains "$TEST_STATE/output.log" "already escalated for this zombie" "repeat zombie: second run logged suppression"
 }
 
 test_closed_hook_skips_restart() {
@@ -539,7 +582,8 @@ test_mass_death_recheck_one_remaining_restarts() {
   assert_line_count "$TEST_STATE/kill.log" 1 "one remaining: one kill"
   assert_file_contains "$TEST_STATE/kill.log" "gt-alpha" "one remaining: killed confirmed zombie"
   assert_line_count "$TEST_STATE/mail.log" 1 "one remaining: one restart mail"
-  assert_file_empty "$TEST_STATE/escalate.log" "one remaining: no mass-death escalation"
+  assert_file_not_contains "$TEST_STATE/escalate.log" "stuck-agent-dog:mass-death" "one remaining: no mass-death escalation"
+  assert_file_contains "$TEST_STATE/escalate.log" "--fingerprint stuck-agent-dog:polecat:zombie:gastown:alpha:gt-hook-alpha" "one remaining: per-incident escalation logged"
   assert_file_contains "$TEST_STATE/output.log" "dropped to 1 after live re-check" "one remaining: recheck downgraded"
 }
 
@@ -555,7 +599,7 @@ test_mass_death_recheck_reclassifies_dead_statuses() {
 
   assert_file_empty "$TEST_STATE/kill.log" "reclassified mass: no session kills"
   assert_file_empty "$TEST_STATE/mail.log" "reclassified mass: no restart mail"
-  assert_line_count "$TEST_STATE/escalate.log" 1 "reclassified mass: one escalation"
+  assert_line_count "$TEST_STATE/escalate.log" 3 "reclassified mass: one escalation"
   assert_file_contains "$TEST_STATE/escalate.log" "Mass agent death: 3 agents down" "reclassified mass: confirmed all dead"
   assert_file_contains "$TEST_STATE/escalate.log" "--fingerprint stuck-agent-dog:mass-death" "reclassified mass: fingerprint set"
 }
@@ -569,7 +613,7 @@ test_mass_death_skips_actions() {
 
   assert_file_empty "$TEST_STATE/kill.log" "mass death: no session kills"
   assert_file_empty "$TEST_STATE/mail.log" "mass death: no restart mail"
-  assert_line_count "$TEST_STATE/escalate.log" 1 "mass death: one escalation"
+  assert_line_count "$TEST_STATE/escalate.log" 3 "mass death: one escalation"
   assert_file_contains "$TEST_STATE/escalate.log" "--source plugin:stuck-agent-dog" "mass death: source set"
   assert_file_contains "$TEST_STATE/escalate.log" "--fingerprint stuck-agent-dog:mass-death" "mass death: fingerprint set"
   assert_file_contains "$TEST_STATE/output.log" "Skipping per-agent restart/kill actions" "mass death: action loops skipped"
@@ -593,6 +637,8 @@ test_hook_show_uses_json_and_rig_workdir
 test_dead_agent_restarts_one
 test_in_progress_hook_restarts_one
 test_dead_session_restarts_one
+test_repeat_crash_dedupes_restart_mail
+test_repeat_zombie_dedupes_restart_mail_but_kills_every_run
 test_closed_hook_skips_restart
 test_no_hook_dead_sessions_do_not_mass_death
 test_non_actionable_hook_statuses_do_not_mass_death

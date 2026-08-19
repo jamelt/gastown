@@ -47,7 +47,11 @@ elif [ "$(json_field "$STALE_JSON" safe_to_rebuild False)" != "True" ]; then
 elif [ ! -d "$RIG_ROOT" ]; then
   log "Rig root $RIG_ROOT does not exist. Skipping."
 else
-  DIRTY=$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null)
+  # .beads/config.yaml and .beads.gate.lock are machine-local runtime
+  # artifacts, not source changes, and are always present in the canonical
+  # checkout (gt-svqh) — ignore them so a genuinely clean tree isn't treated
+  # as dirty.
+  DIRTY=$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null | grep -vE '^.. \.beads/config\.yaml$|^.. \.beads\.gate\.lock$' || true)
   BRANCH=$(git -C "$RIG_ROOT" branch --show-current 2>/dev/null)
 
   if [ -n "$DIRTY" ]; then
@@ -75,7 +79,7 @@ else
       gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
         --title "Plugin: rebuild-gt [failure]" \
         --description "Build failed: $ERROR" >/dev/null 2>&1 || true
-      gt escalate "Plugin FAILED: rebuild-gt" -s medium 2>/dev/null || true
+      gt escalate "Plugin FAILED: rebuild-gt" -s medium --reason "$ERROR" 2>/dev/null || true
       BUILD_FAILED=1
     fi
   fi
@@ -110,7 +114,8 @@ else
       gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
         --title "Plugin: rebuild-gt [daemon restart verify failed]" \
         --description "Daemon restarted but still stale after restart (commit: $POST_COMMIT)" >/dev/null 2>&1 || true
-      gt escalate "Plugin FAILED: rebuild-gt daemon restart did not take effect" -s medium 2>/dev/null || true
+      gt escalate "Plugin FAILED: rebuild-gt daemon restart did not take effect" -s medium \
+        --reason "Daemon restarted but still stale after restart (commit: $POST_COMMIT)" 2>/dev/null || true
       DAEMON_FAILED=1
     else
       log "Daemon restarted and verified fresh (commit: $POST_COMMIT)"
@@ -124,7 +129,7 @@ else
     gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
       --title "Plugin: rebuild-gt [daemon restart failure]" \
       --description "$ERROR" >/dev/null 2>&1 || true
-    gt escalate "Plugin FAILED: rebuild-gt daemon restart" -s medium 2>/dev/null || true
+    gt escalate "Plugin FAILED: rebuild-gt daemon restart" -s medium --reason "$ERROR" 2>/dev/null || true
     DAEMON_FAILED=1
   fi
 fi

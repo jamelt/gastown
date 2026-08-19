@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -24,21 +25,25 @@ type SlingParams struct {
 	TargetAgent string // Exact existing polecat reservation; empty means spawn in RigName
 
 	// CLI flag passthrough
-	Args         string   // --args
-	Vars         []string // --var (key=value pairs)
-	Merge        string   // --merge (convoy strategy)
-	BaseBranch   string   // --base-branch
-	ResumeBranch string   // --branch / --pr (resume existing PR branch, gh#3602)
-	Account      string   // --account
-	Agent        string   // --agent
-	NoConvoy     bool     // --no-convoy
-	Owned        bool     // --owned
-	NoMerge      bool     // --no-merge
-	Force        bool     // --force
-	HookRawBead  bool     // --hook-raw-bead
-	NoBoot       bool     // --no-boot
-	Mode         string   // --ralph: "" (normal) or "ralph"
-	ReviewOnly   bool     // --review-only: review and report back only, no merge/commit/push
+	Args          string   // --args
+	Vars          []string // --var (key=value pairs)
+	Merge         string   // --merge (convoy strategy)
+	BaseBranch    string   // --base-branch
+	BaseRef       string   // --base-ref
+	PublishRemote string   // --publish-remote
+	PublishRef    string   // --publish-ref
+	PRTargetRef   string   // --pr-target-ref
+	ResumeBranch  string   // --branch / --pr (resume existing PR branch, gh#3602)
+	Account       string   // --account
+	Agent         string   // --agent
+	NoConvoy      bool     // --no-convoy
+	Owned         bool     // --owned
+	NoMerge       bool     // --no-merge
+	Force         bool     // --force
+	HookRawBead   bool     // --hook-raw-bead
+	NoBoot        bool     // --no-boot
+	Mode          string   // --ralph: "" (normal) or "ralph"
+	ReviewOnly    bool     // --review-only: review and report back only, no merge/commit/push
 
 	// Execution behavior (set by caller, not serialized to queue)
 	SkipCook         bool   // Batch optimization: formula already cooked
@@ -144,6 +149,26 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	if info.Status == "closed" || info.Status == "tombstone" {
 		result.ErrMsg = "already " + info.Status
 		return result, fmt.Errorf("bead %s is %s (work already completed)", params.BeadID, info.Status)
+	}
+
+	// Molecule-machinery guard (gt-6va3): never dispatch a formula-molecule
+	// container or one of its materialized step beads as real work. Mirrors the
+	// closed/tombstone guard above and the same check in scheduleBead, so a
+	// stale step bead is rejected even if a sling context slipped past enqueue.
+	if reason := moleculeScaffoldRejectReason(info); reason != "" {
+		result.ErrMsg = reason
+		return result, fmt.Errorf("bead %s is %s", params.BeadID, reason)
+	}
+
+	// hq-1s4w hard-prohibition guard (gt-b2qi). No override here: batch,
+	// convoy, epic sling, and queue dispatch all funnel through executeSling,
+	// and hq-1s4w requires fresh, per-dispatch approval that a bulk operation
+	// covering many beads at once cannot attest. To dispatch this specific
+	// bead, dequeue it (gt scheduler clear) and re-sling it individually with
+	// gt sling <bead> <rig> --confirm-human-approved.
+	if err := checkHardProhibition(info.Title, info.Description, info.Labels, false); err != nil {
+		result.ErrMsg = "hard-prohibition: " + err.Error()
+		return result, fmt.Errorf("%w\nTo dispatch: gt scheduler clear (dequeue), then gt sling %s <rig> --confirm-human-approved", err, params.BeadID)
 	}
 
 	// Save explicit force state before dead-agent auto-force, so the deferred
@@ -310,7 +335,12 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		existingConvoy := isTrackedByConvoy(params.BeadID)
 		if existingConvoy == "" {
 			var err error
-			convoyID, err = createAutoConvoy(params.BeadID, info.Title, params.Owned, params.Merge, params.BaseBranch)
+			convoyID, err = createAutoConvoy(params.BeadID, info.Title, params.Owned, params.Merge, params.BaseBranch, git.WorkRefs{
+				BaseRef:       params.BaseRef,
+				PublishRemote: params.PublishRemote,
+				PublishRef:    params.PublishRef,
+				PRTargetRef:   params.PRTargetRef,
+			})
 			if err != nil {
 				fmt.Printf("  %s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 			} else {

@@ -1,12 +1,12 @@
-// Package lock provides agent identity locking to prevent multiple agents
-// from claiming the same worker identity.
+// Package lock provides PID-metadata file locking: a lock file records the
+// owning PID, hostname, and acquisition time, so a stale lock (owning PID no
+// longer alive, or optionally older than a caller-supplied TTL) can be told
+// apart from a live one and reclaimed automatically instead of wedging
+// forever.
 //
-// Lock files are stored at <worker>/.runtime/agent.lock and contain:
-// - PID of the owning process
-// - Timestamp when lock was acquired
-// - Session ID (tmux session name)
-//
-// Stale locks (where the PID is dead) are automatically cleaned up.
+// The original and still primary use is agent identity locking, at
+// <worker>/.runtime/agent.lock, to prevent multiple agents from claiming the
+// same worker identity.
 package lock
 
 import (
@@ -70,30 +70,50 @@ type LockInfo struct {
 
 // IsStale checks if the lock is stale (owning process is dead).
 func (l *LockInfo) IsStale() bool {
-	return !processExists(l.PID)
+	return l.IsStaleAfter(0)
 }
 
-// Lock represents an agent identity lock for a worker directory.
-type Lock struct {
-	workerDir string
-	lockPath  string
-}
-
-// New creates a Lock for the given worker directory.
-func New(workerDir string) *Lock {
-	return &Lock{
-		workerDir: workerDir,
-		lockPath:  filepath.Join(workerDir, ".runtime", "agent.lock"),
+// IsStaleAfter reports whether the lock is stale: either the owning PID is
+// no longer alive, or (when maxAge > 0) the lock is older than maxAge. The
+// age check is a backstop for cases PID-liveness alone can't be trusted —
+// e.g. PID reuse, or a lock file left behind by a process on a different
+// host — and should be sized with a wide safety margin over any realistic
+// hold time, since it can reclaim a lock whose owning PID is still alive.
+func (l *LockInfo) IsStaleAfter(maxAge time.Duration) bool {
+	if !processExists(l.PID) {
+		return true
 	}
+	return maxAge > 0 && time.Since(l.AcquiredAt) > maxAge
 }
 
-// Acquire attempts to acquire the lock for this worker.
+// Lock represents a PID-metadata lock at a file path.
+type Lock struct {
+	lockPath string
+}
+
+// New creates a Lock at the given lock file path.
+func New(lockPath string) *Lock {
+	return &Lock{lockPath: lockPath}
+}
+
+// Acquire attempts to acquire the lock.
 // Returns ErrLocked if another live process holds the lock.
-// Automatically cleans up stale locks.
+// Automatically cleans up stale (dead-PID) locks.
 //
 // Uses OS-level advisory locking (flock) to prevent TOCTOU races
 // where two processes could both see no lock and both write one.
 func (l *Lock) Acquire(sessionID string) error {
+	return l.acquire(sessionID, 0)
+}
+
+// AcquireTTL is like Acquire, but additionally reclaims a lock older than
+// maxAge even if its owning PID still resolves to a live process. See
+// LockInfo.IsStaleAfter for when that's appropriate.
+func (l *Lock) AcquireTTL(sessionID string, maxAge time.Duration) error {
+	return l.acquire(sessionID, maxAge)
+}
+
+func (l *Lock) acquire(sessionID string, maxAge time.Duration) error {
 	// Ensure .runtime directory exists before flock
 	dir := filepath.Dir(l.lockPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -112,7 +132,7 @@ func (l *Lock) Acquire(sessionID string) error {
 	info, err := l.Read()
 	if err == nil {
 		// Lock exists - check if stale
-		if info.IsStale() {
+		if info.IsStaleAfter(maxAge) {
 			// Stale lock - remove it
 			if err := l.Release(); err != nil {
 				return fmt.Errorf("removing stale lock: %w", err)
@@ -164,6 +184,15 @@ func (l *Lock) Read() (*LockInfo, error) {
 // Returns ErrLocked if locked by another live process.
 // Automatically cleans up stale locks.
 func (l *Lock) Check() error {
+	// Acquire advisory flock to serialize concurrent Check() and Acquire() calls.
+	// Without this, a concurrent Acquire() could have its freshly written lock
+	// file deleted between the write and when it considers itself locked.
+	unlock, err := flockAcquire(l.lockPath + ".flock")
+	if err != nil {
+		return fmt.Errorf("acquiring coordination lock: %w", err)
+	}
+	defer unlock()
+
 	info, err := l.Read()
 	if err != nil {
 		if errors.Is(err, ErrNotLocked) {
@@ -174,7 +203,7 @@ func (l *Lock) Check() error {
 
 	// Check if stale
 	if info.IsStale() {
-		// Clean up stale lock (best-effort cleanup)
+		// Clean up stale lock (now safe - we hold the flock)
 		_ = l.Release()
 		return nil
 	}
@@ -275,8 +304,7 @@ func FindAllLocks(root string) (map[string]*LockInfo, error) {
 
 		if filepath.Base(path) == "agent.lock" && filepath.Base(filepath.Dir(path)) == ".runtime" {
 			workerDir := filepath.Dir(filepath.Dir(path))
-			lock := New(workerDir)
-			lockInfo, err := lock.Read()
+			lockInfo, err := New(path).Read()
 			if err == nil {
 				locks[workerDir] = lockInfo
 			}
@@ -315,8 +343,8 @@ func CleanStaleLocks(root string) (int, error) {
 				continue
 			}
 			// Both PID dead AND no session = truly stale
-			lock := New(workerDir)
-			if err := lock.Release(); err == nil {
+			agentLock := New(filepath.Join(workerDir, ".runtime", "agent.lock"))
+			if err := agentLock.Release(); err == nil {
 				cleaned++
 			}
 		}

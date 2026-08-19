@@ -1,0 +1,193 @@
+{
+  "schema_version": "pr-sheriff-evidence/v1",
+  "policy_version": "pr-sheriff-policy/v1.1",
+  "generated_at": "2026-08-19T08:40:00Z",
+  "run_id": "gt-pr-4323-sheriff-review-2026-08-19",
+  "subject": {
+    "forge": "github",
+    "repo_id": "gastownhall/gastown",
+    "default_branch": "main",
+    "change_type": "pull_request",
+    "change_id": "4323",
+    "url": "https://github.com/gastownhall/gastown/pull/4323",
+    "title": "fix(polecat): submit uncommitted work on session Stop, not just unpushed commits",
+    "author": "Ben-Williams-Founder",
+    "author_tier": "community",
+    "draft": false,
+    "base_ref": "main",
+    "base_sha": null,
+    "head_ref": "upstream-polecat-submit",
+    "head_sha": "b9e00b316d05c855f3d45742814a0db0fd4a6201",
+    "diff_summary": {
+      "additions": 160,
+      "deletions": null,
+      "changed_files": 2,
+      "paths": ["internal/cmd/tap_polecat_stop.go", "internal/cmd/tap_polecat_stop_test.go"]
+    }
+  },
+  "repo_policy": {
+    "label_aliases": [],
+    "feature_kind_values": ["feature", "enhancement"],
+    "merge_ready_status_values": ["review-approved", "merge-ready"],
+    "approver_roles": ["maintainer", "owner", "mayor"],
+    "evidence_locations": ["local_report", "bead"],
+    "baseline_checks": [],
+    "no_verification_reasons": ["already_merged_via_replacement"]
+  },
+  "action_plan": {
+    "id": "action-plan-4323-confirm-closed",
+    "mode": "confirm_closed_superseded",
+    "proposed_action_ref": "action-plan-4323-confirm-closed",
+    "summary": "Confirm PR #4323 is closed on GitHub as superseded by already-merged replacement PR #4421 (merge commit 997f75a46028c500b70afa11f7b69eccb5a7409a). No code change, replacement, or cherry-pick is warranted since the fix is already live on main. Record durable evidence and close this review bead without using refinery/MQ.",
+    "created_at": "2026-08-19T08:35:00Z"
+  },
+  "labels": {
+    "observed": [
+      {"name": "kind/bug", "family": "kind", "semantic_value": "bug"},
+      {"name": "priority/p1", "family": "priority", "semantic_value": "p1"},
+      {"name": "status/review-failed", "family": "status", "semantic_value": "review-failed"}
+    ],
+    "status": "review-failed",
+    "priority": "p1",
+    "kind": "bug",
+    "snapshot_artifact_ref": "label-snapshot"
+  },
+  "artifacts": [
+    {"id": "label-snapshot", "kind": "label_snapshot", "uri": "urn:github:pr:4323:labels", "actor": "crater", "created_at": "2026-08-19T08:40:00Z", "digest": null, "summary": "PR #4323 carries kind/bug, priority/p1, status/review-failed — accurate for a closed/superseded PR, not stale."},
+    {"id": "original-pr-4323", "kind": "pull_request_snapshot", "uri": "https://github.com/gastownhall/gastown/pull/4323", "actor": "research-leg-R01", "created_at": "2026-08-19T08:31:00Z", "digest": "b9e00b316d05c855f3d45742814a0db0fd4a6201", "summary": "PR #4323 is CLOSED (not merged), closedAt 2026-07-07T23:00:07Z. Closure comment from Bella-Giraffety cites supersession by merged replacement PR #4421."},
+    {"id": "replacement-pr-4421", "kind": "pull_request_snapshot", "uri": "https://github.com/gastownhall/gastown/pull/4421", "actor": "research-leg-R02", "created_at": "2026-08-19T08:31:30Z", "digest": "997f75a46028c500b70afa11f7b69eccb5a7409a", "summary": "PR #4421 MERGED 2026-07-07T22:59:49Z, merge commit 997f75a46028c500b70afa11f7b69eccb5a7409a. All CI checks green (Lint, Test, Integration Tests, Windows Smoke Test); Block Internal PRs skipped (not a failure)."},
+    {"id": "main-fix-confirmed", "kind": "code_inspection", "uri": "urn:git:blob:origin/main:internal/cmd/tap_polecat_stop.go", "actor": "crater", "created_at": "2026-08-19T08:44:00Z", "digest": null, "summary": "Directly inspected origin/main's internal/cmd/tap_polecat_stop.go: polecatStopPendingWork checks CheckUncommittedWork (dirty tree, excluding runtime paths), StashCount, and BranchTargetStatus (unsubmitted commits). On any git error, returns pending=false — this matches PR #4323's own documented design intent ('fails closed (no work) on any git error, so a transient git failure never blocks session stop'), not a contract violation."},
+    {"id": "diff-comparison", "kind": "review_report", "uri": "urn:opencode:research:R04-diff-comparison", "actor": "research-leg-R04", "created_at": "2026-08-19T08:32:00Z", "digest": null, "summary": "#4421 implements the same bug/intent as #4323 (dirty-tree detection on Stop), as a superset: adds stash handling and target-containment detection, uses shared internal/git package instead of raw shell-outs, broader test coverage."},
+    {"id": "attribution-evidence", "kind": "review_report", "uri": "urn:opencode:research:R05-attribution", "actor": "research-leg-R05", "created_at": "2026-08-19T08:32:30Z", "digest": "997f75a46028c500b70afa11f7b69eccb5a7409a", "summary": "PR #4421 body states 'Supersedes #4323 by @Ben-Williams-Founder. Original head: b9e00b316d05c855f3d45742814a0db0fd4a6201.' Commit 659f9a1e carries Original-PR, Original-Head, and Co-authored-by: Ben-Williams-Founder trailers; commit author list includes Ben-Williams-Founder."},
+    {"id": "ci-health", "kind": "test_log", "uri": "urn:github:checks:pr:4421", "actor": "research-leg-R06", "created_at": "2026-08-19T08:33:00Z", "digest": null, "summary": "All CI checks green at #4421 merge time; no failures or flaky retries."},
+    {"id": "issue-link-scan", "kind": "review_report", "uri": "urn:opencode:research:R07-issue-scan", "actor": "research-leg-R07", "created_at": "2026-08-19T08:33:30Z", "digest": null, "summary": "Scanned title+body+comments (gh --json body,comments,title) on both #4323 and #4421. No 'Fixes #'/'Closes #' GitHub issue-linking syntax found. Only internal bead ID gt-ksnv referenced (not a GitHub issue). No orphaned GitHub issues tied to this specific bug remain to disposition."},
+    {"id": "regression-scan", "kind": "review_report", "uri": "urn:opencode:research:R08-regression-scan", "actor": "research-leg-R08", "created_at": "2026-08-19T08:34:00Z", "digest": null, "summary": "No regression of #4421's specific fix since merge; tap_polecat_stop.go has had zero commits since the fix landed. A related-but-DISTINCT bug in the same safety-net family (gt-xz2, in internal/cmd/done.go's runtime-path auto-commit ordering) was found and fixed separately on 2026-08-19 — out of scope for #4323. Two open, untriaged GitHub issues (#4633, #4551) touch nearby `gt done` edge cases but are not about #4323/#4421's specific dirty-Stop bug — correctly out of scope for this bead, left for separate triage."},
+    {"id": "bead-chain-closed", "kind": "review_report", "uri": "urn:opencode:research:R09-bead-chain", "actor": "research-leg-R09", "created_at": "2026-08-19T08:34:30Z", "digest": null, "summary": "Full related bead chain already closed: gt-aaag (initial triage), gt-ksnv (replacement work), gt-odfr (replacement PR-Sheriff item), gt-7qwy (prior full 15+5+5 review of this same PR, closed 2026-07-06 with 'no code changes, already fixed/merged'), gt-25lf (final merge gate for #4421)."},
+    {"id": "contributor-tier", "kind": "review_report", "uri": "urn:opencode:research:R10-contributor-tier", "actor": "research-leg-R10", "created_at": "2026-08-19T08:35:00Z", "digest": null, "summary": "pr-sheriff-config.json does not exist in this environment; Ben-Williams-Founder is not explicitly tiered anywhere. Defaults to 'community' per the pr-sheriff skill doc's three-tier model."},
+    {"id": "no-other-pending-work", "kind": "review_report", "uri": "urn:opencode:research:R12-no-pending", "actor": "research-leg-R12", "created_at": "2026-08-19T08:35:30Z", "digest": null, "summary": "No open/in_progress/hooked beads reference PR #4323 other than gt-pr-4323-sheriff-review itself."},
+    {"id": "remote-sanity", "kind": "review_report", "uri": "urn:opencode:research:R13-remote-sanity", "actor": "research-leg-R13", "created_at": "2026-08-19T08:36:00Z", "digest": null, "summary": "origin=jamelt/gastown (personal fork); upstream=gastownhall/gastown (fetch-only, push disabled) — confirms gastownhall/gastown is the canonical repo for #4323/#4421 lookups."},
+    {"id": "redispatch-assessment", "kind": "review_report", "uri": "urn:opencode:research:R14-redispatch", "actor": "research-leg-R14", "created_at": "2026-08-19T08:36:30Z", "digest": null, "summary": "This bead (gt-pr-4323-sheriff-review) is a stale duplicate re-dispatch of already-closed gt-7qwy, created 2026-07-02 and re-hooked 2026-08-19 after the underlying PR was already resolved. Correct close: bd close --reason=... (terminal status, prevents zombie-patrol re-dispatch), not gt done (bead forbids refinery/MQ and there are zero commits to submit)."},
+    {"id": "cleanup-first-assessment", "kind": "review_report", "uri": "urn:opencode:research:R15-cleanup-first", "actor": "research-leg-R15", "created_at": "2026-08-19T08:37:00Z", "digest": null, "summary": "Cleanup-first lens: re-implementing or re-diffing already-merged, already-tested code would create a divergent duplicate patch with no functional gap to justify it. Correct disposition: confirm closure, do not reopen or duplicate the already-merged fix."}
+  ],
+  "implementation": {
+    "code_changed_by_sheriff": false,
+    "mode": "no_action",
+    "first_code_change_at": null,
+    "modified_paths": [],
+    "commits": []
+  },
+  "evidence": {
+    "research_legs": [
+      {"id": "research-01", "independence_key": "R01-pr4323-state", "artifact_ref": "original-pr-4323", "completed_at": "2026-08-19T08:31:00Z", "actor": "research-leg-R01", "lens": "GitHub PR state", "summary": "PR #4323 is CLOSED, superseded by merged #4421."},
+      {"id": "research-02", "independence_key": "R02-pr4421-state", "artifact_ref": "replacement-pr-4421", "completed_at": "2026-08-19T08:31:30Z", "actor": "research-leg-R02", "lens": "replacement PR state", "summary": "PR #4421 MERGED with all CI green, references #4323."},
+      {"id": "research-03", "independence_key": "R03-main-fix-present", "artifact_ref": "main-fix-confirmed", "completed_at": "2026-08-19T08:44:00Z", "actor": "crater (verified directly)", "lens": "fix presence on main", "summary": "polecatStopPendingWork present on main, checks dirty-tree + stash + unsubmitted-commits; error handling matches #4323's own documented design intent."},
+      {"id": "research-04", "independence_key": "R04-diff-comparison", "artifact_ref": "diff-comparison", "completed_at": "2026-08-19T08:32:00Z", "actor": "research-leg-R04", "lens": "diff/intent comparison", "summary": "#4421 is a faithful superset implementation of #4323's intent."},
+      {"id": "research-05", "independence_key": "R05-attribution", "artifact_ref": "attribution-evidence", "completed_at": "2026-08-19T08:32:30Z", "actor": "research-leg-R05", "lens": "attribution", "summary": "Original author attribution fully preserved via trailers and PR body."},
+      {"id": "research-06", "independence_key": "R06-ci-health", "artifact_ref": "ci-health", "completed_at": "2026-08-19T08:33:00Z", "actor": "research-leg-R06", "lens": "CI health", "summary": "All checks green at #4421 merge."},
+      {"id": "research-07", "independence_key": "R07-issue-links", "artifact_ref": "issue-link-scan", "completed_at": "2026-08-19T08:33:30Z", "actor": "research-leg-R07", "lens": "related GitHub issues", "summary": "No GitHub issues to disposition for this specific bug; only internal bead gt-ksnv referenced."},
+      {"id": "research-08", "independence_key": "R08-regression", "artifact_ref": "regression-scan", "completed_at": "2026-08-19T08:34:00Z", "actor": "research-leg-R08", "lens": "post-merge stability", "summary": "No regression of #4421's fix; distinct adjacent bug (gt-xz2) already fixed separately; #4633/#4551 open but unrelated to this specific bug."},
+      {"id": "research-09", "independence_key": "R09-bead-chain", "artifact_ref": "bead-chain-closed", "completed_at": "2026-08-19T08:34:30Z", "actor": "research-leg-R09", "lens": "duplicate bead trail", "summary": "Entire related bead chain already closed."},
+      {"id": "research-10", "independence_key": "R10-contributor-tier", "artifact_ref": "contributor-tier", "completed_at": "2026-08-19T08:35:00Z", "actor": "research-leg-R10", "lens": "contributor policy tier", "summary": "Defaults to community tier; no explicit config found."},
+      {"id": "research-11", "independence_key": "R11-labels", "artifact_ref": "label-snapshot", "completed_at": "2026-08-19T08:35:15Z", "actor": "research-leg-R11", "lens": "label accuracy", "summary": "Labels on #4323 are accurate and not stale."},
+      {"id": "research-12", "independence_key": "R12-no-pending", "artifact_ref": "no-other-pending-work", "completed_at": "2026-08-19T08:35:30Z", "actor": "research-leg-R12", "lens": "duplicate open work", "summary": "No other open beads reference PR #4323."},
+      {"id": "research-13", "independence_key": "R13-remote-sanity", "artifact_ref": "remote-sanity", "completed_at": "2026-08-19T08:36:00Z", "actor": "research-leg-R13", "lens": "repo/fork sanity", "summary": "gastownhall/gastown confirmed canonical upstream."},
+      {"id": "research-14", "independence_key": "R14-redispatch", "artifact_ref": "redispatch-assessment", "completed_at": "2026-08-19T08:36:30Z", "actor": "research-leg-R14", "lens": "duplicate re-dispatch / closure mechanism", "summary": "Stale duplicate re-dispatch; bd close --reason is the correct terminal closure."},
+      {"id": "research-15", "independence_key": "R15-cleanup-first", "artifact_ref": "cleanup-first-assessment", "completed_at": "2026-08-19T08:37:00Z", "actor": "research-leg-R15", "lens": "cleanup-first policy", "summary": "No action is the convergent, policy-compliant disposition."}
+    ],
+    "pre_implementation_reviews": [
+      {"id": "pre-01", "independence_key": "P01-disposition-correctness", "artifact_ref": null, "reviewed_action_ref": "action-plan-4323-confirm-closed", "completed_at": "2026-08-19T08:39:00Z", "actor": "pre-review-P01", "verdict": "approve", "summary": "Evidence chain is complete and internally consistent; CONFIRMED_CLOSED_SUPERSEDED is factually correct."},
+      {"id": "pre-02", "independence_key": "P02-scope-policy", "artifact_ref": null, "reviewed_action_ref": "action-plan-4323-confirm-closed", "completed_at": "2026-08-19T08:39:15Z", "actor": "pre-review-P02", "verdict": "approve", "summary": "Complies with cleanup-first convergence and the bead's explicit no-refinery/MQ constraint; bd close --reason is correct."},
+      {"id": "pre-03", "independence_key": "P03-evidence-completeness", "artifact_ref": null, "reviewed_action_ref": "action-plan-4323-confirm-closed", "completed_at": "2026-08-19T08:41:00Z", "actor": "pre-review-P03", "verdict": "reject_then_resolved", "summary": "Flagged R03's fail-open finding as needing a follow-up bead, and 'no orphaned issues' as overclaiming past #4633/#4551. Resolved: direct re-inspection of PR #4323's own body text shows the shipped fail-open-on-git-error behavior matches the author's own documented 'fails closed (no work) on any git error, so a transient git failure never blocks session stop' design intent — not a new/undisclosed defect, so no follow-up bead is warranted. Verdict wording tightened to scope 'no orphaned issues' to this specific bug, noting #4633/#4551 remain open but unrelated."},
+      {"id": "pre-04", "independence_key": "P04-attribution-issue-linking", "artifact_ref": null, "reviewed_action_ref": "action-plan-4323-confirm-closed", "completed_at": "2026-08-19T08:40:30Z", "actor": "pre-review-P04", "verdict": "reject_then_resolved", "summary": "Flagged uncertainty over whether PR comments (not just body/title) were scanned for issue links. Resolved: R07's underlying command explicitly requested body+comments+title (`gh pr view --json body,comments,title`) for both PRs, so the scan was already comprehensive."},
+      {"id": "pre-05", "independence_key": "P05-closure-mechanism", "artifact_ref": null, "reviewed_action_ref": "action-plan-4323-confirm-closed", "completed_at": "2026-08-19T08:39:30Z", "actor": "pre-review-P05", "verdict": "approve", "summary": "bd close --reason=... is the correct and only compliant terminal closure mechanism given the bead's explicit no-refinery/MQ constraint and zero commits to submit."}
+    ],
+    "post_implementation_reviews": []
+  },
+  "cleanup_first": {
+    "assessment": "convergent",
+    "rationale": "The fix for the underlying bug is already merged into main via replacement PR #4421. Re-touching, re-diffing, or cherry-picking this code now would create a divergent duplicate patch with no functional gap to justify it, violating convergence. No action on the codebase is the cleanup-first-correct disposition.",
+    "prohibited_patterns": [
+      {"kind": "bandaid", "present": false, "exception_reason": "none", "evidence_ref": null},
+      {"kind": "workaround_layer", "present": false, "exception_reason": "none", "evidence_ref": null},
+      {"kind": "compatibility_shim", "present": false, "exception_reason": "none", "evidence_ref": null},
+      {"kind": "patch_on_patch", "present": false, "exception_reason": "none", "evidence_ref": null},
+      {"kind": "scope_creep", "present": false, "exception_reason": "none", "evidence_ref": null}
+    ]
+  },
+  "enhancement_approval": {
+    "required": false,
+    "required_reason": "Bugfix intent, not a feature/enhancement.",
+    "approved": false,
+    "approver": null,
+    "approver_role": null,
+    "approval_ref": null,
+    "approved_at": null
+  },
+  "verification": {
+    "focused_checks": [],
+    "ci_checks": [
+      {"name": "PR #4421 CI at merge time", "command_or_check": "gh pr checks 4421 --repo gastownhall/gastown", "outcome": "pass", "artifact_ref": "ci-health", "reason": "All configured checks green; no unrelated failures."}
+    ]
+  },
+  "baseline_red_waiver": {
+    "requested": false,
+    "approved": false,
+    "approved_by": null,
+    "approver_role": null,
+    "approved_at": null,
+    "approval_ref": null,
+    "failing_checks": [],
+    "unrelated_rationale": "",
+    "evidence_refs": []
+  },
+  "replacement_flow": {
+    "required": false,
+    "mode": "already_replaced",
+    "state": "already_merged",
+    "original_change_url": "https://github.com/gastownhall/gastown/pull/4323",
+    "replacement_change_url": "https://github.com/gastownhall/gastown/pull/4421",
+    "replacement_branch": null,
+    "replacement_commit_refs": ["997f75a46028c500b70afa11f7b69eccb5a7409a"],
+    "original_author": "Ben-Williams-Founder",
+    "evidence_reuse": {
+      "reused_artifact_refs": [],
+      "fresh_artifact_refs": ["original-pr-4323", "replacement-pr-4421", "main-fix-confirmed", "diff-comparison", "attribution-evidence", "ci-health", "issue-link-scan", "regression-scan", "bead-chain-closed"],
+      "rationale": "This is a fresh review-only pass; the replacement (#4421) itself was already merged by an earlier PR Sheriff cycle (gt-ksnv/gt-odfr/gt-25lf, closed 2026-07-07), not by this bead."
+    },
+    "attribution": {
+      "required": true,
+      "required_reason": "Replacement PR #4421 carries forward PR #4323's intent from Ben-Williams-Founder.",
+      "preserved": true,
+      "method": "co_authored_by",
+      "artifact_refs": ["attribution-evidence"]
+    },
+    "superseded_closure": {
+      "required": false,
+      "state": "already_closed",
+      "closure_intent_ref": "original-pr-4323",
+      "replacement_merge_ref": "replacement-pr-4421",
+      "closure_ref": "original-pr-4323"
+    }
+  },
+  "blocker_scan": {
+    "scanned_sources": ["labels", "pr_comments", "review_comments", "bead_notes", "related_beads", "current_main_code"],
+    "unresolved_blockers_found": false,
+    "blocker_refs": [],
+    "resolution_refs": ["original-pr-4323", "replacement-pr-4421", "main-fix-confirmed", "bead-chain-closed"],
+    "scanned_at": "2026-08-19T08:44:00Z",
+    "summary": "No unresolved blockers. PR #4323 is closed/superseded, replacement #4421 is merged and stable, related bead chain is fully closed, no orphaned GitHub issues for this specific bug (two adjacent-but-distinct open issues #4633/#4551 noted for separate triage, out of this bead's scope)."
+  },
+  "gates": [],
+  "final": {
+    "verdict": "confirmed_closed_superseded",
+    "decision_valid": true,
+    "merge_path_allowed": false,
+    "blocking_gates": [],
+    "target_change_url": "https://github.com/gastownhall/gastown/pull/4421",
+    "target_head_sha": "997f75a46028c500b70afa11f7b69eccb5a7409a",
+    "decided_by": "crater",
+    "decided_at": "2026-08-19T08:45:00Z",
+    "reason": "PR #4323 is closed on GitHub, superseded by already-merged replacement PR #4421 (all CI green, attribution preserved, fix confirmed present and stable on current main). No code change, cherry-pick, or further replacement is warranted. Full 15 research legs + 5 independent pre-decision reviews completed; two initial-reject findings (P03, P04) were investigated and resolved without requiring any code or scope changes. Bead chain for this PR is fully closed.",
+    "required_actions": ["Close bead gt-pr-4323-sheriff-review via bd close --reason (not gt done/refinery MQ, per bead's explicit constraint and zero code changes)."]
+  }
+}

@@ -159,6 +159,7 @@ if [ "${1:-}" = "-C" ]; then
   case "${1:-}" in
     status)
       [ -f "$TEST_STATE/dirty" ] && printf ' M somefile\n'
+      [ -f "$TEST_STATE/benign_dirty" ] && printf ' M .beads/config.yaml\n?? .beads.gate.lock\n'
       exit 0
       ;;
     branch)
@@ -332,6 +333,33 @@ test_not_safe_to_rebuild_skips_build_only() {
   assert_file_empty "$TEST_STATE/escalate.log" "unsafe rebuild: no escalation"
 }
 
+# Regression coverage for gt-svqh: a genuinely dirty tree must still skip the
+# rebuild.
+test_real_dirty_repo_skips_build() {
+  setup_case
+  printf '{"stale": true, "safe_to_rebuild": true}\n' > "$TEST_STATE/stale.json"
+  touch "$TEST_STATE/dirty"
+  run_script
+
+  assert_exit_code 0 "real dirty repo: exit 0"
+  assert_file_contains "$TEST_STATE/record.log" "Skipped: repo has uncommitted changes" "real dirty repo: skip recorded"
+  assert_file_empty "$TEST_STATE/escalate.log" "real dirty repo: no escalation"
+}
+
+# Regression coverage for gt-svqh: .beads/config.yaml and .beads.gate.lock are
+# always present as machine-local artifacts in the canonical checkout, and
+# must not be treated as a dirty tree that blocks the rebuild.
+test_benign_machine_local_dirt_does_not_block_build() {
+  setup_case
+  printf '{"stale": true, "safe_to_rebuild": true}\n' > "$TEST_STATE/stale.json"
+  touch "$TEST_STATE/benign_dirty"
+  run_script
+
+  assert_exit_code 0 "benign dirt: exit 0"
+  assert_file_contains "$TEST_STATE/record.log" "rebuild-gt: old-ver -> new-ver" "benign dirt: build still ran"
+  assert_file_empty "$TEST_STATE/escalate.log" "benign dirt: no escalation"
+}
+
 test_fresh_binary_daemon_not_running
 test_build_success_daemon_not_running
 test_build_and_daemon_restart_success
@@ -341,6 +369,8 @@ test_daemon_restart_command_fails
 test_daemon_restart_verify_fails
 test_build_failure_still_runs_daemon_phase
 test_not_safe_to_rebuild_skips_build_only
+test_real_dirty_repo_skips_build
+test_benign_machine_local_dirt_does_not_block_build
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 func TestMainBranchTestInterval(t *testing.T) {
@@ -113,7 +115,10 @@ func TestLoadRigGateConfig(t *testing.T) {
 	t.Run("no merge_queue section", func(t *testing.T) {
 		dir := t.TempDir()
 		data := `{"type":"rig","version":1,"name":"test"}`
-		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(data), 0644); err != nil {
+		if err := os.Mkdir(filepath.Join(dir, "settings"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config.RigSettingsPath(dir), []byte(data), 0644); err != nil {
 			t.Fatal(err)
 		}
 		cfg, err := loadRigGateConfig(dir)
@@ -133,7 +138,10 @@ func TestLoadRigGateConfig(t *testing.T) {
 			},
 		}
 		raw, _ := json.Marshal(data)
-		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+		if err := os.Mkdir(filepath.Join(dir, "settings"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config.RigSettingsPath(dir), raw, 0644); err != nil {
 			t.Fatal(err)
 		}
 		cfg, err := loadRigGateConfig(dir)
@@ -160,7 +168,10 @@ func TestLoadRigGateConfig(t *testing.T) {
 			},
 		}
 		raw, _ := json.Marshal(data)
-		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+		if err := os.Mkdir(filepath.Join(dir, "settings"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config.RigSettingsPath(dir), raw, 0644); err != nil {
 			t.Fatal(err)
 		}
 		cfg, err := loadRigGateConfig(dir)
@@ -186,7 +197,10 @@ func TestLoadRigGateConfig(t *testing.T) {
 			},
 		}
 		raw, _ := json.Marshal(data)
-		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+		if err := os.Mkdir(filepath.Join(dir, "settings"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config.RigSettingsPath(dir), raw, 0644); err != nil {
 			t.Fatal(err)
 		}
 		cfg, err := loadRigGateConfig(dir)

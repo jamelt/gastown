@@ -81,55 +81,6 @@ func TestNudgeRefinerySessionName(t *testing.T) {
 	}
 }
 
-func TestNudgeWitnessSessionName(t *testing.T) {
-	setupSlingTestRegistry(t)
-	logPath := filepath.Join(t.TempDir(), "nudge.log")
-	t.Setenv("GT_TEST_NUDGE_LOG", logPath)
-
-	nudgeWitness("gastown", "POLECAT_DONE: test")
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
-	}
-	if got, want := string(logBytes), "nudge:gt-witness:POLECAT_DONE: test\n"; got != want {
-		t.Fatalf("nudgeWitness() log = %q, want %q", got, want)
-	}
-}
-
-func TestNudgeWitnessDoesNotEmitEvent(t *testing.T) {
-	t.Setenv("GT_TEST_NUDGE_LOG", "")
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	workDir := filepath.Join(townRoot, "gastown", "polecats", "test")
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(workDir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
-
-	nudgeWitness("gastown", "POLECAT_DONE: test")
-
-	paths, err := filepath.Glob(filepath.Join(townRoot, "events", "witness", "*.event"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(paths) != 0 {
-		t.Fatalf("witness event files = %v, want none", paths)
-	}
-}
-
 // TestWakeRigAgentsDoesNotNudgeRefinery verifies that wakeRigAgents only
 // nudges the witness, not the refinery. The refinery should only be nudged
 // when an MR is actually created (via nudgeRefinery), not at polecat dispatch time.
@@ -257,57 +208,6 @@ func TestCollectExistingMoleculesFiltersClosedMolecules(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestCollectExistingMoleculeDepsReadsCanonicalWispEdges(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses Unix shell script bd stub")
-	}
-
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "bd.log")
-	script := `#!/bin/sh
-echo "$*" >> "${BD_LOG}"
-if [ "$1" = "sql" ]; then
-  case "$2" in
-    *wisp_dependencies*depends_on_issue_id*depends_on_wisp_id*)
-      echo '[{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-other"}]'
-      exit 0
-      ;;
-  esac
-  echo 'unexpected query' >&2
-  exit 1
-fi
-exit 1
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(binDir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	got, err := collectExistingMoleculeDeps("gt-work", "")
-	if err != nil {
-		t.Fatalf("collectExistingMoleculeDeps: %v", err)
-	}
-	want := []string{"gt-wisp-live", "gt-wisp-other"}
-	if len(got) != len(want) {
-		t.Fatalf("collectExistingMoleculeDeps() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("collectExistingMoleculeDeps()[%d] = %q, want %q", i, got[i], want[i])
-		}
 	}
 }
 

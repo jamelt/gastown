@@ -40,7 +40,7 @@ dispatched. This keeps the system stateless and batch-oriented.
 | No idle polecats | Exit success, note in report (will retry next cycle) |
 | Sling fails | Continue with remaining issues, note failures |"""
 formula = "mol-convoy-feed"
-version = 1
+version = 2
 
 [squash]
 trigger = "on_complete"
@@ -247,11 +247,19 @@ Status: COMPLETE
 Ready for next assignment."
 ```
 
-**2. Return to kennel:**
-Dog returns to available state in the pool. Deacon will assign next work
-or retire the dog if pool is oversized.
+**2. Return to kennel (MANDATORY — the mail above is a notification, not a
+state change):**
+```bash
+gt dog done
+```
+This atomically clears your work assignment and returns you to idle. It is
+idempotent — safe to run even if state is already idle. Sending the
+DOG_DONE mail alone does NOT change `gt dog status`; without this command
+you remain shown as "working" until a patrol force-clears you. Deacon will
+then assign next work or retire the dog if the pool is oversized.
 
-**Exit criteria:** Deacon notified, dog ready for next work or retirement."""
+**Exit criteria:** Deacon notified AND `gt dog status` shows this dog idle
+with no work — verify with `gt dog status` before exiting if in doubt."""
 
 [vars]
 [vars.convoy]
