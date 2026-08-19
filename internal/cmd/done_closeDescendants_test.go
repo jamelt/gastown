@@ -80,6 +80,10 @@ case "$cmd" in
       echo '[]'
     fi
     ;;
+  comments)
+    # Return empty comments array (no decision cards)
+    echo '[]'
+    ;;
   close)
     # Log bead IDs only, skip flags (--reason, --force, --session)
     for arg in "$@"; do
@@ -253,6 +257,10 @@ case "$cmd" in
     # Always return empty - no children
     echo '[]'
     ;;
+  comments)
+    # Return empty comments array (no decision cards)
+    echo '[]'
+    ;;
   close)
     # Log bead IDs only, skip flags (--reason, --force, --session)
     for arg in "$@"; do
@@ -386,6 +394,10 @@ case "$cmd" in
     else
       echo '[]'
     fi
+    ;;
+  comments)
+    # Return empty comments array (no decision cards)
+    echo '[]'
     ;;
   close)
     # Log bead IDs only, skip flags (--reason, --force, --session)
@@ -538,6 +550,10 @@ case "$cmd" in
     else
       echo '[]'
     fi
+    ;;
+  comments)
+    # Return empty comments array (no decision cards)
+    echo '[]'
     ;;
   close)
     # Log bead IDs only, skip flags (--reason, --force, --session)
@@ -706,6 +722,10 @@ case "$cmd" in
   list)
     echo '[]'
     ;;
+  comments)
+    # Return empty comments array (no decision cards)
+    echo '[]'
+    ;;
   close)
     # Log bead IDs only, skip flags (--reason, --force, --session)
     for arg in "$@"; do
@@ -830,6 +850,10 @@ case "$cmd" in
     echo 'Error: database locked' >&2
     exit 1
     ;;
+  comments)
+    # Return empty comments array (no decision cards)
+    echo '[]'
+    ;;
   close)
     # Log bead IDs only, skip flags (--reason, --force, --session)
     for arg in "$@"; do
@@ -942,6 +966,10 @@ case "$cmd" in
     esac
     ;;
   list)
+    echo '[]'
+    ;;
+  comments)
+    # Return empty comments array (no decision cards)
     echo '[]'
     ;;
   close)
