@@ -24,8 +24,6 @@ This raises the bar, it does not close every path: it only intercepts a
 literal "gh pr create" Bash invocation (Claude Code's PreToolUse matcher
 is a command-string prefix match), so an agent creating a PR through the
 GitHub API directly, a different tool, or shell indirection bypasses it.
-Combine with the gt pr-sheriff-check --merge-gate step in the pr-sheriff
-skill for the cases this hook can't see.
 
 Exit codes:
   0 - Operation allowed (clean/warn, or the contamination check itself
@@ -74,8 +72,7 @@ func runTapGuardBranchHygiene(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
 	fmt.Fprintln(os.Stderr, "║  ❌ PR BLOCKED - BRANCH HYGIENE                                  ║")
 	fmt.Fprintln(os.Stderr, "║  Contaminated branch: stale base or unrelated ahead commits.    ║")
-	fmt.Fprintln(os.Stderr, "║  Rebase onto a clean base, then re-run:                          ║")
-	fmt.Fprintln(os.Stderr, "║    gt pr-sheriff-check --merge-gate                               ║")
+	fmt.Fprintln(os.Stderr, "║  Rebase onto a clean base, then retry gh pr create.             ║")
 	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
 	fmt.Fprintf(os.Stderr, "Base: %s   Ahead: %d   Behind: %d\n", base, contam.Ahead, contam.Behind)
 	for _, reason := range reasons {
