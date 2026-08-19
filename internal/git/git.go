@@ -112,6 +112,21 @@ func (g *Git) IsRepo() bool {
 
 // run executes a git command and returns stdout.
 func (g *Git) run(args ...string) (string, error) {
+	out, err := g.runRaw(args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// runRaw executes a git command like run, but trims only trailing newlines
+// from stdout instead of run()'s blanket strings.TrimSpace. Column-formatted
+// output such as `git status --porcelain` uses a leading space as a
+// meaningful status code (e.g. " M" = modified in the worktree only); a
+// blanket TrimSpace would eat that space on the first line and corrupt
+// parsing. Use this for any command whose output must preserve leading
+// whitespace; use run() otherwise.
+func (g *Git) runRaw(args ...string) (string, error) {
 	if err := g.guardUnsafeTownRootMutation(args); err != nil {
 		return "", err
 	}
@@ -136,7 +151,7 @@ func (g *Git) run(args ...string) (string, error) {
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return strings.TrimRight(stdout.String(), "\r\n"), nil
 }
 
 // pushTimeout is the maximum time a git push is allowed to run before being
@@ -1283,7 +1298,7 @@ type porcelainStatusEntry struct {
 
 // Status returns the current git status.
 func (g *Git) Status() (*GitStatus, error) {
-	out, err := g.run("status", "--porcelain", "-uall")
+	out, err := g.runRaw("status", "--porcelain", "-uall")
 	if err != nil {
 		return nil, err
 	}
