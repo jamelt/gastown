@@ -389,6 +389,32 @@ exit 1
 	}
 }
 
+func TestDetectActorUnresolvedRolePrefersBDActor(t *testing.T) {
+	// t.Chdir to a fresh dir outside any Gas Town workspace so GetRole() cannot
+	// resolve a role from the cwd — the daemon/neutral-cwd condition gt-kins is
+	// about. detectActor() must then attribute work to the explicitly-declared
+	// BD_ACTOR ("daemon" for the scheduler daemon) rather than a bare "unknown".
+	t.Chdir(t.TempDir())
+
+	t.Run("BD_ACTOR set is used verbatim", func(t *testing.T) {
+		t.Setenv("BD_ACTOR", "daemon")
+		if got := detectActor(); got != "daemon" {
+			t.Errorf("detectActor() = %q, want %q", got, "daemon")
+		}
+	})
+
+	t.Run("BD_ACTOR empty falls back to OS identity, never bare unknown", func(t *testing.T) {
+		t.Setenv("BD_ACTOR", "")
+		got := detectActor()
+		if got == "unknown" {
+			t.Errorf("detectActor() = %q, want an inspectable actor, not the bare literal", got)
+		}
+		if !strings.HasPrefix(got, "unknown(") {
+			t.Errorf("detectActor() = %q, want fallbackActor format unknown(user@host)", got)
+		}
+	})
+}
+
 func TestFallbackActor(t *testing.T) {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
