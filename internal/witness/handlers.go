@@ -1044,7 +1044,8 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		input.IgnoreCleanupStatus = true
 	}
 	input.MQNotRequired = witnessMQNotRequiredSource(rigBeads, issueID)
-	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
+	// gt-nasl: see manager.go — the terminal-bead skip caused the NEEDS_MQ_SUBMIT loop.
+	if input.MQCheckRequired && input.HasSubmittableWork && !input.MQNotRequired {
 		mr, err := rigBeads.FindMRForBranchAny(input.Branch)
 		if err != nil {
 			input.MQLookupFailed = true

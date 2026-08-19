@@ -1868,6 +1868,30 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// files, detached HEAD, or checked out on an old dog/alpha-* branch).
 	// Reset to the start point directly (not HEAD) to avoid "local changes would
 	// be overwritten" errors when the start point has different file content.
+	// gt-nasl: the destructive step gets its own live verdict, independent of the
+	// metadata-derived Reusable check above. A rejected-MR bead appearing for the
+	// branch can flip Reusable to true; that must not by itself authorize wiping a
+	// worktree. Fail closed — refusing costs a fresh polecat, being wrong costs work.
+	resetSafety := WorktreeResetSafety{}
+	if dirty, err := polecatGit.HasUncommittedChanges(); err != nil {
+		resetSafety.DirtyErr = true
+	} else {
+		resetSafety.Dirty = dirty
+	}
+	if stashes, err := polecatGit.StashListForBranch(); err != nil {
+		resetSafety.StashErr = true
+	} else {
+		resetSafety.StashCount = len(stashes)
+	}
+	if unpushed, err := polecatGit.UnpushedCommits(); err != nil {
+		resetSafety.UnpushedErr = true
+	} else {
+		resetSafety.Unpushed = unpushed
+	}
+	if d := DecideWorktreeReset(resetSafety); !d.Reusable {
+		return nil, fmt.Errorf("%w: refusing destructive worktree reset of %s: %s", ErrPolecatNeedsRecovery, clonePath, d.Reason)
+	}
+
 	_ = polecatGit.ResetHard(startPoint)
 	_ = polecatGit.CleanForce()
 
@@ -2417,7 +2441,12 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		input.IgnoreCleanupStatus = true
 	}
 	input.MQNotRequired = m.mqNotRequiredSource(workIssue)
-	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
+	// gt-nasl: the MR-history lookup must run even when the assigned bead is
+	// terminal. Skipping it left MRSubmitted false forever for superseded work
+	// (closed source bead, stale branch, MR later rejected), so DecideWorkstate
+	// fell to NeedsMQSubmit on every pass — the NEEDS_MQ_SUBMIT loop. Safe to run
+	// now that the destructive reset has its own live-git gate (DecideWorktreeReset).
+	if input.MQCheckRequired && input.HasSubmittableWork && !input.MQNotRequired {
 		mr, err := m.beads.FindMRForBranchAny(input.Branch)
 		if err != nil {
 			input.MQLookupFailed = true
