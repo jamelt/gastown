@@ -708,16 +708,14 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Main branch test ticker started (interval %v)", interval)
 	}
 
-	// Start quota dog ticker if configured.
-	// Scans for rate-limited sessions and automatically rotates credentials.
-	var quotaDogTicker *time.Ticker
-	var quotaDogChan <-chan time.Time
+	// Quota dog runs on its own goroutine and ticker, independent of the
+	// shared select loop below. Unlike the other dogs it touches no shared
+	// mutable Daemon state, so isolating it is safe with zero new
+	// synchronization: a slow or hung sibling dog (or the recovery
+	// heartbeat) can no longer delay provider failover by blocking the
+	// shared loop. See gt-yycw.
 	if d.isPatrolActive("quota_dog") {
-		interval := quotaDogInterval(d.patrolConfig)
-		quotaDogTicker = time.NewTicker(interval)
-		quotaDogChan = quotaDogTicker.C
-		defer quotaDogTicker.Stop()
-		d.logger.Printf("Quota dog ticker started (interval %v)", interval)
+		go d.runQuotaDogLoop(d.ctx)
 	}
 
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
@@ -750,6 +748,11 @@ func (d *Daemon) Run() (err error) {
 				}
 			} else {
 				d.logger.Printf("Received signal %v, shutting down", sig)
+				// Cancel d.ctx so every ctx-derived consumer (e.g. the
+				// isolated quota_dog loop, and exec.CommandContext calls
+				// parented to d.ctx) unwinds promptly on this shutdown path
+				// too, not just via Stop(). See gt-yycw.
+				d.cancel()
 				return d.shutdown(state)
 			}
 
@@ -757,84 +760,77 @@ func (d *Daemon) Run() (err error) {
 			// Dedicated Dolt health check — fast crash detection independent
 			// of the 3-minute general heartbeat.
 			if !d.isShutdownInProgress() {
-				d.ensureDoltServerRunning()
+				d.runDogWithOverrunCheck("dolt_health", d.doltServer.HealthCheckInterval(), d.ensureDoltServerRunning)
 			}
 
 		case <-doltRemotesChan:
 			// Periodic Dolt remote push — pushes databases to their configured
 			// git remotes on a 15-minute cadence (independent of heartbeat).
 			if !d.isShutdownInProgress() {
-				d.pushDoltRemotes()
+				d.runDogWithOverrunCheck("dolt_remotes", doltRemotesInterval(d.patrolConfig), d.pushDoltRemotes)
 			}
 
 		case <-doltBackupChan:
 			// Periodic Dolt filesystem backup — syncs production databases to
 			// local backup directory on a 15-minute cadence.
 			if !d.isShutdownInProgress() {
-				d.syncDoltBackups()
+				d.runDogWithOverrunCheck("dolt_backup", doltBackupInterval(d.patrolConfig), d.syncDoltBackups)
 			}
 
 		case <-jsonlGitBackupChan:
 			// Periodic JSONL git backup — exports issues, scrubs ephemeral data,
 			// commits and pushes to git repo.
 			if !d.isShutdownInProgress() {
-				d.syncJsonlGitBackup()
+				d.runDogWithOverrunCheck("jsonl_git_backup", jsonlGitBackupInterval(d.patrolConfig), d.syncJsonlGitBackup)
 			}
 
 		case <-wispReaperChan:
 			// Periodic wisp reaper — closes stale wisps (abandoned molecule steps,
 			// old patrol data) to prevent unbounded table growth (Clown Show audit).
 			if !d.isShutdownInProgress() {
-				d.reapWisps()
+				d.runDogWithOverrunCheck("wisp_reaper", wispReaperInterval(d.patrolConfig), d.reapWisps)
 			}
 
 		case <-doctorDogChan:
 			// Doctor dog — comprehensive Dolt health monitor: connectivity, latency,
 			// gc, zombie detection, backup staleness, and disk usage checks.
 			if !d.isShutdownInProgress() {
-				d.runDoctorDog()
+				d.runDogWithOverrunCheck("doctor_dog", doctorDogInterval(d.patrolConfig), d.runDoctorDog)
 			}
 
 		case <-compactorDogChan:
 			// Compactor dog — flattens Dolt commit history on production databases.
 			// Reclaims commit graph storage, then runs gc to reclaim chunks.
 			if !d.isShutdownInProgress() {
-				d.runCompactorDog()
+				d.runDogWithOverrunCheck("compactor_dog", compactorDogInterval(d.patrolConfig), d.runCompactorDog)
 			}
 
 		case <-checkpointDogChan:
 			// Checkpoint dog — auto-commits WIP changes in active polecat
 			// worktrees to prevent data loss from session crashes.
 			if !d.isShutdownInProgress() {
-				d.runCheckpointDog()
+				d.runDogWithOverrunCheck("checkpoint_dog", checkpointDogInterval(d.patrolConfig), d.runCheckpointDog)
 			}
 
 		case <-scheduledMaintenanceChan:
 			// Scheduled maintenance — checks if we're in the maintenance window
 			// and runs `gt maintain --force` when commit counts exceed threshold.
 			if !d.isShutdownInProgress() {
-				d.runScheduledMaintenance()
+				d.runDogWithOverrunCheck("scheduled_maintenance", maintenanceCheckInterval(d.patrolConfig), d.runScheduledMaintenance)
 			}
 
 		case <-mainBranchTestChan:
 			// Main branch test runner — periodically runs quality gates on each
 			// rig's main branch to catch regressions from merges or direct pushes.
 			if !d.isShutdownInProgress() {
-				d.runMainBranchTests()
-			}
-
-		case <-quotaDogChan:
-			// Quota dog — scans for rate-limited sessions and automatically
-			// rotates credentials to available accounts via keychain swap.
-			if !d.isShutdownInProgress() {
-				d.runQuotaDog()
+				d.runDogWithOverrunCheck("main_branch_test", mainBranchTestInterval(d.patrolConfig), d.runMainBranchTests)
 			}
 
 		case <-schedulerWakeTicker.C:
 			d.processSchedulerWake()
 
 		case <-timer.C:
-			d.heartbeat(state)
+			d.runDogWithOverrunCheck("heartbeat", d.recoveryHeartbeatInterval(), func() { d.heartbeat(state) })
 
 			// Fixed recovery interval (no activity-based backoff)
 			timer.Reset(d.recoveryHeartbeatInterval())
@@ -848,6 +844,39 @@ func (d *Daemon) Run() (err error) {
 // Default: 3 minutes — fast enough to detect stuck agents promptly.
 func (d *Daemon) recoveryHeartbeatInterval() time.Duration {
 	return d.loadOperationalConfig().GetDaemonConfig().RecoveryHeartbeatIntervalD()
+}
+
+// defaultDogOverrunFactor is how many multiples of a dog's configured
+// interval its cycle duration may reach before runDogWithOverrunCheck logs
+// and records an overrun.
+const defaultDogOverrunFactor = 2.0
+
+// dogOverrunFactor returns the configured overrun factor, or the default (2.0).
+func dogOverrunFactor(config *DaemonPatrolConfig) float64 {
+	if config != nil && config.OverrunFactor > 0 {
+		return config.OverrunFactor
+	}
+	return defaultDogOverrunFactor
+}
+
+// runDogWithOverrunCheck runs a dog's synchronous cycle and logs (plus
+// records the gastown.daemon.dog_overrun.total metric) if it takes longer
+// than interval * dogOverrunFactor to complete. This is observability only —
+// it does not change fn's blocking behavior or the caller's concurrency
+// model, so it's safe to wrap every dog (including ones still sharing the
+// select loop in Run()) without any new synchronization risk. See gt-yycw.
+func (d *Daemon) runDogWithOverrunCheck(name string, interval time.Duration, fn func()) {
+	start := time.Now()
+	fn()
+	factor := dogOverrunFactor(d.patrolConfig)
+	threshold := time.Duration(float64(interval) * factor)
+	if interval <= 0 || threshold <= 0 {
+		return
+	}
+	if elapsed := time.Since(start); elapsed > threshold {
+		d.logger.Printf("%s: OVERRUN: cycle took %v, exceeding %.1fx configured interval %v (threshold %v)", name, elapsed, factor, interval, threshold)
+		d.metrics.recordDogOverrun(d.ctx, name)
+	}
 }
 
 // heartbeat performs one heartbeat cycle.
