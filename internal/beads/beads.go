@@ -592,6 +592,13 @@ type Beads struct {
 	townRoot     string
 	townRootOnce sync.Once
 
+	// Lazy-cached wisps-table agent bead listing, populated on first
+	// not-found fallback inside GetAgentBead. Bounds repeated per-ID
+	// lookups (e.g. DetectStalePolecats calling GetAgentBead per-polecat)
+	// to at most one full wisps list per Beads instance.
+	wispAgentBeads     map[string]*Issue
+	wispAgentBeadsOnce sync.Once
+
 	// noRoute disables prefix-based routing for this Beads instance.
 	// Used for agent-bead operations: agent beads (gt:agent label) live in
 	// the town database regardless of their ID prefix, so prefix routing

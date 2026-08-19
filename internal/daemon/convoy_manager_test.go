@@ -829,6 +829,159 @@ exit 0
 	}
 }
 
+func TestFeedFirstReady_CircuitBreaksAfterRepeatedIdenticalFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// Same issue fails with the identical error every scan (e.g. a bead
+	// hooked to a dead-session polecat that dead-agent detection never
+	// clears). After maxConsecutiveSlingFailures identical failures, the
+	// manager must stop calling sling for it and escalate exactly once.
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingCallsPath := filepath.Join(binDir, "sling_calls")
+	escalateCallsPath := filepath.Join(binDir, "escalate_calls")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "x" >> "` + slingCallsPath + `"
+  echo "bead gt-deadlock is already hooked to gastown/polecats/elder" >&2
+  exit 1
+fi
+if [ "$1" = "escalate" ]; then
+  echo "x" >> "` + escalateCallsPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logged []string
+	var logMu sync.Mutex
+	logger := func(format string, args ...interface{}) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Deadlocked",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-deadlock"},
+	}
+
+	// Simulate maxConsecutiveSlingFailures+2 scan cycles worth of retries.
+	for i := 0; i < maxConsecutiveSlingFailures+2; i++ {
+		m.feedFirstReady(c)
+	}
+
+	countLines := func(path string) int {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return 0
+		}
+		return len(strings.Fields(string(data)))
+	}
+
+	if got := countLines(slingCallsPath); got != maxConsecutiveSlingFailures {
+		t.Errorf("expected exactly %d sling attempts before circuit-break, got %d", maxConsecutiveSlingFailures, got)
+	}
+	if got := countLines(escalateCallsPath); got != 1 {
+		t.Errorf("expected exactly 1 escalation call, got %d", got)
+	}
+
+	foundBreak := 0
+	for _, l := range logged {
+		if strings.Contains(l, "circuit-broken") {
+			foundBreak++
+		}
+	}
+	if foundBreak != 1 {
+		t.Errorf("expected exactly 1 'circuit-broken' log line, got %d: %v", foundBreak, logged)
+	}
+}
+
+func TestFeedFirstReady_DifferentErrorResetsFailureCount(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// A changed error message (state changed between attempts) must reset
+	// the consecutive-failure counter rather than accumulate toward the
+	// circuit breaker, since maxConsecutiveSlingFailures counts *identical*
+	// failures only.
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingCallsPath := filepath.Join(binDir, "sling_calls")
+	escalateCallsPath := filepath.Join(binDir, "escalate_calls")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  n=$(wc -l < "` + slingCallsPath + `" 2>/dev/null || echo 0)
+  echo "x" >> "` + slingCallsPath + `"
+  echo "failure variant $n" >&2
+  exit 1
+fi
+if [ "$1" = "escalate" ]; then
+  echo "x" >> "` + escalateCallsPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	logger := func(string, ...interface{}) {}
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Flaky",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-flaky"},
+	}
+
+	// Every attempt produces a distinct error ("failure variant N"), so the
+	// circuit breaker must never trip even after many more than the threshold.
+	for i := 0; i < maxConsecutiveSlingFailures+3; i++ {
+		m.feedFirstReady(c)
+	}
+
+	data, err := os.ReadFile(slingCallsPath)
+	if err != nil {
+		t.Fatalf("read sling calls: %v", err)
+	}
+	if got := len(strings.Fields(string(data))); got != maxConsecutiveSlingFailures+3 {
+		t.Errorf("expected every attempt to reach sling (no circuit-break on differing errors), got %d calls", got)
+	}
+	if _, err := os.Stat(escalateCallsPath); err == nil {
+		t.Errorf("did not expect an escalation call when errors keep changing")
+	}
+}
+
 func TestFeedFirstReady_UnknownPrefix_Skips(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
