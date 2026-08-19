@@ -506,7 +506,7 @@ func (d *Daemon) escalate(source, message string) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH",
-		fmt.Sprintf("%s: %s", source, message))
+		fmt.Sprintf("%s: %s", source, message), "--reason", message)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
 	util.SetDetachedProcessGroup(cmd)

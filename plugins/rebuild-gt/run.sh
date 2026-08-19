@@ -75,7 +75,7 @@ else
       gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
         --title "Plugin: rebuild-gt [failure]" \
         --description "Build failed: $ERROR" >/dev/null 2>&1 || true
-      gt escalate "Plugin FAILED: rebuild-gt" -s medium 2>/dev/null || true
+      gt escalate "Plugin FAILED: rebuild-gt" -s medium --reason "$ERROR" 2>/dev/null || true
       BUILD_FAILED=1
     fi
   fi
@@ -110,7 +110,8 @@ else
       gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
         --title "Plugin: rebuild-gt [daemon restart verify failed]" \
         --description "Daemon restarted but still stale after restart (commit: $POST_COMMIT)" >/dev/null 2>&1 || true
-      gt escalate "Plugin FAILED: rebuild-gt daemon restart did not take effect" -s medium 2>/dev/null || true
+      gt escalate "Plugin FAILED: rebuild-gt daemon restart did not take effect" -s medium \
+        --reason "Daemon restarted but still stale after restart (commit: $POST_COMMIT)" 2>/dev/null || true
       DAEMON_FAILED=1
     else
       log "Daemon restarted and verified fresh (commit: $POST_COMMIT)"
@@ -124,7 +125,7 @@ else
     gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
       --title "Plugin: rebuild-gt [daemon restart failure]" \
       --description "$ERROR" >/dev/null 2>&1 || true
-    gt escalate "Plugin FAILED: rebuild-gt daemon restart" -s medium 2>/dev/null || true
+    gt escalate "Plugin FAILED: rebuild-gt daemon restart" -s medium --reason "$ERROR" 2>/dev/null || true
     DAEMON_FAILED=1
   fi
 fi

@@ -47,6 +47,14 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid severity '%s': must be critical, high, medium, or low", escalateSeverity)
 	}
 
+	// Require a reason: an escalation with no content beyond its title cannot
+	// be acted on by its recipient. Checked here rather than via cobra's
+	// MarkFlagRequired("reason") because --stdin is an alternate way to
+	// populate escalateReason that flag-level requiredness can't see.
+	if strings.TrimSpace(escalateReason) == "" {
+		return fmt.Errorf("escalation reason is required: pass --reason/-r or --stdin (an escalation with no reason cannot be acted on)")
+	}
+
 	// Find workspace
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
