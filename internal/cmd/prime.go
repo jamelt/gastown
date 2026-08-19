@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/state"
@@ -440,6 +441,12 @@ func setupPrimeSession(ctx RoleContext, roleInfo RoleInfo) error {
 		ensureBeadsRedirect(ctx)
 	}
 	repairSessionEnv(ctx, roleInfo)
+	// Update formulas from embedded copies if needed. This is best-effort:
+	// if it fails (e.g., Dolt down, permission denied), we continue anyway.
+	// This ensures merged formula changes reach town-tier without requiring
+	// users to manually run `gt upgrade`. Safe updates (outdated, missing,
+	// untracked) are applied; user-modified formulas are skipped.
+	_ = updateFormulasSilent(ctx.TownRoot)
 	// Only emit session_start when gt prime is running as a SessionStart or
 	// PreCompact hook. Bare gt prime calls (e.g. an agent reading another
 	// agent's context) must not emit session_start — doing so logs a spurious
@@ -449,6 +456,17 @@ func setupPrimeSession(ctx RoleContext, roleInfo RoleInfo) error {
 		emitSessionEvent(ctx)
 	}
 	return nil
+}
+
+// updateFormulasSilent updates formulas silently during prime. This ensures
+// merged formula changes reach the town tier without requiring users to
+// manually run `gt upgrade`. Errors are silently ignored since this is best-effort.
+func updateFormulasSilent(townRoot string) error {
+	if townRoot == "" {
+		return nil
+	}
+	_, _, _, err := formula.UpdateFormulas(townRoot)
+	return err
 }
 
 // repairSessionEnv checks if the tmux session is missing identity env vars
