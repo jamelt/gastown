@@ -1840,6 +1840,10 @@ func ShouldEnqueueReplyReminder(msg *Message) bool {
 //   - Structured response policy says no response is required
 //   - Sender is not a direct mail address that can receive a reply
 //   - Configured delay is zero or negative (feature disabled)
+//
+// Enqueueing is deduplicated by Kind+ThreadID (see EnqueueUniqueByKindThread)
+// so a retried send after a transient failure cannot queue a second reminder
+// for the same thread.
 func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if r.townRoot == "" {
 		return

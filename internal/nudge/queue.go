@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // Priority levels for nudge delivery.
@@ -138,14 +138,23 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 	return nil
 }
 
-// EnqueueUniqueByKindThread enqueues at most one outstanding nudge for a
-// structured kind/thread pair. It is intended for retryable reminders, where
-// duplicate delivery must not create duplicate prompts. Existing queue files
-// are inspected rather than mail records, so durable audit mail is untouched.
-// The returned bool reports whether a new nudge was written.
-func EnqueueUniqueByKindThread(townRoot, session string, queued QueuedNudge) (bool, error) {
-	if queued.Kind == "" || queued.ThreadID == "" {
-		return true, Enqueue(townRoot, session, queued)
+// enqueueUniqueLockTimeout bounds how long EnqueueUniqueByKindThread waits to
+// acquire the per-session dedup lock before giving up on dedup and enqueueing
+// unconditionally — a possible duplicate reminder is preferable to blocking
+// the caller (mail send/reply) indefinitely on a stuck lock holder.
+const enqueueUniqueLockTimeout = 3 * time.Second
+
+// EnqueueUniqueByKindThread enqueues a nudge only if no other queued (not yet
+// claimed/delivered) nudge already exists for the same Kind+ThreadID pair.
+// Existing queue files are inspected under a per-session flock so concurrent
+// enqueue calls (e.g. a retried mail send after a transient failure) cannot
+// both observe "no existing reminder" and both write one.
+//
+// Returns (written=true) if a new nudge was enqueued, (false) if an existing
+// one for the same Kind+ThreadID already covers it.
+func EnqueueUniqueByKindThread(townRoot, session string, nudge QueuedNudge) (bool, error) {
+	if nudge.Kind == "" || nudge.ThreadID == "" {
+		return true, Enqueue(townRoot, session, nudge)
 	}
 
 	dir := queueDir(townRoot, session)
@@ -153,14 +162,12 @@ func EnqueueUniqueByKindThread(townRoot, session string, queued QueuedNudge) (bo
 		return false, fmt.Errorf("creating nudge queue dir: %w", err)
 	}
 
-	// The same mail can be retried by separate gt processes. Serialize the
-	// check-and-enqueue sequence across processes so they cannot both observe an
-	// empty queue and create duplicate reminders.
-	queueLock := flock.New(filepath.Join(dir, ".unique.lock"))
-	if err := queueLock.Lock(); err != nil {
-		return false, fmt.Errorf("locking nudge queue: %w", err)
+	unlock, acquired, lockErr := lock.FlockTryAcquireWithTimeout(filepath.Join(dir, ".unique.lock"), enqueueUniqueLockTimeout)
+	if lockErr == nil && acquired {
+		defer unlock()
 	}
-	defer func() { _ = queueLock.Unlock() }()
+	// On timeout or lock error, fall through and enqueue unconditionally
+	// rather than blocking the caller — see enqueueUniqueLockTimeout.
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -172,18 +179,15 @@ func EnqueueUniqueByKindThread(townRoot, session string, queued QueuedNudge) (bo
 		}
 		data, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if readErr != nil {
-			if os.IsNotExist(readErr) {
-				continue
-			}
-			return false, fmt.Errorf("reading queued nudge %s: %w", entry.Name(), readErr)
+			continue
 		}
 		var existing QueuedNudge
-		if json.Unmarshal(data, &existing) == nil && existing.Kind == queued.Kind && existing.ThreadID == queued.ThreadID {
+		if json.Unmarshal(data, &existing) == nil && existing.Kind == nudge.Kind && existing.ThreadID == nudge.ThreadID {
 			return false, nil
 		}
 	}
 
-	return true, Enqueue(townRoot, session, queued)
+	return true, Enqueue(townRoot, session, nudge)
 }
 
 // Requeue writes previously drained nudges back to the queue for later delivery.
@@ -363,15 +367,14 @@ func QueueLen(townRoot, session string) int {
 }
 
 // RemoveKindByThread deletes queued nudges for a session that match both the
-// provided kind and thread ID. It removes matching queued .json files, and
-// also best-effort removes matching in-flight .claimed files so a reply that
-// satisfies a reminder can still cancel it after Drain has claimed but not
-// yet delivered it. This narrows, but cannot fully close, the claim/deliver
-// race: once Drain has read a claimed file's bytes into memory it delivers
-// the nudge regardless of what happens to the file afterward, and a
-// concurrent Drain call may rename or remove a matched file out from under
-// this scan (e.g. its own orphan sweep, or normal delivery) before this
-// function gets to it. Both are expected races, not errors.
+// provided kind and thread ID. It only removes queued .json files, leaving any
+// in-flight claimed files alone so concurrent drainers can finish safely.
+//
+// Known gap (gt-gy9x): a nudge already claimed by an in-flight Drain at the
+// moment this runs is not removed and will still be delivered, even if the
+// caller's intent (e.g. a satisfied reply-reminder) has already been met.
+// EnqueueUniqueByKindThread prevents duplicate *enqueues* but does not close
+// this delivery-side race.
 func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 	if kind == "" || threadID == "" {
 		return 0, nil

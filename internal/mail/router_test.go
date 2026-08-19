@@ -2361,6 +2361,74 @@ func TestClearReplyReminders(t *testing.T) {
 	}
 }
 
+// TestReplyReminderClearedAfterReply_NoThreadLabel reproduces the exact
+// reported churn bug: a message loaded from beads storage with no "thread:"
+// label (BeadsMessage.ToMessage falls back to the message's own ID as
+// ThreadID — see types.go) gets a reply reminder queued, and a reply built
+// the same way runMailReply builds one (reusing original.ThreadID, not
+// minting a fresh random one) must actually clear that reminder. Before the
+// ToMessage fallback fix, the original's ThreadID was "", the reminder was
+// queued under an unclearable "" key, and any reply — regardless of which
+// ThreadID it used — could never cancel it.
+func TestReplyReminderClearedAfterReply_NoThreadLabel(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+
+	// Simulate a message round-tripped from beads storage with no "thread:"
+	// label — the exact condition that produced an empty ThreadID pre-fix.
+	bm := &BeadsMessage{
+		ID:       "hq-mail-no-thread",
+		Title:    "status check",
+		Assignee: "gastown/crew/bob",
+		Labels:   []string{"gt:message", "from:gastown/witness", "msg-type:task"},
+	}
+	original := bm.ToMessage()
+	if original.ThreadID == "" {
+		t.Fatal("precondition failed: original.ThreadID should fall back to bm.ID, not stay empty")
+	}
+	if original.ThreadID != bm.ID {
+		t.Fatalf("precondition failed: original.ThreadID = %q, want fallback to %q", original.ThreadID, bm.ID)
+	}
+
+	sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
+	r.enqueueReplyReminder(original, sessionID)
+
+	pending, err := nudge.Pending(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("Pending = %d, want 1 (reminder should have been queued)", pending)
+	}
+
+	// Build the reply exactly as runMailReply does: reuse original.ThreadID
+	// rather than minting a fresh one.
+	reply := &Message{
+		From:     "gastown/crew/bob",
+		To:       original.From,
+		Subject:  "Re: status check",
+		Body:     "on it",
+		Type:     TypeReply,
+		ReplyTo:  original.ID,
+		ThreadID: original.ThreadID,
+	}
+	if reply.ThreadID == "" {
+		reply.ThreadID = generateThreadID()
+	}
+
+	if err := r.ClearReplyReminders("gastown/crew/bob", reply.ThreadID); err != nil {
+		t.Fatalf("ClearReplyReminders: %v", err)
+	}
+
+	pending, err = nudge.Pending(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("Pending = %d, want 0 (reply should have cleared the reminder)", pending)
+	}
+}
+
 // TestEnqueueReplyReminder_SkipsReply verifies that reply-type messages do not
 // trigger a reply reminder (would be redundant noise).
 func TestEnqueueReplyReminder_SkipsReply(t *testing.T) {

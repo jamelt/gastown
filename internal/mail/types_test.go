@@ -421,8 +421,11 @@ func TestBeadsMessageToMessageEmptyLabels(t *testing.T) {
 	if msg.From != "" {
 		t.Errorf("From should be empty, got %q", msg.From)
 	}
-	if msg.ThreadID != "" {
-		t.Errorf("ThreadID should be empty, got %q", msg.ThreadID)
+	// A message with no "thread:" label falls back to its own ID as the
+	// thread key, so it's never permanently unmatchable for reply-reminder
+	// clearing (see ToMessage's threadID fallback).
+	if msg.ThreadID != bm.ID {
+		t.Errorf("ThreadID should fall back to the message ID (%q), got %q", bm.ID, msg.ThreadID)
 	}
 }
 
