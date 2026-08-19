@@ -237,6 +237,76 @@ func TestWorktreeGitdirCheck_PolecatWorktree(t *testing.T) {
 	}
 }
 
+func TestWorktreeGitdirCheck_MayorWorktree(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+
+	rigDir := filepath.Join(tmpDir, rigName)
+	if err := os.MkdirAll(filepath.Join(rigDir, "mayor", "rig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create broken .git file for mayor/rig
+	gitFile := filepath.Join(rigDir, "mayor", "rig", ".git")
+	brokenPath := filepath.Join(rigDir, ".repo.git", "worktrees", "mayor")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+brokenPath+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewWorktreeGitdirCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	result := check.Run(ctx)
+
+	if result.Status != StatusError {
+		t.Errorf("expected StatusError for broken mayor worktree, got %v", result.Status)
+	}
+	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "mayor") {
+		t.Errorf("expected detail mentioning mayor/rig, got %v", result.Details)
+	}
+}
+
+func TestWorktreeGitdirCheck_CrewWorktree(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+
+	rigDir := filepath.Join(tmpDir, rigName)
+	crewPath := filepath.Join(rigDir, "crew", "alice")
+	if err := os.MkdirAll(crewPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A README.md at crew/ root (created by AddRig) must not be mistaken for a
+	// crew member worktree.
+	if err := os.WriteFile(filepath.Join(rigDir, "crew", "README.md"), []byte("crew workspaces\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create broken .git file for crew/alice (single-level worktree, unlike polecats)
+	gitFile := filepath.Join(crewPath, ".git")
+	brokenPath := filepath.Join(rigDir, ".repo.git", "worktrees", "alice")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+brokenPath+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewWorktreeGitdirCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	result := check.Run(ctx)
+
+	if result.Status != StatusError {
+		t.Errorf("expected StatusError for broken crew worktree, got %v", result.Status)
+	}
+	if len(result.Details) == 0 || !strings.Contains(result.Details[0], filepath.Join("crew", "alice")) {
+		t.Errorf("expected detail mentioning crew/alice, got %v", result.Details)
+	}
+}
+
 func TestWorktreeGitdirCheck_RigFilter(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -546,6 +616,121 @@ func doctorGit(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s: %v\n%s", strings.Join(cmdArgs, " "), err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// TestWorktreeGitdirCheck_FixRepairsAllRolesAfterTownMove simulates retiring
+// an old town path: refinery, mayor, and crew worktrees are all rsync'd to a
+// new town root, leaving every .git file (and the bare repo's reciprocal
+// worktrees/<name>/gitdir back-reference) pointing at the old, now-gone
+// prefix. Doctor must find and repair all three roles, and each worktree
+// must be independently usable (git status, git checkout) afterward.
+func TestWorktreeGitdirCheck_FixRepairsAllRolesAfterTownMove(t *testing.T) {
+	oldTownRoot := t.TempDir()
+	newTownRoot := t.TempDir()
+	rigName := "testrig"
+
+	oldRigDir := filepath.Join(oldTownRoot, rigName)
+	bareRepo := filepath.Join(oldRigDir, ".repo.git")
+	seed := filepath.Join(oldTownRoot, "seed")
+	if err := os.MkdirAll(oldRigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	doctorGit(t, "", "init", "--bare", "--initial-branch=main", bareRepo)
+	doctorGit(t, "", "init", "--initial-branch=main", seed)
+	doctorGit(t, seed, "config", "user.email", "test@example.com")
+	doctorGit(t, seed, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("initial\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	doctorGit(t, seed, "add", ".")
+	doctorGit(t, seed, "commit", "-m", "initial")
+	doctorGit(t, seed, "remote", "add", "origin", bareRepo)
+	doctorGit(t, seed, "push", "origin", "main")
+
+	roles := map[string]string{
+		"refinery": filepath.Join(oldRigDir, "refinery", "rig"),
+		"mayor":    filepath.Join(oldRigDir, "mayor", "rig"),
+		"crew":     filepath.Join(oldRigDir, "crew", "alice"),
+	}
+	for name, worktree := range roles {
+		doctorGit(t, bareRepo, "worktree", "add", "-b", "role-"+name, worktree, "main")
+	}
+
+	// Simulate an rsync move: copy the whole old town root to the new one,
+	// then remove the old path entirely so nothing can fall back to it.
+	if err := copyDir(t, oldTownRoot, newTownRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(oldTownRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	newRigDir := filepath.Join(newTownRoot, rigName)
+	if err := os.WriteFile(filepath.Join(newRigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewWorktreeGitdirCheck()
+	ctx := &CheckContext{TownRoot: newTownRoot}
+	result := check.Run(ctx)
+	if result.Status != StatusError {
+		t.Fatalf("expected StatusError before repair, got %v: %s", result.Status, result.Message)
+	}
+	if len(check.brokenWorktrees) != len(roles) {
+		t.Fatalf("expected %d broken worktrees, got %d: %+v", len(roles), len(check.brokenWorktrees), result.Details)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+
+	// Every role must be independently usable after repair: git status must
+	// work, and checkout back to main must succeed (proving the branch and
+	// index survived, not just the link).
+	for name, oldPath := range roles {
+		worktree := filepath.Join(newRigDir, strings.TrimPrefix(oldPath, oldRigDir+string(filepath.Separator)))
+		if got := doctorGit(t, worktree, "status", "--porcelain"); got != "" {
+			t.Errorf("%s: expected clean status after repair, got %q", name, got)
+		}
+		if got := doctorGit(t, worktree, "branch", "--show-current"); got != "role-"+name {
+			t.Errorf("%s: branch = %q, want %q (repair must not force HEAD to default branch)", name, got, "role-"+name)
+		}
+		doctorGit(t, worktree, "checkout", "main")
+		doctorGit(t, worktree, "checkout", "role-"+name)
+	}
+
+	if result := check.Run(ctx); result.Status != StatusOK {
+		t.Errorf("expected all worktrees to validate after repair, got %v: %s", result.Status, result.Message)
+	}
+}
+
+func copyDir(t *testing.T, src, dst string) error {
+	t.Helper()
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, target)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
 }
 
 func TestWorktreeGitdirCheck_NoDeaconDogs(t *testing.T) {
