@@ -4,23 +4,23 @@ description: >
   PR Sheriff workflow: triage PRs into easy-wins and crew assignments.
   Prints recommendations inline - does NOT post to GitHub.
 allowed-tools: "Bash(gh pr *), Bash(git *), Bash(gt *), Bash(bd *), Bash(cat *)"
-version: "2.0.0"
+version: "2.1.0"
 author: "Gas Town"
 ---
 
 # PR Sheriff - Triage and Review Workflow
 
-This skill delegates to the `mol-pr-sheriff-patrol` formula, which lives at
-`$GT_ROOT/.beads/formulas/mol-pr-sheriff-patrol.formula.toml` and is shared
-across all Gas Town rigs (gastown, beads, etc.).
+This skill is prompt-driven: there is no `mol-pr-sheriff-patrol` formula and
+no `pr-sheriff-config.json` config file. Everything an agent needs to run a
+patrol — the step order, the crew-dispatch mechanism, the triage tree, and
+the policy tiers — is defined directly below. Follow this document as the
+single source of truth; do not look for a formula or config to "load" first.
 
 ## Repo Scope
 
 This rig (gastown/crew/max) is responsible for **steveyegge/gastown only**.
 The beads repo (steveyegge/beads) is handled by beads/crew/emma.
 Do NOT discover or triage PRs from repos outside your scope.
-
-When loading the shared config, filter the repo list to only `steveyegge/gastown`.
 
 ## Usage
 
@@ -33,49 +33,22 @@ When loading the shared config, filter the repo list to only `steveyegge/gastown
 
 ## How to Execute
 
-**1. Load the config:**
-```bash
-cat $GT_ROOT/.beads/pr-sheriff-config.json
-```
+Work through these steps in order:
 
-This contains crew mappings per repo and contributor policies
-(trust tiers, firewalled contributors, bot auto-merge rules).
-**Only scan repos within your scope** (see Repo Scope above).
-
-**2. Follow the formula steps in order:**
-```bash
-gt formula show mol-pr-sheriff-patrol
-```
-
-The formula defines a 7-step workflow:
-
-| Step | What it does |
+| Step | What to do |
 |------|-------------|
-| load-config | Load pr-sheriff-config.json, establish repo list |
-| discover-prs | Find open PRs needing review across all repos |
-| triage-batch | Categorize all PRs in one pass (preserves cross-PR context) |
-| merge-easy-wins | Merge approved easy-wins via `gh pr merge` |
-| dispatch-crew-reviews | Nudge crew for NEEDS-CREW PRs |
-| dispatch-deep-reviews | Nudge crew for NEEDS-HUMAN PRs (full evaluation framework) |
+| discover-prs | `gh pr list` for the in-scope repo(s); find open PRs needing review |
+| triage-batch | Categorize all PRs in one pass using the Category Decision Tree below (preserves cross-PR context) |
+| merge-easy-wins | Merge approved EASY-WIN PRs via `gh pr merge` |
+| dispatch-crew-reviews | `gt crew list` to find crew, then nudge them for NEEDS-CREW PRs |
+| dispatch-deep-reviews | Nudge crew for NEEDS-HUMAN PRs, pointing them at the Deep Review Evaluation Framework below |
 | collect-results | Gather crew review nudge-backs |
-| interactive-review | Walk through remaining NEEDS-HUMAN PRs with overseer |
-| summarize | Print patrol summary |
-
-**3. For each step, read the full description:**
-```bash
-gt formula show mol-pr-sheriff-patrol  # Shows all steps with descriptions
-```
-
-## Key References
-
-- **Patrol formula:** `mol-pr-sheriff-patrol` (town-level)
-- **Crew review formula:** `mol-pr-crew-review` (dispatched to crew)
-- **Deep review formula:** `mol-pr-deep-review` (dispatched for NEEDS-HUMAN)
-- **Config:** `$GT_ROOT/.beads/pr-sheriff-config.json`
+| interactive-review | Walk through remaining NEEDS-HUMAN PRs with the overseer |
+| summarize | Print the patrol summary (see Summary Output below) |
 
 ## Contributor Policy Tiers
 
-Loaded from config. Current tiers:
+Applied directly from the table below — there is no external config file:
 
 | Tier | Handling |
 |------|----------|
@@ -98,7 +71,7 @@ Everything else → NEEDS-CREW
 
 ## Deep Review Evaluation Framework (NEEDS-HUMAN)
 
-The deep review formula (mol-pr-deep-review) applies six lenses:
+Apply six lenses when evaluating a NEEDS-HUMAN PR:
 
 1. **Plugin/integration fit** — core vs plugin/formula/integration?
 2. **Tech-debt weight** — complexity justified by user breadth?
