@@ -1903,14 +1903,29 @@ func validReplyAddressPart(part string) bool {
 // recipient identity and thread. This is best-effort cleanup after a successful
 // reply send so satisfied threads do not keep re-nudging.
 func (r *Router) ClearReplyReminders(address, threadID string) error {
+	return r.clearThreadNudgeKinds(address, threadID, "reply-reminder")
+}
+
+// ClearThreadNudges removes every queued nudge for the given recipient and
+// thread — both the escalation wakeup nudge and the reply reminder. Used when an
+// escalation is acknowledged or closed so its queued prompts stop firing even
+// though the recipient never sent a mail reply on the thread (ack/close are not
+// mail replies, so the reply-path cleanup never runs for them).
+func (r *Router) ClearThreadNudges(address, threadID string) error {
+	return r.clearThreadNudgeKinds(address, threadID, "reply-reminder", "escalation")
+}
+
+func (r *Router) clearThreadNudgeKinds(address, threadID string, kinds ...string) error {
 	if r.townRoot == "" || threadID == "" {
 		return nil
 	}
 
 	var firstErr error
 	for _, sessionID := range AddressToSessionIDs(address) {
-		if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, "reply-reminder", threadID); err != nil && firstErr == nil {
-			firstErr = err
+		for _, kind := range kinds {
+			if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, kind, threadID); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr
