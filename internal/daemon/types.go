@@ -196,14 +196,14 @@ type JsonlGitBackupConfig struct {
 
 // DaemonPatrolConfig is the structure of mayor/daemon.json.
 type DaemonPatrolConfig struct {
-	Type      string            `json:"type"`
-	Version   int               `json:"version"`
-	Heartbeat *PatrolConfig     `json:"heartbeat,omitempty"`
-	Patrols   *PatrolsConfig    `json:"patrols,omitempty"`
+	Type      string         `json:"type"`
+	Version   int            `json:"version"`
+	Heartbeat *PatrolConfig  `json:"heartbeat,omitempty"`
+	Patrols   *PatrolsConfig `json:"patrols,omitempty"`
 	// Env holds environment variables to set at startup.
 	// Propagated to all sessions spawned by the daemon and read by gt up/mayor attach.
 	// Example: {"GT_DOLT_PORT": "43211"}
-	Env       map[string]string `json:"env,omitempty"`
+	Env map[string]string `json:"env,omitempty"`
 	// OverrunFactor is how many multiples of a dog's configured interval its
 	// cycle duration may reach before the daemon logs/alarms an overrun.
 	// Applies daemon-wide across all dogs. Defaults to 2.0 when unset/<=0.
