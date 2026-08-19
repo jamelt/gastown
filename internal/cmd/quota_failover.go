@@ -26,13 +26,18 @@ var failoverDryRun bool
 var quotaFailoverCmd = &cobra.Command{
 	Use:   "failover",
 	Short: "Move blocked sessions to configured backup providers",
-	Long: `Move hard quota-limited sessions to the next eligible agent provider.
+	Long: `Move quota-limited sessions to the next eligible agent provider.
 
 This command only acts when settings/config.json enables agent_failover. It
 uses role_agent_backups for normal role sessions and agent_backups for explicit
 formula agents such as the Expeditor or a council convergence chair. Routes
 advance strictly forward, respect provider cooldowns and max_per_session, and
-never trigger from ordinary task failures or near-limit warnings.
+never trigger from ordinary task failures.
+
+By default only confirmed hard limits trigger a move. Set
+agent_failover.include_near_limit=true to also move sessions that are merely
+approaching their limit, so the swap happens before the hard 429 interrupts
+the session instead of after.
 
 Cross-provider continuation restores from durable Gas Town state (the hooked
 bead, worktree, comments, and gt prime output); it does not attempt to resume a
@@ -93,6 +98,11 @@ func runQuotaFailover(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating scanner: %w", err)
 	}
+	if townSettings.AgentFailover.IncludeNearLimit {
+		if err := scanner.WithWarningPatterns(nil); err != nil {
+			return fmt.Errorf("setting warning patterns: %w", err)
+		}
+	}
 	results, err := scanner.ScanAll()
 	if err != nil {
 		return fmt.Errorf("scanning sessions: %w", err)
@@ -143,8 +153,8 @@ func runQuotaFailover(cmd *cobra.Command, args []string) error {
 		if quotaJSON {
 			return json.NewEncoder(os.Stdout).Encode([]AgentFailoverResult{})
 		}
-		if len(plan.LimitedSessions) == 0 {
-			fmt.Printf(" %s No hard quota-limited sessions detected\n", style.SuccessPrefix)
+		if len(plan.LimitedSessions) == 0 && len(plan.NearLimitSessions) == 0 {
+			fmt.Printf(" %s No quota-limited sessions detected\n", style.SuccessPrefix)
 		} else {
 			fmt.Printf(" %s No eligible provider failovers\n", style.WarningPrefix)
 			for _, sessionName := range slices.Sorted(maps.Keys(plan.Skipped)) {
