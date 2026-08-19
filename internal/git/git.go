@@ -2886,15 +2886,62 @@ func (g *Git) branchPreservationStatus(localBranch, remote string, targets []str
 		}
 	}
 
+	// gt-mv6f: if HEAD is reachable from ANY remote ref, the work is preserved and
+	// nothing is unpushed — full stop. Without this, a polecat whose branch was
+	// merged and then deleted on the remote has no exact-branch evidence, falls
+	// through to @{u}, and is judged against whatever that happens to point at. In
+	// a fork-based town @{u} is often upstream/main (the parent), which will never
+	// contain fork commits, so merged work is reported unpushed forever and the
+	// polecat is pinned at NEEDS_RECOVERY.
+	//
+	// Deliberately gated on includeExactBranch: BranchTargetStatus asks a stricter
+	// question — whether the work reached its target/custody refs — and for that,
+	// merely existing on some remote is NOT sufficient evidence.
+	if includeExactBranch {
+		if onRemote, err := g.headOnAnyRemote(); err == nil && onRemote {
+			result.Preserved = true
+			result.UnpreservedPatchCount = 0
+			result.Evidence = "remote_reachable"
+			if result.ComparisonBase == "" {
+				result.ComparisonBase = "any-remote"
+			}
+			return result, nil
+		}
+	}
+
 	for _, target := range nonEmptyUnique(targets) {
 		if ref, ok := g.resolveComparisonRef(target, remote); ok {
 			candidates = append(candidates, ref)
 		}
 	}
 
+	// gt-mv6f: with no explicit target/custody refs, the remote's default branch IS
+	// the target — "did this work reach the trunk" is the question being asked. Without
+	// this, a polecat whose work was merged and whose branch was then deleted has no
+	// candidate at all, falls through to the @{u}/pushed-branch heuristics, and is
+	// reported as having submittable work forever even though its commits are in main.
+	if len(candidates) == 0 {
+		if def, err := g.run("rev-parse", "--verify", "--quiet", remote+"/HEAD"); err == nil && strings.TrimSpace(def) != "" {
+			hasEvidence = true
+			candidates = append(candidates, remote+"/HEAD")
+		} else if def, err := g.run("rev-parse", "--verify", "--quiet", remote+"/main"); err == nil && strings.TrimSpace(def) != "" {
+			hasEvidence = true
+			candidates = append(candidates, remote+"/main")
+		}
+	}
+
 	if upstream, err := g.run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"); err == nil && strings.TrimSpace(upstream) != "" {
 		upstream = strings.TrimSpace(upstream)
-		if includeExactBranch || !isPolecatSelfUpstream(localBranch, remote, upstream) {
+		// gt-mv6f: only trust @{u} when it belongs to the remote we were asked
+		// about. Callers pass an explicit remote ("origin"); in a fork-based town
+		// a polecat branch often tracks upstream/main (the parent), which will
+		// never contain fork commits. Comparing against it reports merged work as
+		// unpreserved forever, which pins the polecat at NEEDS_RECOVERY /
+		// NEEDS_MQ_SUBMIT. Silently answering about a different remote than the
+		// one requested is wrong regardless of which question is being asked, so
+		// this guard applies to both preservation and target checks.
+		if strings.HasPrefix(upstream, remote+"/") &&
+			(includeExactBranch || !isPolecatSelfUpstream(localBranch, remote, upstream)) {
 			hasEvidence = true
 			candidates = append(candidates, upstream)
 		}
@@ -2942,6 +2989,20 @@ func (g *Git) branchPreservationStatus(localBranch, remote string, targets []str
 	return result, fmt.Errorf("no usable comparison refs")
 }
 
+// headOnAnyRemote reports whether HEAD is reachable from any remote-tracking ref.
+//
+// gt-mv6f: this is the ground truth for "is this work preserved somewhere other
+// than this worktree". Reachability from any remote means the commits exist off
+// this machine, regardless of which branch survived — merged-and-deleted polecat
+// branches are the common case, and for those the exact remote branch is gone.
+func (g *Git) headOnAnyRemote() (bool, error) {
+	out, err := g.run("for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/remotes/")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 func isPolecatSelfUpstream(localBranch, remote, upstream string) bool {
 	return strings.HasPrefix(localBranch, "polecat/") && upstream == remote+"/"+localBranch
 }
@@ -2978,7 +3039,13 @@ func comparisonRefCandidates(ref, remote string) []string {
 		return []string{ref}
 	}
 	if !strings.Contains(ref, "/") && remote != "upstream" {
-		return []string{"upstream/" + ref, remote + "/" + ref, ref}
+		// gt-mv6f: prefer the REQUESTED remote over upstream. A bare target like
+		// "main" means the trunk of the remote the caller named. Resolving it to
+		// upstream/main first is wrong in a fork-based town: the parent never
+		// receives fork commits, so merged work compares as unpreserved forever and
+		// the polecat is pinned at NEEDS_MQ_SUBMIT. upstream is kept as a fallback
+		// for towns where it genuinely is the trunk.
+		return []string{remote + "/" + ref, "upstream/" + ref, ref}
 	}
 	return []string{remote + "/" + ref, ref}
 }

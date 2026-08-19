@@ -3774,9 +3774,15 @@ func TestUnpushedCommitsPrefersExactRemoteBranchOverUpstream(t *testing.T) {
 	}
 }
 
+// gt-mv6f: the invariant this test protects is that REMOTE-TRACKING refs are
+// preferred over the bare local ref — "main" must stay last. The ordering between
+// two remotes was changed deliberately: the requested remote now precedes upstream.
+// Resolving a bare target to upstream/ first is wrong in a fork-based town, where
+// work merges to the fork and the parent never receives it, so merged commits
+// compared as unpreserved forever and polecats were pinned at NEEDS_MQ_SUBMIT.
 func TestComparisonRefCandidatesPreferRemoteTrackingRef(t *testing.T) {
 	got := comparisonRefCandidates("main", "origin")
-	want := []string{"upstream/main", "origin/main", "main"}
+	want := []string{"origin/main", "upstream/main", "main"}
 	if len(got) != len(want) {
 		t.Fatalf("comparisonRefCandidates length = %d, want %d: %v", len(got), len(want), got)
 	}
