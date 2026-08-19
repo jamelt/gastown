@@ -246,6 +246,12 @@ func (b *Beads) AckEscalation(id, ackedBy string) error {
 
 // CloseEscalation closes an escalation bead with a resolution reason.
 // Sets closed_by and closed_reason fields, closes the issue.
+//
+// Escalations are routed to their recipient (e.g. "mayor/") as the bead
+// assignee, so the normal case — that recipient closing its own escalation
+// after resolving it — is rejected by bd close's assignee/actor check unless
+// forced. That is the expected workflow here, not an edge case, so the close
+// is always forced.
 func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 	target := b.forIssueID(id)
 	// First get current issue to preserve other fields
@@ -276,7 +282,7 @@ func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 	}
 
 	// Close the issue
-	_, err = target.run("close", id, "--reason="+reason)
+	_, err = target.run("close", id, "--reason="+reason, "--force")
 	return err
 }
 

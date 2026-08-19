@@ -446,3 +446,61 @@ exit 0
 		t.Errorf("expected stdin to be multi-line, got %q", stdin)
 	}
 }
+
+// TestCloseEscalation_PassesForce verifies that CloseEscalation always passes
+// --force to the underlying bd close.
+//
+// Regression test for gt-kaas: bd close refuses to close an escalation whose
+// assignee is the recipient it was routed to (e.g. "mayor/") when the actor
+// closing it is that same recipient — the normal case for every escalation
+// addressed to the Mayor. Without --force, gt escalate close structurally
+// could never close a mayor-assigned escalation.
+func TestCloseEscalation_PassesForce(t *testing.T) {
+	stubDir := t.TempDir()
+	closeArgsPath := filepath.Join(stubDir, "close_args.txt")
+
+	stubScript := `#!/bin/sh
+case " $* " in
+  *" version "*)
+    echo "unknown flag: --allow-stale"
+    exit 1
+    ;;
+  *" show "*)
+    echo '[{"id":"hq-test1","title":"Test escalation","status":"open","priority":2,"type":"task","labels":["gt:escalation"],"description":""}]'
+    exit 0
+    ;;
+  *" update "*)
+    cat > /dev/null
+    exit 0
+    ;;
+  *" close "*)
+    for a in "$@"; do
+      printf '%s\n' "$a" >> "` + closeArgsPath + `"
+    done
+    exit 0
+    ;;
+esac
+exit 1
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ResetBdAllowStaleCacheForTest()
+
+	b := New(t.TempDir())
+	if err := b.CloseEscalation("hq-test1", "mayor/", "fixed"); err != nil {
+		t.Fatalf("CloseEscalation: %v", err)
+	}
+
+	argsData, err := os.ReadFile(closeArgsPath)
+	if err != nil {
+		t.Fatalf("read stub close args (close was never invoked): %v", err)
+	}
+	args := string(argsData)
+	if !strings.Contains(args, "--force") {
+		t.Errorf("expected --force in bd close args, got:\n%s", args)
+	}
+}
