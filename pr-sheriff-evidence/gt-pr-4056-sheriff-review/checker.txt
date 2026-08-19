@@ -1,0 +1,250 @@
+PR Sheriff independent verification commands and output — PR #4056
+Bead: gt-pr-4056-sheriff-review
+Run at: 2026-08-19T11:31:12Z
+
+$ git remote -v
+origin    https://github.com/jamelt/gastown.git (fetch/push)
+upstream  https://github.com/gastownhall/gastown.git (fetch)
+upstream  DISABLED (push)
+
+$ gh pr view 4056 --repo gastownhall/gastown --json state,mergedAt,mergeCommit,mergeable,labels,statusCheckRollup,comments,title,author,baseRefName,headRefName,additions,deletions,changedFiles,body,isDraft
+state=CLOSED mergedAt=null mergeCommit=null mergeable=UNKNOWN isDraft=false
+title="fix(mail): route deacon/dogs/<name> to dog pane, not Deacon (gt-osx)"
+author=adensur (Maksim) baseRefName=main headRefName=fix/router-dog-prefix-match-gt-osx
+additions=1706 deletions=285 changedFiles=30 (broad/stale stacked branch, not a
+  clean 1-commit diff — only commit 6010f264 is the relevant fix per the
+  PR body and prior Sheriff review comments)
+labels: kind/bug, priority/p2, status/review-failed
+statusCheckRollup: housekeeping/automation checks all SUCCESS (add/remove
+  triage label, Block Internal PRs SKIPPED, Reject go.mod replace directives,
+  Reject issues.jsonl) plus one real CI run (2026-05-18): Test, Lint,
+  Integration Tests, Windows Smoke Test all SUCCESS at that time — but the
+  branch was later reported stale/conflicting against main by two rounds of
+  PR Sheriff review (2026-06-09, 2026-06-16), so that green run does not
+  reflect the branch's mergeable state at close time.
+Four comments:
+  1. codecov-commenter (2026-05-18): automated coverage report, not a review.
+  2. Bella-Giraffety (2026-06-09T17:27:04Z): PR Sheriff review for
+     gt-pr-sheriff-4056 (nuka polecat). Branch stale/conflicting/broad;
+     reimplemented only the relevant fix on current Gas Town branch as
+     commit a5b27969. Recorded 15/15 research summaries, 5/5 pre-impl
+     reviews, 5/5 post-impl reviews approved. Added status/accepted label.
+  3. Bella-Giraffety (2026-06-16T22:05:19Z): PR Sheriff recovery update
+     (nuka polecat again). Continued focused replacement branch
+     polecat/nuka/gt-pr-sheriff-4056@mqgybw6d, fixed remaining mail
+     resolver/router gaps (validateRecipient, DND lookup, resolve.go).
+     Recorded a second independent 15/15 + 5/5 + 5/5 cycle.
+  4. Bella-Giraffety (2026-07-07T21:03:01Z, close): "Closing as superseded
+     by merged replacement PR #4417. #4417 carried forward the focused dog
+     mail routing intent on current main, passed full GitHub CI, and had
+     PR Sheriff merge-gate PASS with merge_path_allowed=true. Replacement
+     merge commit is recorded on #4417; attribution/provenance for
+     adensur/Maksim and original commit 6010f264 was preserved."
+
+$ bd search 4056
+Found 8 issues: gt-sc-b43a97ef2b (sling-context, closed), gt-yzhl (pipboy,
+  closed 2026-07-07: final replacement worker, produced PR #4417),
+  gt-5vgr (closed 2026-07-07: review, defer_human_review), gt-p1rn (ghoul,
+  closed 2026-07-06: earlier review-only pass, defer_human_review, filed
+  follow-up), gt-pr-4056-sheriff-review (this bead, hooked),
+  hq-d60a / hq-99q (github-sheriff CI-failure trackers, closed),
+  gt-pr-sheriff-4056 (nuka, closed 2026-06-16: two earlier replacement
+  attempts, MRs gt-wisp-cul / gt-wisp-tki6 — town/fork-local merge-queue
+  items, not the final GitHub-merged fix).
+
+$ bd show gt-p1rn
+close_reason: "PR Sheriff review complete: defer_human_review,
+  merge_path_allowed=false; no code changes, no refinery/MQ; follow-up
+  hq-kcllj remains open for any replacement work." review_only: true,
+  no_merge: true. Confirms the branch was correctly deferred rather than
+  merged as-is at this point (2026-07-06), one day before the final fix.
+
+$ bd show gt-5vgr
+close_reason: "PR Sheriff review complete: #4056 defer_human_review,
+  merge_path_allowed=false; stale/conflicting broad PR should not merge
+  as-is; focused current-main replacement/fixup required before superseded
+  closure" (2026-07-07). Directly precedes gt-yzhl's replacement dispatch.
+
+$ bd show gt-yzhl
+close_reason: "Merged replacement PR #4417 at
+  44717e5b8a9cd4c16229f6310e5b3808ef17b46c and closed original PR #4056 as
+  superseded with attribution/provenance noted." Design field: code head
+  1851d44300650595606b1be42b15a8ad27c5be7d, 15 research legs, 5
+  pre-implementation reviews, 5 post-implementation reviews recorded.
+  Comments include PR-SHERIFF-EVIDENCE (verdict=merge_replacement,
+  merge_path_allowed=true, checker PASS), PR-CI-GREEN (Test/Lint/
+  Integration Tests/Windows Smoke Test all pass), and a P01
+  pre-implementation-review requiring the dog-canonicalization helper be
+  applied to all mail bead-ID-to-address conversion paths — confirmed
+  applied below (dogAddressFromAgentBeadID, both hq-dog- and gt-dog-
+  prefixes).
+
+$ gh pr view 4417 --repo gastownhall/gastown --json state,mergedAt,mergeCommit,labels,statusCheckRollup,title,author,baseRefName,headRefName,additions,deletions,changedFiles
+state=MERGED mergedAt=2026-07-07T21:02:38Z
+mergeCommit.oid=44717e5b8a9cd4c16229f6310e5b3808ef17b46c
+title="fix(mail): route dog mail to dog panes"
+author=Bella-Giraffety headRefName=polecat/pipboy/gt-yzhl@8e9ea7
+additions=612 deletions=23 changedFiles=10 (includes its own PR-Sheriff
+  evidence.json/merge-gate-check.txt artifacts committed alongside code)
+labels: kind/bug, priority/p2, status/merged
+statusCheckRollup: Block Internal PRs SKIPPED (correct, internal maintainer
+  PR), add-triage-label / Reject go.mod replace directives / Reject
+  issues.jsonl / remove-triage-label(x4) / Windows Smoke Test / Test / Lint
+  / Integration Tests all SUCCESS — full green bar at merge.
+
+$ git fetch upstream main
+(fetched successfully; upstream/main -> 649b832b7)
+
+$ git merge-base --is-ancestor 44717e5b8a9cd4c16229f6310e5b3808ef17b46c upstream/main; echo $?
+0
+IS ANCESTOR: yes
+
+$ git show --stat 44717e5b8a9cd4c16229f6310e5b3808ef17b46c
+commit 44717e5b8a9cd4c16229f6310e5b3808ef17b46c
+Merge: 8b868b93b 567b1f217
+Author: Bella-Giraffety
+Date:   Tue Jul 7 21:02:38 2026 +0000
+    Merge pull request #4417 from Bella-Giraffety/polecat/pipboy/gt-yzhl@8e9ea7
+    fix(mail): route dog mail to dog panes
+ internal/cmd/dnd_test.go                       |  11 +
+ internal/cmd/nudge.go                          |  39 +++-
+ internal/cmd/nudge_test.go                     |  53 ++++-
+ internal/mail/dog_address.go                   |  63 ++++++
+ internal/mail/resolve.go                       |  25 ++-
+ internal/mail/resolve_test.go                  |  41 ++++
+ internal/mail/router.go                        |  46 ++--
+ internal/mail/router_test.go                   | 112 ++++++++++
+ pr-sheriff-evidence/gt-yzhl-pr4056-replacement/evidence.json          | 235 ++
+ pr-sheriff-evidence/gt-yzhl-pr4056-replacement/merge-gate-check.txt   |  10 +
+ 10 files changed, 612 insertions(+), 23 deletions(-)
+
+$ git show upstream/main:internal/mail/dog_address.go
+(full file present; defines dogAddressPrefix = constants.RoleDeacon +
+  "/dogs/", DogAddress(name), DogAddressName(address) with isSafeDogName
+  guarding empty/./..//\\, dogAddressFromAgentBeadID handling both
+  "hq-dog-" and legacy "gt-dog-" prefixes, isReservedTownSubpath guarding
+  mayor/ and deacon/ subpaths generally)
+Result: PASS — canonical dog-address helper present and reused, not a
+  one-off inline prefix check.
+
+$ git show upstream/main:internal/mail/router.go | sed -n '1970,1990p'
+func AddressToSessionIDs(address string) []string {
+	if address == "overseer" { return []string{session.OverseerSessionName()} }
+	if dogName, ok := DogAddressName(address); ok {
+		return []string{session.DogSessionName(dogName)}
+	}
+	if address == constants.RoleMayor || address == constants.RoleMayor+"/" {
+		return []string{session.MayorSessionName()}
+	}
+	if address == constants.RoleDeacon || address == constants.RoleDeacon+"/" {
+		return []string{session.DeaconSessionName()}
+	}
+	if isReservedTownSubpath(address) { return nil }
+	...
+Result: PASS — this is the exact bug fix from the PR title. Dog addresses
+  (deacon/dogs/<name>) are matched and routed to the dog session BEFORE the
+  exact-equal Deacon check, and the old `strings.HasPrefix(address,
+  "deacon")` broad-prefix match is gone entirely (replaced by two exact
+  equality checks plus the dedicated DogAddressName parser). Malformed
+  reserved paths (e.g. "deaconer", "deacon/foo") no longer fall through to
+  Deacon — isReservedTownSubpath rejects them.
+
+$ git worktree add --detach /tmp/gt-pr4056-check upstream/main
+Preparing worktree (detached HEAD 649b832b7)
+
+$ (cd /tmp/gt-pr4056-check && CGO_ENABLED=0 go test ./internal/mail/... \
+    -run 'TestAddressToSessionIDs|TestDogAddress|TestDogAddressName|TestResolve' -v -count=1)
+=== RUN   TestAddressToSessionIDs/deacon
+=== RUN   TestAddressToSessionIDs/deacon/
+=== RUN   TestAddressToSessionIDs/deacon/dogs/alpha
+=== RUN   TestAddressToSessionIDs/deacon/dogs/my-dog
+=== RUN   TestAddressToSessionIDs/deacon/dogs
+=== RUN   TestAddressToSessionIDs/deacon/dogs/
+=== RUN   TestAddressToSessionIDs/deacon/dogs/alpha/extra
+=== RUN   TestAddressToSessionIDs/deacon/dogs/..
+=== RUN   TestAddressToSessionIDs/deacon/foo
+=== RUN   TestAddressToSessionIDs/deaconer
+--- PASS: TestAddressToSessionIDs (all subtests PASS)
+PASS
+ok  	github.com/steveyegge/gastown/internal/mail	0.291s
+Result: PASS — run directly against a clean detached checkout of
+  upstream/main (649b832b7), not the review branch's own fork tree. Exact
+  regression coverage for the bug (deacon/dogs/alpha routes to the dog
+  session, exact deacon/deacon/ still route to Deacon, malformed paths like
+  "deaconer"/"deacon/foo"/"deacon/dogs/.." are all rejected/non-dog).
+
+$ (cd /tmp/gt-pr4056-check && CGO_ENABLED=0 go test ./internal/cmd/... \
+    -run 'TestDND|TestNudge' -v -count=1)
+=== RUN   TestNudgeDogTargetRoutesToDogSession
+✓ Nudged deacon/dogs/fido (immediate)
+--- PASS: TestNudgeDogTargetRoutesToDogSession (0.00s)
+PASS
+ok  	github.com/steveyegge/gastown/internal/cmd	0.695s
+Result: PASS — directly covers the PR's stated motivating symptom (a
+  misrouted nudge sending Escape to a fresh Deacon session and freezing it
+  mid-thinking). This confirms the nudge-dispatch path, not just the
+  low-level address resolver, is fixed on current upstream/main.
+
+$ (cd /tmp/gt-pr4056-check && CGO_ENABLED=0 go build -o /tmp/gt-pr4056-check/gt-bin ./cmd/gt); echo $?
+0
+Result: PASS — gt builds cleanly on current upstream/main.
+
+$ git worktree remove /tmp/gt-pr4056-check --force
+(removed)
+
+$ gh pr list --repo gastownhall/gastown --search "4056 in:body" --state all --json number,title,state
+-> only #4417 (the known replacement); no undiscovered competing PR.
+
+$ gh issue list --repo gastownhall/gastown --search "deacon/dogs in:body,title" --state all
+-> 30 results, all unrelated subsystems (dog health-check timing, worktree
+   cleanup, wisp reaper, patrol formulas, session freezes, etc.) — none
+   describe the deacon-prefix mis-routing bug itself. One CLOSED issue
+   (#3223, "dogs can't read their mail") is topically adjacent but a
+   distinct root cause (dog session missing injected identity for reading
+   ITS OWN inbox, closed 2026-05-13, well before this PR) — not the same
+   bug as mail addressed TO a dog being misrouted by the sender/router.
+
+$ gh issue list --repo gastownhall/gastown --search "dog pane in:body,title" --state all
+-> 8 results, all unrelated subsystems (health-check timing, patrol audit,
+   session freezes, zombie detection) — none reference this routing bug.
+
+$ gh issue list --repo gastownhall/gastown --search "4417 in:body" --state all
+-> [] (no issue references #4417 by number)
+
+$ gh issue list --repo gastownhall/gastown --search "6010f264 in:body" --state all
+-> [] (no issue references the original fix commit)
+
+$ gh issue view 3223 --repo gastownhall/gastown --json body,state,closedAt
+state=CLOSED closedAt=2026-05-13T07:33:29Z. Root cause: dogs start with
+  GT_ROLE=dog but no injected full identity path, so `gt mail inbox` reads
+  the wrong address for THEIR OWN inbox. Confirmed distinct from PR #4056's
+  bug (mail addressed TO deacon/dogs/<name> being routed by the SENDER'S
+  AddressToSessionIDs to the Deacon's tmux pane instead of the dog's).
+  No linkage/reopen needed.
+
+$ gh issue list --repo gastownhall/gastown --search "gt-osx in:body,title" --state all
+-> #128 "Can't install v0.2 on fresh OSX machine" (unrelated; "gt-osx" in
+   the PR title/body is the CONTRIBUTOR'S OWN external bead-tracker ID, not
+   a Gas Town or GitHub issue reference).
+
+$ gh issue list --repo gastownhall/gastown --search "gt-097 in:body,title" --state all
+-> [] (same: contributor's own external bead ID, not present in this repo's
+   GitHub issues or Gas Town beads).
+
+$ gh pr view 4056 --repo gastownhall/gastown --json labels -q '.labels[].name'
+kind/bug
+priority/p2
+status/review-failed
+
+$ gh pr view 4417 --repo gastownhall/gastown --json labels -q '.labels[].name'
+kind/bug
+priority/p2
+status/merged
+
+$ gt pr-sheriff-check --merge-gate --base upstream/main --json
+(not run in this pass — no new Sheriff-authored replacement PR is being
+  opened or recommended; the branch-hygiene gate only applies before
+  opening/recommending a maintainer replacement PR per skill.md, and the
+  replacement, #4417, already exists, was independently built and merged
+  by gt-yzhl with its own full 15+5+5 evidence, five weeks before this bead
+  was dispatched.)
