@@ -1122,6 +1122,56 @@ func TestHandleMRInfoSuccess_VerifiedHeadLeaseDeletesRemoteBranch(t *testing.T) 
 	}
 }
 
+// TestHandleMRInfoSuccess_StaleCommitSHADeletesUsingFreshRemoteTip covers the
+// same defect class as gt-twuj: mr.CommitSHA is captured at MR-submit time and
+// goes stale if a conflict-resolution push later lands a new commit on the
+// same branch. The stale SHA must not be used as the delete's compare-and-swap
+// reference — the branch's current (safely-merged) remote tip must be used
+// instead, or the cleanup would wrongly leave the branch behind (gt-q5qb).
+func TestHandleMRInfoSuccess_StaleCommitSHADeletesUsingFreshRemoteTip(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	installNoPRGH(t)
+	run(t, workDir, "git", "remote", "add", "upstream", "https://github.com/example/repo.git")
+
+	branch := "polecat/test/stale-commit-sha"
+	createFeatureBranch(t, workDir, branch, "proof.txt", "submitted\n")
+	submittedCommit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--ff-only", branch)
+	run(t, workDir, "git", "push", "origin", "main")
+
+	// Simulate a conflict-resolution push landing a new commit on the branch
+	// after MR submission. mr.CommitSHA will still reflect submittedCommit.
+	run(t, workDir, "git", "checkout", branch)
+	writeFile(t, workDir, "resolved.txt", "conflict resolved\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "fix: resolve conflict")
+	resolvedCommit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--ff-only", branch)
+	run(t, workDir, "git", "push", "origin", "main")
+	mergeCommit := run(t, workDir, "git", "rev-parse", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	if !e.HandleMRInfoSuccess(&MRInfo{
+		ID:        "mr-stale-commit-sha",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: submittedCommit,
+	}, ProcessResult{Success: true, MergeCommit: mergeCommit}) {
+		t.Fatal("HandleMRInfoSuccess returned false")
+	}
+	if out := run(t, workDir, "git", "ls-remote", "--heads", "origin", branch); strings.TrimSpace(out) != "" {
+		t.Fatalf("remote branch not deleted despite fresh tip %s being safely merged; ls-remote=%q", resolvedCommit, out)
+	}
+	if out := run(t, workDir, "git", "branch", "--list", branch); strings.TrimSpace(out) != "" {
+		t.Fatalf("local branch not deleted despite fresh tip %s being safely merged; branch --list=%q", resolvedCommit, out)
+	}
+}
+
 func TestDoMergeDirectPreservesSubmittedHeadForPostMergeProof(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
