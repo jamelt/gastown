@@ -181,10 +181,14 @@ func applyMQIndexToWorkstateInput(input *polecat.WorkstateInput, fields *beads.A
 }
 
 func buildPolecatInventoryItem(rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet, mq polecatMQIndex) polecatInventoryItem {
-	return buildPolecatInventoryItemFromEvidence(rigName, polecatName, fields, assessPolecatAssignedIssueWork(activeWork), sessions, mq)
+	return buildPolecatInventoryItemFromEvidenceWithBD(rigName, polecatName, fields, assessPolecatAssignedIssueWork(activeWork), sessions, mq, nil)
 }
 
 func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *beads.AgentFields, activeWorkEvidence polecatActiveWorkEvidence, sessions polecatSessionSet, mq polecatMQIndex) polecatInventoryItem {
+	return buildPolecatInventoryItemFromEvidenceWithBD(rigName, polecatName, fields, activeWorkEvidence, sessions, mq, nil)
+}
+
+func buildPolecatInventoryItemFromEvidenceWithBD(rigName, polecatName string, fields *beads.AgentFields, activeWorkEvidence polecatActiveWorkEvidence, sessions polecatSessionSet, mq polecatMQIndex, bd issueShower) polecatInventoryItem {
 	sessionName, running := sessions.lookup(rigName, polecatName)
 	item := polecatInventoryItem{
 		Rig:            rigName,
@@ -240,9 +244,34 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		input.ActiveMRBlocker = "active_mr=" + item.ActiveMR + " status=unknown"
 	}
 
+	// Detect partial spawn case: agent_state=spawning with a hook_bead, but the
+	// hook is not assigned to this polecat. This indicates a spawn operation that
+	// completed its work but didn't establish a durable hook on the assigned bead.
+	// When detected, we can ignore unknown cleanup_status and defer to live git/MR
+	// evidence (the same logic check-recovery uses for this edge case).
+	if fields != nil && !activeWorkEvidence.BlocksCleanup && item.Issue == "" {
+		partialSpawnWithoutHook := computePartialSpawnWithoutDurableHook(bd, fields, rigName, polecatName, item.Issue)
+		input.PartialSpawnWithoutDurableHook = partialSpawnWithoutHook
+		// When partial spawn is detected with unknown/missing cleanup_status,
+		// we can safely ignore the status (same as check-recovery's edge case logic).
+		// This reduces disagreement between list and check-recovery displays.
+		if partialSpawnWithoutHook && (item.CleanupStatus == "" || item.CleanupStatus == string(polecat.CleanupUnknown)) {
+			input.IgnoreCleanupStatus = true
+		}
+	}
+
 	input.State = item.State
 	applyMQIndexToWorkstateInput(&input, fields, mq)
 	item.Disposition = polecat.DecideWorkstate(input)
+
+	// Mirror check-recovery's gt-ve9o fix: display the cleanup status the verdict
+	// actually decided on, not the raw stale/unknown value. When IgnoreCleanupStatus
+	// is true, show CleanupClean instead of the stale raw string, so list's display
+	// doesn't contradict its own verdict.
+	if input.IgnoreCleanupStatus {
+		item.CleanupStatus = string(polecat.CleanupClean)
+	}
+
 	return item
 }
 
@@ -383,4 +412,23 @@ func parsePolecatAgentFields(issue *beads.Issue) *beads.AgentFields {
 	fields := beads.ParseAgentFields(issue.Description)
 	fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
 	return fields
+}
+
+// computePartialSpawnWithoutDurableHook mirrors the check-recovery logic for
+// detecting when a polecat is in spawning state with a hook_bead that has moved
+// to a different assignee. This indicates a partial spawn without a durable hook
+// on the assigned bead, which allows us to ignore unknown cleanup_status.
+func computePartialSpawnWithoutDurableHook(bd issueShower, fields *beads.AgentFields, rigName, polecatName, currentIssue string) bool {
+	if bd == nil || fields == nil || fields.AgentState != "spawning" || fields.HookBead == "" || currentIssue != "" {
+		return false
+	}
+	issue, err := bd.Show(fields.HookBead)
+	if err != nil || issue == nil {
+		return false
+	}
+	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+	if (issue.Status == beads.StatusHooked && issue.Assignee == assignee) || issue.Assignee == assignee {
+		return false
+	}
+	return true
 }

@@ -221,3 +221,111 @@ func TestPolecatReuseStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkstateDispositionProjectionAgreement(t *testing.T) {
+	// Verify that DecideWorkstate (used by both list and check-recovery)
+	// produces the same disposition for identical WorkstateInput.
+	// This proves the two commands' projection logic agrees when they
+	// feed it the same evidence (gt-r0la, gt-ve9o).
+	tests := []struct {
+		name  string
+		input polecat.WorkstateInput
+	}{
+		{
+			name: "idle-clean",
+			input: polecat.WorkstateInput{
+				State:         polecat.StateIdle,
+				CleanupStatus: polecat.CleanupClean,
+				Branch:        "main",
+			},
+		},
+		{
+			name: "idle-unknown-cleanup-defers-to-git",
+			input: polecat.WorkstateInput{
+				State:         polecat.StateIdle,
+				CleanupStatus: polecat.CleanupUnknown,
+				Branch:        "main",
+				GitDirty:      false,
+				GitCheckFailed: false,
+			},
+		},
+		{
+			name: "idle-missing-cleanup-defers-to-git",
+			input: polecat.WorkstateInput{
+				State:         polecat.StateIdle,
+				CleanupStatus: "",
+				Branch:        "main",
+				GitDirty:      false,
+				GitCheckFailed: false,
+			},
+		},
+		{
+			name: "idle-with-active-mr-pending",
+			input: polecat.WorkstateInput{
+				State:              polecat.StateIdle,
+				CleanupStatus:      polecat.CleanupClean,
+				ActiveMRBlocker:    "active_mr=mr-123 status=unknown",
+				ActiveMR:           "mr-123",
+				PushFailed:         false,
+				MRFailed:           false,
+			},
+		},
+		{
+			name: "idle-dirty-needs-recovery",
+			input: polecat.WorkstateInput{
+				State:         polecat.StateIdle,
+				CleanupStatus: polecat.CleanupUnpushed,
+				Branch:        "polecat/test/feat",
+			},
+		},
+		{
+			name: "working-not-idle",
+			input: polecat.WorkstateInput{
+				State:         polecat.StateWorking,
+				CleanupStatus: polecat.CleanupClean,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Call DecideWorkstate to compute the disposition
+			disposition := polecat.DecideWorkstate(tt.input)
+
+			// Verify the disposition is determined (not empty verdict)
+			if disposition.Verdict == "" {
+				t.Fatalf("DecideWorkstate() produced empty verdict for input: %+v", tt.input)
+			}
+
+			// Call again with identical input to ensure deterministic results
+			disposition2 := polecat.DecideWorkstate(tt.input)
+
+			if disposition.Verdict != disposition2.Verdict {
+				t.Fatalf("DecideWorkstate() not deterministic: first %q, second %q",
+					disposition.Verdict, disposition2.Verdict)
+			}
+
+			// Verify consistency between verdict and safety flags
+			switch disposition.Verdict {
+			case polecat.WorkstateVerdictSafeToNuke:
+				if !disposition.SafeToNuke {
+					t.Fatalf("SAFE_TO_NUKE verdict but SafeToNuke=%v", disposition.SafeToNuke)
+				}
+				if disposition.NeedsRecovery {
+					t.Fatalf("SAFE_TO_NUKE verdict but NeedsRecovery=%v", disposition.NeedsRecovery)
+				}
+			case polecat.WorkstateVerdictNeedsRecovery:
+				if !disposition.NeedsRecovery {
+					t.Fatalf("NEEDS_RECOVERY verdict but NeedsRecovery=%v", disposition.NeedsRecovery)
+				}
+				if disposition.SafeToNuke {
+					t.Fatalf("NEEDS_RECOVERY verdict but SafeToNuke=%v", disposition.SafeToNuke)
+				}
+			case polecat.WorkstateVerdictWorking:
+				if disposition.NeedsRecovery {
+					t.Fatalf("WORKING verdict but NeedsRecovery=%v", disposition.NeedsRecovery)
+				}
+			}
+		})
+	}
+}

@@ -601,10 +601,10 @@ func enforceGateMarkerInBinary(binaryPath string) error {
 	}
 
 	if !strings.Contains(string(data), "confirm-human-approved") {
-		return fmt.Errorf("REFUSAL: scheduler cannot start with this binary\n" +
-			"The binary at %s does not contain the hard-prohibition gate enforcement marker.\n" +
-			"The gate commits are on main; the binary must contain evidence of their enforcement.\n" +
-			"This is a deployment-time control per decision gt-i4bn (ACCEPT option A).\n" +
+		return fmt.Errorf("REFUSAL: scheduler cannot start with this binary\n"+
+			"The binary at %s does not contain the hard-prohibition gate enforcement marker.\n"+
+			"The gate commits are on main; the binary must contain evidence of their enforcement.\n"+
+			"This is a deployment-time control per decision gt-i4bn (ACCEPT option A).\n"+
 			"Do NOT rebuild from diverged or uncommitted state. Use: git checkout main && make install",
 			binaryPath)
 	}

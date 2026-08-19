@@ -263,7 +263,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		for _, name := range polecatNames {
 			fields := fieldsByName[name]
 			workEvidence := assessPolecatAssignedIssueWork(activeWork[name])
-			item := buildPolecatInventoryItemFromEvidence(rigName, name, fields, workEvidence, sessions, mqIndex)
+			item := buildPolecatInventoryItemFromEvidenceWithBD(rigName, name, fields, workEvidence, sessions, mqIndex, rigBeads)
 			if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" && !item.SessionRunning && !workEvidence.BlocksCleanup {
 				assessment := inventoryManager.WorkstateDispositionForPolecat(name, item.State, item.Issue)
 				item = applyLegacyCleanupCompatibility(item, fields, workEvidence, assessment)

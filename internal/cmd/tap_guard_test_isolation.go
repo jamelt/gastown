@@ -31,7 +31,7 @@ var isolationSourceMarker = filepath.Join("internal", "testguard")
 var tapGuardTestIsolationCmd = &cobra.Command{
 	Use:   "test-isolation",
 	Short: "Block `go test` from a stale worktree that would mutate the live control plane",
-	Long: `Block `+"`go test`"+` launched from a STALE worktree against a LIVE town.
+	Long: `Block ` + "`go test`" + ` launched from a STALE worktree against a LIVE town.
 
 gt-8ik added a compiled, fail-closed isolation guard (internal/testguard) so that
 a test binary cannot mutate the live Gas Town control plane (beads DB, tmux
