@@ -2070,6 +2070,145 @@ exit 0
 	}
 }
 
+// TestDoneReleasesHookedBeadAssigneeOnEscalatedOrDeferred is a regression test
+// for gt-k2ab: gt done --status ESCALATED/DEFERRED left the hooked bead's
+// assignee untouched, so Manager.loadFromBeads (internal/polecat) — which
+// derives a polecat's displayed state from whether any bead is still assigned
+// to it — kept reporting the polecat as working forever, holding its capacity
+// slot even though the session had already exited. This asserts
+// updateAgentStateOnDone issues a `bd update` clearing the assignee (and, for
+// a bead still stuck in "hooked" status, reopening it) for both exit types,
+// without ever closing the bead (that invariant is covered separately by
+// TestDoneEscalatedNeverIssuesCloseOnHookedBead).
+func TestDoneReleasesHookedBeadAssigneeOnEscalatedOrDeferred(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script bd stub not supported on Windows")
+	}
+
+	tests := []struct {
+		name       string
+		exitType   string
+		wantStatus string // expected --status= arg
+	}{
+		{"escalated releases assignee and reopens a hooked bead", ExitEscalated, "open"},
+		{"deferred non-wfs releases assignee and reopens", ExitDeferred, "open"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+
+			if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+				t.Fatalf("mkdir mayor: %v", err)
+			}
+			beadsDir := filepath.Join(townRoot, ".beads")
+			if err := os.MkdirAll(filepath.Join(beadsDir, "locks"), 0755); err != nil {
+				t.Fatalf("mkdir .beads/locks: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0755); err != nil {
+				t.Fatalf("mkdir gastown: %v", err)
+			}
+			routes := strings.Join([]string{
+				`{"prefix":"gt-","path":"gastown"}`,
+				"",
+			}, "\n")
+			if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routes), 0644); err != nil {
+				t.Fatalf("write routes.jsonl: %v", err)
+			}
+
+			binDir := filepath.Join(townRoot, "bin")
+			if err := os.MkdirAll(binDir, 0755); err != nil {
+				t.Fatalf("mkdir bin: %v", err)
+			}
+			updatesLog := filepath.Join(townRoot, "updates.log")
+
+			// Hooked bead is still in the exclusive-ownership "hooked" status
+			// with an assignee — the state gt done leaves it in mid-work.
+			bdScript := fmt.Sprintf(`#!/bin/sh
+while [ "$1" = "--allow-stale" ]; do shift; done
+cmd="$1"
+shift || true
+case "$cmd" in
+  show)
+    beadID="$1"
+    case "$beadID" in
+      gt-gastown-polecat-nux)
+        echo '[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]'
+        ;;
+      gt-base-123)
+        echo '[{"id":"gt-base-123","title":"Some work","status":"hooked","assignee":"gastown/polecats/nux"}]'
+        ;;
+    esac
+    ;;
+  list)
+    echo '[]'
+    ;;
+  update)
+    echo "$*" >> "%s"
+    ;;
+  close)
+    echo "UNEXPECTED CLOSE: $*" >> "%s"
+    ;;
+  agent|slot)
+    exit 0
+    ;;
+esac
+exit 0
+`, updatesLog, updatesLog)
+
+			bdPath := filepath.Join(binDir, "bd")
+			if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
+				t.Fatalf("write bd stub: %v", err)
+			}
+
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GT_ROLE", "polecat")
+			t.Setenv("GT_RIG", "gastown")
+			t.Setenv("GT_POLECAT", "nux")
+			t.Setenv("GT_CREW", "")
+			t.Setenv("TMUX_PANE", "")
+
+			cwd, err := os.Getwd()
+			if err != nil {
+				t.Fatalf("getwd: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(cwd) })
+			if err := os.Chdir(filepath.Join(townRoot, "gastown")); err != nil {
+				t.Fatalf("chdir: %v", err)
+			}
+
+			updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, tt.exitType, "gt-base-123")
+
+			data, err := os.ReadFile(updatesLog)
+			if err != nil {
+				t.Fatalf("reading updates log: %v", err)
+			}
+			log := string(data)
+
+			if strings.Contains(log, "UNEXPECTED CLOSE") {
+				t.Fatalf("hooked bead was closed on %s exit, must never happen:\n%s", tt.exitType, log)
+			}
+
+			var releaseCall string
+			for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+				if strings.HasPrefix(line, "gt-base-123 ") || line == "gt-base-123" {
+					releaseCall = line
+					break
+				}
+			}
+			if releaseCall == "" {
+				t.Fatalf("expected a `bd update gt-base-123 ...` call clearing the assignee, got log:\n%s", log)
+			}
+			if !strings.Contains(releaseCall, "--assignee=") {
+				t.Errorf("expected assignee to be cleared, got update call: %q", releaseCall)
+			}
+			if !strings.Contains(releaseCall, "--status="+tt.wantStatus) {
+				t.Errorf("expected --status=%s, got update call: %q", tt.wantStatus, releaseCall)
+			}
+		})
+	}
+}
+
 // TestPushSubmoduleChanges_Integration verifies that pushSubmoduleChanges detects
 // modified submodules and pushes their commits before the parent repo push (gt-dzs).
 func TestPushSubmoduleChanges_Integration(t *testing.T) {
