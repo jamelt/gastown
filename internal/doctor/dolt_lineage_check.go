@@ -10,9 +10,21 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 var inspectDoltLineageFn = doltserver.InspectLineageSQL
+
+// loadRigEntryFn resolves a rig's registered git remote intent (git_url,
+// push_url, upstream_url) from mayor/rigs.json. Overridable for tests.
+var loadRigEntryFn = func(townRoot, rigName string) (config.RigEntry, bool) {
+	rigsCfg, err := config.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil {
+		return config.RigEntry{}, false
+	}
+	entry, ok := rigsCfg.Rigs[rigName]
+	return entry, ok
+}
 
 // DoltLineageCheck detects independent local and remote Beads histories.
 // It is intentionally non-fixable: choosing authoritative history and
@@ -101,6 +113,9 @@ func (c *DoltLineageCheck) runRig(ctx *CheckContext, rigName string) *CheckResul
 			FixHint: "Restore Dolt connectivity and rerun gt doctor --rig " + rigName,
 		}
 	}
+	if result := c.checkGitRemoteIntent(ctx.TownRoot, rigName, dbName, report); result != nil {
+		return result
+	}
 	if report.State == doltserver.LineageDiverged {
 		return &CheckResult{
 			Name: c.Name(), Status: StatusError,
@@ -126,6 +141,46 @@ func (c *DoltLineageCheck) runRig(ctx *CheckContext, rigName string) *CheckResul
 		}
 	}
 	return &CheckResult{Name: c.Name(), Status: StatusOK, Message: "Local and remote Beads histories share lineage"}
+}
+
+// checkGitRemoteIntent flags a Dolt remote that does not match the rig's
+// registered git remote intent (git_url / push_url in mayor/rigs.json). A
+// Dolt remote can share commit lineage with an unintended repo (e.g. a fork's
+// own upstream) and still report LineageShared, so this check runs
+// independently of lineage state. It is the guard that was missing for
+// gt-h37g: the rig's git remote correctly excluded steveyegge/gastown
+// (push disabled upstream) while the Dolt remote pointed at it by default,
+// and nothing compared the two.
+func (c *DoltLineageCheck) checkGitRemoteIntent(townRoot, rigName, dbName string, report doltserver.LineageReport) *CheckResult {
+	if report.RemoteURL == "" {
+		return nil
+	}
+	entry, ok := loadRigEntryFn(townRoot, rigName)
+	if !ok {
+		return nil // rig not registered; can't compare, don't false-positive
+	}
+	for _, intended := range []string{entry.GitURL, entry.PushURL} {
+		if intended != "" && git.SameRemoteURL(intended, report.RemoteURL) {
+			return nil
+		}
+	}
+	detail := fmt.Sprintf("dolt remote %q -> %s", report.RemoteName, report.RemoteURL)
+	if entry.UpstreamURL != "" && git.SameRemoteURL(entry.UpstreamURL, report.RemoteURL) {
+		detail += " (this is the rig's read-only upstream, not its own git remote)"
+	}
+	want := entry.PushURL
+	if want == "" {
+		want = entry.GitURL
+	}
+	return &CheckResult{
+		Name: c.Name(), Status: StatusError,
+		Message: "Dolt remote does not match the rig's git remote",
+		Details: []string{
+			detail,
+			fmt.Sprintf("rig git remote intent: git_url=%s push_url=%s", entry.GitURL, entry.PushURL),
+		},
+		FixHint: fmt.Sprintf("Point the Dolt remote for %s at the rig's own git remote (%s), or remove it (local-only) if remote sync isn't intended", dbName, want),
+	}
 }
 
 func (c *DoltLineageCheck) Fix(_ *CheckContext) error { return nil }
