@@ -5673,6 +5673,18 @@ func TestIsMoleculeContainerOrStep(t *testing.T) {
 			want: false,
 		},
 		{
+			// The dep arm uses EqualFold on both fields; bd renders vary in case.
+			name: "step bead dependency arm is case-insensitive",
+			issue: &Issue{
+				ID:   "gt-nhyl",
+				Type: "task",
+				Dependencies: []IssueDep{
+					{ID: "gt-vf2u", Type: "Molecule", DependencyType: "Parent-Child"},
+				},
+			},
+			want: true,
+		},
+		{
 			name: "real task that is a child of an epic is not molecule machinery",
 			issue: &Issue{
 				ID:   "gt-2",
