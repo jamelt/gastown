@@ -924,9 +924,32 @@ func detectCloneRoot() (string, error) {
 func detectActor() string {
 	roleInfo, err := GetRole()
 	if err != nil {
-		return "unknown"
+		return fallbackActor()
 	}
 	return roleInfo.ActorString()
+}
+
+// osHostname is a seam over os.Hostname so tests can exercise the
+// hostname-lookup-failure branch of fallbackActor without depending on OS
+// behavior.
+var osHostname = os.Hostname
+
+// fallbackActor builds an actor string from OS-level identity when Gas Town
+// role detection fails (e.g. a human at a raw terminal with no GT_ROLE set --
+// the same unattributed-actor ambiguity behind gt-h0ie's motivating
+// incident). This is not authentication -- $USER and hostname are as
+// forgeable as GT_ROLE -- but unlike the bare literal "unknown" it leaves
+// something inspectable instead of recording nothing at all (gt-h0ie).
+func fallbackActor() string {
+	user := os.Getenv("USER")
+	if user == "" {
+		user = "?"
+	}
+	host, err := osHostname()
+	if err != nil || host == "" {
+		host = "?"
+	}
+	return fmt.Sprintf("unknown(%s@%s)", user, host)
 }
 
 // agentIDToBeadID converts an agent ID to its corresponding agent bead ID.

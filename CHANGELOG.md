@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of silently forging the message's `From` (and, transitively, the `bd
   --actor` audit attribution routed through it) (gt-p7gu).
 
+- **Scheduler `paused_by` no longer records a bare `"unknown"` actor** — when
+  Gas Town role detection fails, `detectActor()` now falls back to an
+  OS-identity string (`unknown(user@host)`) instead of the uninspectable
+  literal `"unknown"`, leaving a forensic trail for future incident review.
+  Not an authentication mechanism — `$USER`/hostname are as forgeable as
+  `GT_ROLE` (gt-h0ie).
+
 ## [1.2.1] - 2026-06-06
 
 ### Fixed
