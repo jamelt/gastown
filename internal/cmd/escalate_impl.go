@@ -982,17 +982,3 @@ func formatRelativeTime(timestamp string) string {
 	}
 	return fmt.Sprintf("%d days ago", days)
 }
-
-// detectSender is defined in mail_send.go - we reuse it here
-// If it's not accessible, we fall back to environment variables
-func detectSenderFallback() string {
-	// Try BD_ACTOR first (most common in agent context)
-	if actor := os.Getenv("BD_ACTOR"); actor != "" {
-		return actor
-	}
-	// Try GT_ROLE
-	if role := os.Getenv("GT_ROLE"); role != "" {
-		return role
-	}
-	return ""
-}
