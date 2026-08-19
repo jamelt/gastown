@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/mail"
@@ -60,6 +61,41 @@ func TestNormalizeAddress(t *testing.T) {
 		if got := normalizeAddress(c.in); got != c.want {
 			t.Errorf("normalizeAddress(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestResolveSender(t *testing.T) {
+	cases := []struct {
+		name       string
+		mailFrom   string
+		detected   string
+		want       string
+		wantErrHas string
+	}{
+		{"no override uses detected", "", "gastown/polecats/toast", "gastown/polecats/toast", ""},
+		{"redundant self-override is a no-op", "gastown/polecats/toast", "gastown/polecats/toast", "gastown/polecats/toast", ""},
+		{"convoy override allowed", "convoy/gt-1234", "gastown/refinery", "convoy/gt-1234", ""},
+		{"bare convoy prefix allowed", "convoy/", "gastown/refinery", "convoy/", ""},
+		{"impersonating overseer rejected", "overseer", "gastown/polecats/toast", "", "not permitted"},
+		{"impersonating mayor rejected", "mayor/", "gastown/polecats/toast", "", "not permitted"},
+		{"case-sensitive prefix rejected", "Convoy/gt-1234", "gastown/refinery", "", "not permitted"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := resolveSender(c.mailFrom, c.detected)
+			if c.wantErrHas != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErrHas) {
+					t.Fatalf("resolveSender(%q, %q) error = %v, want error containing %q", c.mailFrom, c.detected, err, c.wantErrHas)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveSender(%q, %q) unexpected error: %v", c.mailFrom, c.detected, err)
+			}
+			if got != c.want {
+				t.Errorf("resolveSender(%q, %q) = %q, want %q", c.mailFrom, c.detected, got, c.want)
+			}
+		})
 	}
 }
 
