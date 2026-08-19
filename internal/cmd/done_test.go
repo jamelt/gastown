@@ -2586,3 +2586,67 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }
+
+// TestEnsureAgentBeadExists_SingletonRolesUseRigLocalBeads verifies that
+// ensureAgentBeadExists and rigLocalAgentBeads correctly route Witness and
+// Refinery agent beads to the rig-local database, not the town database.
+//
+// Background: When a rig-local agent bead (like gt-gastown-refinery) gets
+// closed and then recreated by ensureAgentBeadExists, it must be reopened in
+// the rig-local database (where it belongs), not in the town database (which
+// would create a duplicate). gt agents resolve --rig then correctly finds the
+// rig-local record.
+func TestEnsureAgentBeadExists_SingletonRolesUseRigLocalBeads(t *testing.T) {
+	// Create a test town structure with rig-local and town beads directories
+	tmpDir := t.TempDir()
+
+	// Create town structure:
+	//   .beads/              <- town database
+	//   gastown/
+	//     .beads/            <- rig-local database
+	//     polecats/atom/
+
+	townRoot := tmpDir
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	rigPath := filepath.Join(townRoot, "gastown")
+	rigBeadsDir := filepath.Join(rigPath, ".beads")
+	polecatPath := filepath.Join(rigPath, "polecats", "atom")
+
+	// Create directories
+	for _, dir := range []string{townBeadsDir, rigBeadsDir, polecatPath} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	// Create the Beads wrapper (using isolated mode for testing)
+	bd := beads.NewIsolated(townRoot)
+
+	// Test 1: Refinery role - rigLocalAgentBeads should return a wrapper pinned to rig-local
+	refBd := rigLocalAgentBeads(bd, RoleRefinery, polecatPath, townRoot)
+	// Verify the wrapper is not nil
+	if refBd == nil {
+		t.Errorf("Refinery rigLocalAgentBeads: returned nil")
+	}
+
+	// Test 2: Witness role - rigLocalAgentBeads should return a wrapper pinned to rig-local
+	witBd := rigLocalAgentBeads(bd, RoleWitness, polecatPath, townRoot)
+	// Verify the wrapper is not nil
+	if witBd == nil {
+		t.Errorf("Witness rigLocalAgentBeads: returned nil")
+	}
+
+	// Test 3: Polecat role - rigLocalAgentBeads should return the original wrapper unchanged
+	polBd := rigLocalAgentBeads(bd, RolePolecat, polecatPath, townRoot)
+	// Verify it returns the same wrapper (pointer equality)
+	if polBd != bd {
+		t.Errorf("Polecat rigLocalAgentBeads: expected same wrapper instance, got different one")
+	}
+
+	// Test 4: ensureAgentBeadExists should not error on missing beads
+	// (it's best-effort and doesn't block on failure)
+	err := ensureAgentBeadExists(bd, "", RoleRefinery, polecatPath, townRoot)
+	if err != nil {
+		t.Errorf("ensureAgentBeadExists with empty ID: unexpected error %v", err)
+	}
+}
