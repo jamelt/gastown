@@ -1223,7 +1223,6 @@ func computePolecatRecoveryStatus(mgr *polecat.Manager, r *rig.Rig, rigName, pol
 		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
 	}
 
-	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
 	if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" {
 		sessionDormant := false
@@ -1249,6 +1248,15 @@ func computePolecatRecoveryStatus(mgr *polecat.Manager, r *rig.Rig, rigName, pol
 			status.CleanupProvenance = legacyCleanupReadOnlyProvenance
 			status.Diagnostics = append(status.Diagnostics, "legacy_cleanup_status=<missing> evidence="+legacyCleanupReadOnlyProvenance)
 		}
+	}
+	// Display the cleanup status the verdict actually decided on, not the raw
+	// stale/unknown stored value the IgnoreCleanupStatus overlays above just
+	// overrode -- otherwise the printed "Cleanup Status" can contradict a
+	// SAFE_TO_NUKE verdict computed from the same evidence one line below.
+	if input.IgnoreCleanupStatus {
+		status.CleanupStatus = polecat.CleanupClean
+	} else {
+		status.CleanupStatus = input.CleanupStatus
 	}
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
