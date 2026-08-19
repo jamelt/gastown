@@ -435,6 +435,37 @@ func TestStatus(t *testing.T) {
 	}
 }
 
+// TestStatusModifiedInWorktreeOnlyFirstLine guards against a regression where
+// Status() lost the leading space of a porcelain " M" (modified-in-worktree,
+// not staged) code on the first status line. run()'s blanket strings.TrimSpace
+// ate that space before parsePorcelainStatusEntry ever saw it, off-by-one
+// shifting the parsed path (e.g. "mayor/daemon.json" became "ayor/daemon.json").
+// TestStatus above never caught this because "??" (untracked) doesn't start
+// with a space. See gt-2xrj.
+func TestStatusModifiedInWorktreeOnlyFirstLine(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// README.md already exists and is committed (from initTestRepo); modify
+	// it in the worktree without staging, so it is the sole, first status
+	// line with code " M".
+	readme := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Test\nmodified\n"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	status, err := g.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.Clean {
+		t.Fatal("expected dirty status")
+	}
+	if len(status.Modified) != 1 || status.Modified[0] != "README.md" {
+		t.Errorf("Modified = %v, want [\"README.md\"]", status.Modified)
+	}
+}
+
 func TestAddAndCommit(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)
