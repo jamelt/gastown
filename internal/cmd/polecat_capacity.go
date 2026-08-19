@@ -225,12 +225,16 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		}
 		inventoryManager := polecat.NewManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), tmuxClient)
 		prefix := beads.GetPrefixForRig(townRoot, rigName)
+		fieldsByName := make(map[string]*beads.AgentFields, len(polecatNames))
 		for _, name := range polecatNames {
 			agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, name)
-			issue := agents[agentID]
-			fields := parsePolecatAgentFields(issue)
+			fieldsByName[name] = parsePolecatAgentFields(agents[agentID])
+		}
+		mqIndex := buildPolecatMQIndex(rigBeads, fieldsByName)
+		for _, name := range polecatNames {
+			fields := fieldsByName[name]
 			workEvidence := assessPolecatAssignedIssueWork(activeWork[name])
-			item := buildPolecatInventoryItemFromEvidence(rigName, name, fields, workEvidence, sessions)
+			item := buildPolecatInventoryItemFromEvidence(rigName, name, fields, workEvidence, sessions, mqIndex)
 			if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" && !item.SessionRunning && !workEvidence.BlocksCleanup {
 				assessment := inventoryManager.WorkstateDispositionForPolecat(name, item.State, item.Issue)
 				item = applyLegacyCleanupCompatibility(item, fields, workEvidence, assessment)
@@ -271,8 +275,8 @@ func listPolecatDirectoryNames(rigPath string) ([]string, error) {
 	return names, nil
 }
 
-func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) {
-	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions)
+func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet, mq polecatMQIndex) {
+	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions, mq)
 	applyWorkstateDispositionToCapacitySnapshot(snapshot, item.State, item.Disposition)
 }
 
