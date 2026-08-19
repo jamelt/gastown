@@ -102,6 +102,15 @@
             "command": "{{GT_BIN}} tap guard dangerous-command"
           }
         ]
+      },
+      {
+        "matcher": "Bash(*go test*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{GT_BIN}} tap guard test-isolation"
+          }
+        ]
       }
     ],
     "SessionStart": [
