@@ -168,7 +168,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// Post-scrub verification: re-scan output for any remaining pollution.
 	if remaining := d.verifyNoPollution(gitRepo, databases); remaining > 0 {
 		d.logger.Printf("jsonl_git_backup: WARNING: %d suspicious record(s) survived scrub+filter", remaining)
-		d.escalate("jsonl_git_backup", fmt.Sprintf("post-scrub verification found %d suspicious records — review JSONL exports", remaining))
+		d.escalate("jsonl_git_backup", fmt.Sprintf("post-scrub verification found %d suspicious records — review JSONL exports", remaining), "jsonl-git-backup:pollution-survived-scrub")
 	}
 
 	mol.closeStep("verify")
@@ -179,7 +179,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if len(spikes) > 0 {
 		report := formatSpikeReport(spikes)
 		d.logger.Printf("jsonl_git_backup: HALTING — spike detected:\n%s", report)
-		d.escalate("jsonl_git_backup", report)
+		d.escalate("jsonl_git_backup", report, "jsonl-git-backup:export-spike-detected")
 		mol.failStep("push", "spike detected")
 		return // Do NOT commit — spike detected.
 	}
@@ -194,7 +194,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 		d.jsonlPushFailures++
 		if d.jsonlPushFailures >= maxConsecutivePushFailures {
 			d.logger.Printf("jsonl_git_backup: ESCALATION: %d consecutive push failures", d.jsonlPushFailures)
-			d.escalate("jsonl_git_backup", fmt.Sprintf("git push failed %d consecutive times", d.jsonlPushFailures))
+			d.escalate("jsonl_git_backup", fmt.Sprintf("git push failed %d consecutive times", d.jsonlPushFailures), "jsonl-git-backup:push-failed")
 			// Reset to avoid flooding escalations every tick.
 			d.jsonlPushFailures = 0
 		}
@@ -501,12 +501,16 @@ func (d *Daemon) runGitCmd(dir string, timeout time.Duration, args ...string) er
 }
 
 // escalate sends an escalation message to the mayor via gt escalate.
-func (d *Daemon) escalate(source, message string) {
+// fingerprint is a stable duplicate-suppression key (e.g.
+// "jsonl-git-backup:push-failed") — it must not embed dynamic detail like
+// error text or counts, or every call becomes a unique fingerprint and dedup
+// never triggers.
+func (d *Daemon) escalate(source, message, fingerprint string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH",
-		fmt.Sprintf("%s: %s", source, message), "--reason", message)
+		fmt.Sprintf("%s: %s", source, message), "--reason", message, "--fingerprint", fingerprint)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
 	util.SetDetachedProcessGroup(cmd)
