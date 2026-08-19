@@ -61,6 +61,14 @@ type State struct {
 
 	// HeartbeatCount is how many heartbeats have completed.
 	HeartbeatCount int64 `json:"heartbeat_count"`
+
+	// BinaryCommit is the build commit of the binary this daemon process is
+	// running, captured once at startup. Compared against the source repo's
+	// build-branch head (via version.CheckStaleBinaryForCommit) to detect
+	// when the *running* daemon process itself has fallen behind a merged
+	// fix — which can differ from the on-disk binary's freshness once a
+	// rebuild has replaced the file underneath an already-running process.
+	BinaryCommit string `json:"binary_commit,omitempty"`
 }
 
 // StateFile returns the path to the state file.

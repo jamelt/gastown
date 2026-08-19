@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -164,9 +165,9 @@ func init() {
 	daemonCmd.AddCommand(daemonClearBackoffCmd)
 	daemonCmd.AddCommand(daemonRotateLogsCmd)
 
+	daemonStatusCmd.Flags().BoolVar(&daemonStatusJSON, "json", false, "Output as JSON")
 	daemonLogsCmd.Flags().IntVarP(&daemonLogLines, "lines", "n", 50, "Number of lines to show")
 	daemonLogsCmd.Flags().BoolVarP(&daemonLogFollow, "follow", "f", false, "Follow log output")
-	daemonStatusCmd.Flags().BoolVar(&daemonStatusJSON, "json", false, "Output as JSON")
 	daemonRotateLogsCmd.Flags().BoolVar(&daemonRotateLogsForce, "force", false, "Rotate all logs regardless of size")
 
 	rootCmd.AddCommand(daemonCmd)
@@ -276,6 +277,16 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 	state, stateErr := daemon.LoadState(townRoot)
 	binaryModTime, binaryErr := getBinaryModTime()
 
+	// Precise staleness: compare the *running process's* recorded build
+	// commit (not the on-disk binary, which may already have been rebuilt
+	// out from under it) against the build branch head. This is what
+	// replaces manually eyeballing mtimes against merge times (gt-if5q).
+	var staleInfo *version.StaleBinaryInfo
+	if stateErr == nil && state != nil {
+		staleInfo = daemonProcessStaleness(state.BinaryCommit)
+	}
+	isStale := staleInfo != nil && staleInfo.Error == nil && !staleInfo.Skipped && staleInfo.IsStale
+
 	if daemonStatusJSON {
 		sessions, sessionsErr := tmux.NewTmux().ListSessions()
 		if sessions == nil {
@@ -295,10 +306,15 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 			status.StartedAt = optionalTime(state.StartedAt)
 			status.LastHeartbeat = optionalTime(state.LastHeartbeat)
 			status.HeartbeatCount = state.HeartbeatCount
+			status.BinaryCommit = state.BinaryCommit
 		}
 		if binaryErr == nil {
 			status.BinaryModifiedAt = optionalTime(binaryModTime)
 			status.BinaryNewer = status.StartedAt != nil && binaryModTime.After(*status.StartedAt)
+		}
+		if isStale {
+			status.Stale = true
+			status.StaleDescription = staleInfo.Describe("Daemon process")
 		}
 
 		encoder := json.NewEncoder(cmd.OutOrStdout())
@@ -331,6 +347,13 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 						style.Dim.Render("gt daemon stop && gt daemon start"))
 				}
 			}
+
+			if isStale {
+				fmt.Printf("  %s %s - consider '%s'\n",
+					style.Bold.Render("⚠"),
+					staleInfo.Describe("Daemon process"),
+					style.Dim.Render("gt daemon stop && gt daemon start"))
+			}
 		}
 	} else {
 		fmt.Printf("%s Daemon is %s\n",
@@ -355,6 +378,15 @@ type daemonStatusOutput struct {
 	BinaryNewer      bool       `json:"binary_newer"`
 	Sessions         []string   `json:"sessions"`
 	SessionsError    string     `json:"sessions_error,omitempty"`
+	// BinaryCommit is the daemon process's own recorded build commit
+	// (daemon.State.BinaryCommit), empty for daemon state files written
+	// before this field existed. Stale/StaleDescription compare it against
+	// the build branch precisely -- a commit-based check (vs. BinaryNewer's
+	// mtime heuristic) that also catches the case where the merged fix is
+	// itself a daemon fix (gt-if5q).
+	BinaryCommit     string `json:"binary_commit,omitempty"`
+	Stale            bool   `json:"stale"`
+	StaleDescription string `json:"stale_description,omitempty"`
 }
 
 func optionalTime(value time.Time) *time.Time {
@@ -362,6 +394,21 @@ func optionalTime(value time.Time) *time.Time {
 		return nil
 	}
 	return &value
+}
+
+// daemonProcessStaleness compares the daemon's recorded build commit against
+// the build branch head. Returns nil (not an error) when the commit is
+// unavailable (older daemon state predating BinaryCommit, or a dev build) or
+// the source repo can't be resolved — this is best-effort diagnostics.
+func daemonProcessStaleness(binaryCommit string) *version.StaleBinaryInfo {
+	if binaryCommit == "" {
+		return nil
+	}
+	repoRoot, err := version.GetRepoRoot()
+	if err != nil {
+		return nil
+	}
+	return version.CheckStaleBinaryForCommit(repoRoot, binaryCommit)
 }
 
 // getBinaryModTime returns the modification time of the current executable

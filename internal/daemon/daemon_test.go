@@ -588,6 +588,56 @@ func TestSaveLoadState_Roundtrip(t *testing.T) {
 	}
 }
 
+// TestSaveLoadState_BinaryCommitRoundtrip covers the case central to gt-if5q:
+// the merged fix being deployed is itself a daemon fix. Detecting that
+// requires the daemon's *own* build commit to survive a save/load cycle so a
+// later process (doctor, gt daemon status) can compare it against the build
+// branch without needing to be the process that built the binary.
+func TestSaveLoadState_BinaryCommitRoundtrip(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	original := &State{
+		Running:      true,
+		PID:          54321,
+		StartedAt:    time.Now().Truncate(time.Second),
+		BinaryCommit: "abc123def456",
+	}
+
+	if err := SaveState(tmpDir, original); err != nil {
+		t.Fatalf("SaveState error: %v", err)
+	}
+
+	loaded, err := LoadState(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadState error: %v", err)
+	}
+	if loaded.BinaryCommit != original.BinaryCommit {
+		t.Errorf("BinaryCommit mismatch: got %q, want %q", loaded.BinaryCommit, original.BinaryCommit)
+	}
+}
+
+// TestLoadState_MissingBinaryCommit verifies old state files (written before
+// BinaryCommit existed) load as an empty string rather than erroring, so
+// staleness checks can detect "unknown" and skip rather than panic.
+func TestLoadState_MissingBinaryCommit(t *testing.T) {
+	tmpDir := t.TempDir()
+	daemonDir := filepath.Join(tmpDir, "daemon")
+	if err := os.MkdirAll(daemonDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(daemonDir, "state.json"), []byte(`{"running":true,"pid":1}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadState(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadState error: %v", err)
+	}
+	if loaded.BinaryCommit != "" {
+		t.Errorf("BinaryCommit = %q, want empty for pre-BinaryCommit state file", loaded.BinaryCommit)
+	}
+}
+
 func TestListPolecatWorktrees_SkipsHiddenDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 	polecatsDir := filepath.Join(tmpDir, "some-rig", "polecats")

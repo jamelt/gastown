@@ -55,6 +55,15 @@ func resolveCommitHash() string {
 	return ""
 }
 
+// CurrentCommit returns the build commit of the running process: the
+// ldflags-injected Commit if set, otherwise the VCS revision embedded by `go
+// build`. Empty for a dev build with neither available. Exported so other
+// packages (e.g. the daemon, to record its own build commit at startup) don't
+// need to duplicate this resolution order.
+func CurrentCommit() string {
+	return resolveCommitHash()
+}
+
 // Describe returns a one-line, human-readable staleness summary for a stale
 // binary, using subject as the leading noun so callers can vary it
 // ("Binary" for gt doctor, "gt binary" for the startup warning):
@@ -96,15 +105,23 @@ func commitsMatch(a, b string) bool {
 	return strings.HasPrefix(a, b[:minLen]) || strings.HasPrefix(b, a[:minLen])
 }
 
-// CheckStaleBinary compares the binary's embedded commit with a build-branch
-// ref. It returns staleness info including whether the binary needs rebuilding.
-// This check is designed to be fast and non-blocking - errors are captured but
-// don't interrupt normal operation.
+// CheckStaleBinary compares the running process's own embedded commit with a
+// build-branch ref. It returns staleness info including whether the binary
+// needs rebuilding. This check is designed to be fast and non-blocking -
+// errors are captured but don't interrupt normal operation.
 func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
+	return CheckStaleBinaryForCommit(repoDir, resolveCommitHash())
+}
+
+// CheckStaleBinaryForCommit is CheckStaleBinary for a caller-supplied binary
+// commit, for checking the staleness of a binary other than the one currently
+// running (e.g. a long-lived daemon process checking itself from a separate,
+// possibly-fresher CLI invocation, using a commit the daemon recorded at its
+// own startup).
+func CheckStaleBinaryForCommit(repoDir, binaryCommit string) *StaleBinaryInfo {
 	info := &StaleBinaryInfo{}
 
-	// Get binary commit
-	info.BinaryCommit = resolveCommitHash()
+	info.BinaryCommit = binaryCommit
 	if info.BinaryCommit == "" {
 		info.Error = fmt.Errorf("cannot determine binary commit (dev build?)")
 		return info

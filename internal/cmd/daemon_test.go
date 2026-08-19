@@ -62,3 +62,36 @@ func TestReadDaemonStartupFailure_MissingPIDReturnsEmpty(t *testing.T) {
 		t.Fatalf("readDaemonStartupFailure() = %q, want empty string", got)
 	}
 }
+
+// TestDaemonStatusOutput_StaleFieldNames locks the `binary_commit`/`stale`/
+// `stale_description` JSON field names the rebuild-gt plugin scripts against
+// (plugins/rebuild-gt/run.sh) so a struct-tag rename doesn't silently break
+// the plugin's parsing.
+func TestDaemonStatusOutput_StaleFieldNames(t *testing.T) {
+	output := daemonStatusOutput{
+		Running:          true,
+		PID:              123,
+		BinaryCommit:     "abc123",
+		Stale:            true,
+		StaleDescription: "Daemon process is stale",
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	for _, field := range []string{"running", "pid", "binary_commit", "stale", "stale_description"} {
+		if _, ok := decoded[field]; !ok {
+			t.Errorf("missing expected JSON field %q in %s", field, data)
+		}
+	}
+	if decoded["stale"] != true {
+		t.Errorf("stale = %v, want true", decoded["stale"])
+	}
+}
