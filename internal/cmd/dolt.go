@@ -1794,6 +1794,8 @@ func runDoltReconcile(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("%s Preservation bundle and audit receipt written to %s\n", style.Bold.Render("✓"), bundle)
 	fmt.Printf("No Dolt branch or remote was mutated. Follow receipt.json for the reviewed reconstruction step.\n")
+	fmt.Printf("After reconstructing, verify nothing was lost:\n")
+	fmt.Printf("  gt dolt reconcile-verify --db %s --bundle %s\n", doltReconcileDB, bundle)
 	return nil
 }
 

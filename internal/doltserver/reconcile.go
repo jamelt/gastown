@@ -151,6 +151,9 @@ func (v ReconciliationVerification) OK() bool {
 // including 3 open P0s, were dropped during a manual post-bundle
 // reconstruction with no automated verification to catch the loss.
 func VerifyReconciliationImport(townRoot, bundleDir, db string) (ReconciliationVerification, error) {
+	if !validSQLName(db) {
+		return ReconciliationVerification{}, fmt.Errorf("invalid database name %q", db)
+	}
 	expected := make(map[string]bool)
 	for _, label := range []string{"local", "remote"} {
 		ids, err := readBundleIssueIDs(filepath.Join(bundleDir, label, "issues.json"))
@@ -198,7 +201,7 @@ func readBundleIssueIDs(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, fmt.Errorf("%s: not found — the bundle is incomplete or was not created by CreateReconciliationBundle: %w", path, err)
 		}
 		return nil, err
 	}
@@ -207,16 +210,19 @@ func readBundleIssueIDs(path string) ([]string, error) {
 
 func parseIssueIDRows(data string) ([]string, error) {
 	var parsed struct {
-		Rows []map[string]any `json:"rows"`
+		Rows []struct {
+			ID string `json:"id"`
+		} `json:"rows"`
 	}
 	if err := json.Unmarshal([]byte(data), &parsed); err != nil {
 		return nil, err
 	}
 	ids := make([]string, 0, len(parsed.Rows))
 	for _, row := range parsed.Rows {
-		if id, ok := row["id"].(string); ok && id != "" {
-			ids = append(ids, id)
+		if row.ID == "" {
+			return nil, fmt.Errorf("row with empty or missing id field")
 		}
+		ids = append(ids, row.ID)
 	}
 	return ids, nil
 }

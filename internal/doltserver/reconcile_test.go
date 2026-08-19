@@ -157,7 +157,36 @@ func TestVerifyReconciliationImportOKWhenNothingLost(t *testing.T) {
 }
 
 func TestVerifyReconciliationImportRejectsEmptyBundle(t *testing.T) {
-	if _, err := VerifyReconciliationImport(t.TempDir(), t.TempDir(), "gastown"); err == nil || !strings.Contains(err.Error(), "no preserved issues") {
-		t.Fatalf("expected empty-bundle error, got %v", err)
+	if _, err := VerifyReconciliationImport(t.TempDir(), t.TempDir(), "gastown"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected not-found error for missing bundle contents, got %v", err)
+	}
+}
+
+func TestVerifyReconciliationImportRejectsPartialBundle(t *testing.T) {
+	bundle := t.TempDir()
+	writeIssuesJSON(t, bundle, "local", []string{"gt-1"})
+	// "remote/issues.json" is deliberately absent, simulating a bundle whose
+	// export failed partway through (see exportDoltRevision's "partial
+	// preservation bundle retained" error path).
+	if _, err := VerifyReconciliationImport(t.TempDir(), bundle, "gastown"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected not-found error for a partial bundle, got %v", err)
+	}
+}
+
+func TestVerifyReconciliationImportRejectsMalformedRow(t *testing.T) {
+	bundle := t.TempDir()
+	writeIssuesJSON(t, bundle, "local", []string{"gt-1"})
+	writeIssuesJSON(t, bundle, "remote", []string{""})
+	if _, err := VerifyReconciliationImport(t.TempDir(), bundle, "gastown"); err == nil || !strings.Contains(err.Error(), "empty or missing id") {
+		t.Fatalf("expected malformed-row error, got %v", err)
+	}
+}
+
+func TestVerifyReconciliationImportRejectsInvalidDatabaseName(t *testing.T) {
+	bundle := t.TempDir()
+	writeIssuesJSON(t, bundle, "local", []string{"gt-1"})
+	writeIssuesJSON(t, bundle, "remote", []string{"gt-1"})
+	if _, err := VerifyReconciliationImport(t.TempDir(), bundle, "gastown`; DROP TABLE issues; --"); err == nil || !strings.Contains(err.Error(), "invalid database name") {
+		t.Fatalf("expected invalid-database-name error, got %v", err)
 	}
 }
