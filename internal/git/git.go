@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -3126,6 +3127,20 @@ func isBeadsPath(path string) bool {
 	return strings.Contains(path, ".beads/") || strings.Contains(path, ".beads\\")
 }
 
+// AgentRuntimeDirs lists the config/scaffolding directories that coding-agent
+// tools write into a worktree (agent instructions, generated skill/tool
+// config). None of it is bead-scoped work, so it must be excluded from both
+// checkpoint/gt-done "real work" detection (runtimeArtifactRoot below) and
+// the gitignore patterns seeded into fresh worktrees (rig.gasTownIgnorePatterns,
+// which composes this list with its own extras the same way it composes
+// gasTownLocalExcludePatterns with ".beads/").
+//
+// Add a new agent tool's directory here, not by copy-pasting a literal into
+// both call sites separately — that drift is what let checkpoint_dog
+// auto-commit a Codex-CLI polecat's untemplated ".codex"/".agents" scaffolding
+// as if it were real work (gt-gvjc).
+var AgentRuntimeDirs = []string{".claude", ".opencode", ".codex", ".agents"}
+
 // runtimeArtifactRoot returns the path that should be reset when a runtime artifact
 // is staged. Directory artifacts return the directory root so large trees like
 // nested node_modules are unstaged with one pathspec instead of thousands.
@@ -3138,8 +3153,11 @@ func runtimeArtifactRoot(path string) (string, bool) {
 
 	parts := strings.Split(bare, "/")
 	for i, part := range parts {
+		if slices.Contains(AgentRuntimeDirs, part) {
+			return strings.Join(parts[:i+1], "/") + "/", true
+		}
 		switch part {
-		case ".beads", ".claude", ".opencode", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "coverage", "htmlcov":
+		case ".beads", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "coverage", "htmlcov":
 			return strings.Join(parts[:i+1], "/") + "/", true
 		}
 	}

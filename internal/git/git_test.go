@@ -2218,6 +2218,11 @@ func TestIsGasTownRuntimePath(t *testing.T) {
 		{".opencode/", true},
 		{".opencode/plugins/gastown.js", true},
 		{".opencode/commands/handoff.md", true},
+		{".codex/", true},
+		{".codex/config.toml", true},
+		{".codex/agents/trade-risk-reviewer.toml", true},
+		{".agents/", true},
+		{".agents/skills/pr-sheriff/SKILL.md", true},
 		{".beads/", true},
 		{".beads/db.json", true},
 		{".beads\\db.json", true},
@@ -2241,6 +2246,8 @@ func TestIsGasTownRuntimePath(t *testing.T) {
 		{"README.md", false},
 		{".gitignore", false},
 		{"claude-stuff/foo", false},
+		{"codex-notes/foo", false},
+		{"agents-list.md", false},
 		{"src/coverage_report.go", false},
 	}
 
