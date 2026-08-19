@@ -778,6 +778,133 @@ func TestDryRunNukeSummary(t *testing.T) {
 	}
 }
 
+func TestIndexOpenMRsByBranch(t *testing.T) {
+	issues := []*beads.Issue{
+		{ID: "mr-open", Status: "open", Description: "branch: polecat/fury/gt-abc\ntarget: main"},
+		{ID: "mr-closed", Status: "closed", Description: "branch: polecat/rust/gt-def\ntarget: main"},
+		{ID: "mr-no-branch", Status: "open", Description: "target: main"},
+		{ID: "mr-dup", Status: "open", Description: "branch: polecat/fury/gt-abc\ntarget: main"},
+	}
+
+	byBranch := indexOpenMRsByBranch(issues)
+
+	if got := byBranch["polecat/fury/gt-abc"]; got == nil || got.ID != "mr-open" {
+		t.Errorf("open MR for polecat/fury/gt-abc = %+v, want mr-open (first match wins)", got)
+	}
+	if got, ok := byBranch["polecat/rust/gt-def"]; ok {
+		t.Errorf("closed MR leaked into index: %+v", got)
+	}
+	if len(byBranch) != 1 {
+		t.Errorf("indexOpenMRsByBranch() len = %d, want 1: %+v", len(byBranch), byBranch)
+	}
+}
+
+func TestLookupAgentBeadUsesSharedContext(t *testing.T) {
+	issue := &beads.Issue{
+		ID:          "gt-gastown-polecat-fury",
+		Description: "role_type: polecat\nrig: gastown\nagent_state: working\ncleanup_status: clean",
+	}
+	sharedCtx := &safetyCheckContext{agentBeads: map[string]*beads.Issue{"gt-gastown-polecat-fury": issue}}
+
+	gotIssue, gotFields, err := lookupAgentBead(nil, sharedCtx, "gt-gastown-polecat-fury")
+	if err != nil {
+		t.Fatalf("lookupAgentBead() error = %v", err)
+	}
+	if gotIssue != issue {
+		t.Errorf("lookupAgentBead() issue = %+v, want %+v", gotIssue, issue)
+	}
+	if gotFields == nil || gotFields.CleanupStatus != "clean" {
+		t.Errorf("lookupAgentBead() fields = %+v, want cleanup_status=clean", gotFields)
+	}
+
+	// Miss: not in the shared map, must not fall back to a live bd call (bd is nil here).
+	missIssue, missFields, missErr := lookupAgentBead(nil, sharedCtx, "gt-gastown-polecat-unknown")
+	if missIssue != nil || missFields != nil || missErr != nil {
+		t.Errorf("lookupAgentBead() miss = (%+v, %+v, %v), want (nil, nil, nil)", missIssue, missFields, missErr)
+	}
+}
+
+func TestLookupOpenMRForBranchUsesSharedContext(t *testing.T) {
+	mr := &beads.Issue{ID: "mr-open", Status: "open"}
+	sharedCtx := &safetyCheckContext{openMRByBranch: map[string]*beads.Issue{"polecat/fury/gt-abc": mr}}
+
+	got, err := lookupOpenMRForBranch(nil, sharedCtx, "polecat/fury/gt-abc")
+	if err != nil || got != mr {
+		t.Errorf("lookupOpenMRForBranch() = (%+v, %v), want (%+v, nil)", got, err, mr)
+	}
+
+	got, err = lookupOpenMRForBranch(nil, sharedCtx, "polecat/nobody/gt-zzz")
+	if err != nil || got != nil {
+		t.Errorf("lookupOpenMRForBranch() miss = (%+v, %v), want (nil, nil)", got, err)
+	}
+}
+
+func TestDisplayDryRunSafetyCheckMissingCleanupStatus(t *testing.T) {
+	result := &SafetyCheckResult{
+		HasAgentBead:   true,
+		HasPolecatInfo: true,
+		HasBranchInfo:  true,
+		CleanupStatus:  "",
+		HookBead:       "",
+	}
+
+	out := captureStdout(t, func() {
+		if got := displayDryRunSafetyCheck(result); got {
+			t.Errorf("displayDryRunSafetyCheck() = true, want false (no reasons set)")
+		}
+	})
+
+	if !strings.Contains(out, "<missing>") {
+		t.Errorf("displayDryRunSafetyCheck() output missing '<missing>' cleanup status marker: %q", out)
+	}
+	if !strings.Contains(out, "Hook") || !strings.Contains(out, "empty") {
+		t.Errorf("displayDryRunSafetyCheck() output missing empty hook line: %q", out)
+	}
+}
+
+func TestDisplayDryRunSafetyCheckActiveHook(t *testing.T) {
+	result := &SafetyCheckResult{
+		Blocked:        true,
+		HasAgentBead:   true,
+		HasPolecatInfo: true,
+		HasBranchInfo:  true,
+		CleanupStatus:  polecat.CleanupClean,
+		HookBead:       "gt-abc123",
+		HookStale:      false,
+	}
+
+	out := captureStdout(t, func() {
+		if got := displayDryRunSafetyCheck(result); !got {
+			t.Errorf("displayDryRunSafetyCheck() = false, want true (Blocked)")
+		}
+	})
+
+	if !strings.Contains(out, "has work") || !strings.Contains(out, "gt-abc123") {
+		t.Errorf("displayDryRunSafetyCheck() output missing active hook detail: %q", out)
+	}
+}
+
+func TestDisplayDryRunSafetyCheckStaleHookNotBlocking(t *testing.T) {
+	result := &SafetyCheckResult{
+		HasAgentBead:   true,
+		HasPolecatInfo: true,
+		HasBranchInfo:  true,
+		CleanupStatus:  polecat.CleanupClean,
+		HookBead:       "gt-closed",
+		HookStale:      true,
+	}
+
+	out := captureStdout(t, func() {
+		if got := displayDryRunSafetyCheck(result); got {
+			t.Errorf("displayDryRunSafetyCheck() = true, want false (stale hook doesn't block)")
+		}
+	})
+
+	if !strings.Contains(out, "stale") || !strings.Contains(out, "gt-closed") {
+		t.Errorf("displayDryRunSafetyCheck() output missing stale hook detail: %q", out)
+	}
+}
+
 func TestHasSubmittableWorkForRecoveryUsesUpstream(t *testing.T) {
 	repo := setupRecoveryGitRepo(t)
 
