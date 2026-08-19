@@ -1885,16 +1885,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 			// Phase 3: Add pre-verification metadata if polecat ran gates after rebasing.
 			// The refinery uses these fields to fast-path merge without re-running gates.
+			// Only attest when the submitted commit is actually based on the recorded
+			// target base — an unrebased branch must fall back to full gates (gt-fi6e).
 			if donePreVerified {
-				description += "\npre_verified: true"
-				description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
-				// Capture current clean target HEAD as the verified base.
-				// The polecat rebased onto this SHA before running gates.
-				verifiedBaseRef := g.CleanBaseRef("origin", defaultBranch, target)
-				if verifiedBase, baseErr := g.Rev(verifiedBaseRef); baseErr == nil {
-					description += fmt.Sprintf("\npre_verified_base: %s", verifiedBase)
+				verifiedAt := time.Now().UTC().Format(time.RFC3339)
+				if lines, skipReason := preVerifiedFields(g, defaultBranch, target, commitSHA, verifiedAt); skipReason == "" {
+					description += lines
 				} else {
-					style.PrintWarning("could not resolve %s for pre-verified base: %v (pre-verification data incomplete)", verifiedBaseRef, baseErr)
+					style.PrintWarning("not recording pre-verification: %s (submitting for full gates)", skipReason)
 				}
 			}
 

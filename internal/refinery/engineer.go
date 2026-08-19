@@ -1338,8 +1338,20 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 		if err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not resolve origin/%s HEAD: %v (falling through to normal gates)\n", mr.Target, err)
 		} else if targetHead == mr.PreVerifiedBase {
-			_, _ = fmt.Fprintln(e.output, "[Engineer] Pre-verification valid — target unchanged, skipping gates (fast-path)")
-			skipGates = true
+			// Defensive: the attestation is only trustworthy if the submitted commit
+			// is actually based on the attested base. A false attestation (branch
+			// behind target, never rebased) records the current target HEAD as its
+			// base, so target-unchanged alone is not enough — verify ancestry before
+			// bypassing the integrated-tree gates (gt-fi6e).
+			if based, ancErr := e.submittedCommitBasedOn(mr, mr.PreVerifiedBase); ancErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification unverifiable — %v (running gates normally)\n", ancErr)
+			} else if !based {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification rejected — submitted commit %s is not based on attested base %s (running gates normally)\n",
+					shortSHA(mr.CommitSHA), shortSHA(mr.PreVerifiedBase))
+			} else {
+				_, _ = fmt.Fprintln(e.output, "[Engineer] Pre-verification valid — target unchanged, skipping gates (fast-path)")
+				skipGates = true
+			}
 		} else {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification stale — target moved (%s → %s), running gates normally\n",
 				mr.PreVerifiedBase[:min(8, len(mr.PreVerifiedBase))], targetHead[:min(8, len(targetHead))])
@@ -1449,6 +1461,24 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 	// 5. Log success
 	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
 	return true
+}
+
+// submittedCommitBasedOn reports whether the MR's submitted commit descends from
+// (or equals) base. It resolves the commit SHA first so synthetic MRs are handled,
+// and returns an error when either object is unavailable so callers can fall back
+// to full gates rather than trusting an unverifiable attestation (gt-fi6e).
+func (e *Engineer) submittedCommitBasedOn(mr *MRInfo, base string) (bool, error) {
+	if err := e.ensureMRInfoCommitSHA(mr); err != nil {
+		return false, err
+	}
+	if e.git == nil {
+		return false, fmt.Errorf("git client is missing")
+	}
+	commit := strings.TrimSpace(mr.CommitSHA)
+	if commit == "" {
+		return false, fmt.Errorf("missing submitted commit_sha")
+	}
+	return e.git.IsAncestor(strings.TrimSpace(base), commit)
 }
 
 func (e *Engineer) ensureMRInfoCommitSHA(mr *MRInfo) error {
