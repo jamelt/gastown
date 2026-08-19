@@ -447,6 +447,47 @@ exit 0
 	}
 }
 
+// TestListEscalationsByFingerprint_QueriesAllStatuses is the regression test
+// for gt-9bzd: the create-path dedup check must see closed matches too, not
+// just open ones, or a resolved-then-recurring escalation can never be
+// suppressed/backed-off — it just recreates unconditionally forever.
+func TestListEscalationsByFingerprint_QueriesAllStatuses(t *testing.T) {
+	stubDir := t.TempDir()
+	argsPath := filepath.Join(stubDir, "args.txt")
+
+	stubScript := `#!/bin/sh
+for a in "$@"; do
+  printf '%s\n' "$a" >> "` + argsPath + `"
+done
+echo '[]'
+exit 0
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ResetBdAllowStaleCacheForTest()
+
+	b := New(t.TempDir())
+	if _, err := b.ListEscalationsByFingerprint("escalation-fp:abc123def456"); err != nil {
+		t.Fatalf("ListEscalationsByFingerprint: %v", err)
+	}
+
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read stub args: %v", err)
+	}
+	args := string(argsData)
+	if !strings.Contains(args, "--status=all") {
+		t.Errorf("expected --status=all in bd list args (must see closed matches too), got:\n%s", args)
+	}
+	if strings.Contains(args, "--status=open") {
+		t.Errorf("must not restrict to --status=open — closed matches are needed for dedup backoff, got:\n%s", args)
+	}
+}
+
 // TestCloseEscalation_PassesForce verifies that CloseEscalation always passes
 // --force to the underlying bd close.
 //
