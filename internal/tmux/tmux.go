@@ -241,11 +241,34 @@ func NewTmuxWithSocket(socket string) *Tmux {
 	return &Tmux{socketName: socket}
 }
 
+// runSubprocessTimeout caps how long a single tmux subprocess may run before
+// being killed. Without this, every t.run call used context.Background()
+// (no deadline): a wedged tmux server could hang dispatch and mail paths
+// indefinitely (e.g. isHookedAgentDeadFn -> HasSession on every sling
+// dispatch, injectStartPrompt -> NudgePane). Mirrors bdSubprocessTimeout /
+// networkTimeout. Override via GT_TMUX_TIMEOUT_SEC for testing or unusual
+// workloads. gt-h8bj.
+const runSubprocessTimeout = 15 * time.Second
+
+// resolveRunSubprocessTimeout returns the configured tmux subprocess
+// timeout, honoring the GT_TMUX_TIMEOUT_SEC env var override (must parse as
+// a positive integer).
+func resolveRunSubprocessTimeout() time.Duration {
+	if v := os.Getenv("GT_TMUX_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return runSubprocessTimeout
+}
+
 // run executes a tmux command and returns stdout.
 // All commands include -u flag for UTF-8 support regardless of locale settings.
 // See: https://github.com/steveyegge/gastown/issues/1219
 func (t *Tmux) run(args ...string) (string, error) {
-	return t.runContext(context.Background(), args...)
+	ctx, cancel := context.WithTimeout(context.Background(), resolveRunSubprocessTimeout())
+	defer cancel()
+	return t.runContext(ctx, args...)
 }
 
 func (t *Tmux) commandContext(ctx context.Context, args ...string) *exec.Cmd {
@@ -270,6 +293,9 @@ func (t *Tmux) runContext(ctx context.Context, args ...string) (string, error) {
 
 	err := cmd.Run()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("tmux %s timed out (tmux server may be unresponsive): %w", args[0], ctx.Err())
+		}
 		return "", t.wrapError(err, stderr.String(), args)
 	}
 
