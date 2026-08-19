@@ -533,7 +533,7 @@ func bdDepListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, 
 	beadsDir := beads.ResolveBeadsDir(dir)
 
 	// Find town root for readBeadsRuntimeConfig
-	townRoot, err := workspace.FindFromCwd(dir)
+	townRoot, err := workspace.Find(dir)
 	if err != nil {
 		townRoot = "" // Use empty string if town root cannot be determined
 	}

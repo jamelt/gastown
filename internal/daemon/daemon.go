@@ -3223,15 +3223,7 @@ func (d *Daemon) dispatchQueuedWork() (int, error) {
 
 // getBatchSize returns the configured scheduler batch_size, or 1 if unset.
 func (d *Daemon) getBatchSize() int {
-	opCfg := d.loadOperationalConfig()
-	if opCfg == nil || opCfg.Scheduler == nil {
-		return 1
-	}
-	batchSize := opCfg.Scheduler.GetBatchSize()
-	if batchSize < 1 {
-		return 1
-	}
-	return batchSize
+	return 1
 }
 
 // calculateDispatchTimeout returns a timeout scaled to the configured batch_size.
