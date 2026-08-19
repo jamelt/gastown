@@ -717,6 +717,19 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Quota dog ticker started (interval %v)", interval)
 	}
 
+	// Start feeder dog ticker if configured.
+	// Surveys ready beads across rigs and schedules eligible work into the
+	// deferred-dispatch queue (gt-j3xq).
+	var feederDogTicker *time.Ticker
+	var feederDogChan <-chan time.Time
+	if d.isPatrolActive("feeder_dog") {
+		interval := feederDogInterval(d.patrolConfig)
+		feederDogTicker = time.NewTicker(interval)
+		feederDogChan = feederDogTicker.C
+		defer feederDogTicker.Stop()
+		d.logger.Printf("Feeder dog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -824,6 +837,13 @@ func (d *Daemon) Run() (err error) {
 			// rotates credentials to available accounts via keychain swap.
 			if !d.isShutdownInProgress() {
 				d.runQuotaDog()
+			}
+
+		case <-feederDogChan:
+			// Feeder dog — surveys ready beads across rigs and schedules
+			// eligible work into the deferred-dispatch queue.
+			if !d.isShutdownInProgress() {
+				d.runFeederDog()
 			}
 
 		case <-timer.C:

@@ -33,6 +33,7 @@ var schedulerCmd = &cobra.Command{
 Subcommands:
   gt scheduler status    # Show scheduler state
   gt scheduler list      # List all scheduled beads
+  gt scheduler feed      # Survey ready beads and schedule eligible work
   gt scheduler run       # Manual dispatch trigger
   gt scheduler pause     # Pause dispatch
   gt scheduler resume    # Resume dispatch
