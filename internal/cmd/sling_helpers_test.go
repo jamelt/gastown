@@ -388,3 +388,41 @@ exit 1
 		t.Fatalf("bd update invoked %s times, want 1", got)
 	}
 }
+
+func TestFallbackActor(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "?"
+	}
+
+	tests := []struct {
+		name     string
+		userEnv  string
+		wantUser string
+	}{
+		{"USER set", "jamel", "jamel"},
+		{"USER empty falls back to placeholder", "", "?"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("USER", tt.userEnv)
+			want := fmt.Sprintf("unknown(%s@%s)", tt.wantUser, host)
+			if got := fallbackActor(); got != want {
+				t.Errorf("fallbackActor() = %q, want %q", got, want)
+			}
+		})
+	}
+
+	t.Run("hostname lookup failure falls back to placeholder", func(t *testing.T) {
+		t.Setenv("USER", "jamel")
+		orig := osHostname
+		osHostname = func() (string, error) { return "", fmt.Errorf("lookup failed") }
+		defer func() { osHostname = orig }()
+
+		want := "unknown(jamel@?)"
+		if got := fallbackActor(); got != want {
+			t.Errorf("fallbackActor() = %q, want %q", got, want)
+		}
+	})
+}

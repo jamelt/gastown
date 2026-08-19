@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actor. Verification is skipped (unchanged prior behavior) when no tmux
   session can be resolved, e.g. tests, CI, human terminals (gt-9z0y).
 
+- **Scheduler `paused_by` no longer records a bare `"unknown"` actor** — when
+  Gas Town role detection fails, `detectActor()` now falls back to an
+  OS-identity string (`unknown(user@host)`) instead of the uninspectable
+  literal `"unknown"`, leaving a forensic trail for future incident review.
+  Not an authentication mechanism — `$USER`/hostname are as forgeable as
+  `GT_ROLE` (gt-h0ie).
+
 ## [1.2.1] - 2026-06-06
 
 ### Fixed
