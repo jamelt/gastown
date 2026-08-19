@@ -767,6 +767,16 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			fmt.Printf("%s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, newPolecatInfo.PolecatName)
 			rollbackSlingArtifactsFn(newPolecatInfo, beadID, hookWorkDir, "")
 		}
+		// resolveTarget's dog path (delayedDogInfo) already marks the dog
+		// "working" via AssignWorkIfIdle before this closure can ever run —
+		// same cleanup runSlingFormula uses on its own failure paths.
+		// clearWorkIfMatches is a no-op unless this exact dispatch owns that
+		// assignment, so it's safe to call unconditionally here.
+		if delayedDogInfo != nil {
+			if err := delayedDogInfo.clearWorkIfMatches(); err != nil {
+				fmt.Printf("%s %s, could not clear dog %s's work assignment: %v\n", style.Warning.Render("⚠"), reason, delayedDogInfo.DogName, err)
+			}
+		}
 		restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir, info)
 		// Under --force, rollback's unhook can clear a pinned bead's original state.
 		if force && originalStatus == "pinned" {

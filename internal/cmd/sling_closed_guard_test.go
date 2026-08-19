@@ -359,3 +359,50 @@ exit 0
 		t.Fatal("expected hookBeadWithRetryFn to be called once --confirm-human-approved is set")
 	}
 }
+
+// TestRunSlingHardProhibitionRollsBackDogAssignment guards against a
+// regression an adversarial post-implementation review caught (gt-b2qi):
+// resolveTarget's dog path (delayedDogInfo) durably marks a dog "working"
+// via AssignWorkIfIdle *before* the hard-prohibition guard runs. Making that
+// guard unconditional (required to also cover mayor/crew/dog targets, not
+// just polecats) means a rejected dog-target dispatch must roll the dog
+// back to idle, the same way runSlingFormula already does on its own
+// failure paths (cleanupDelayedDogFormulaFailure, sling_formula.go). This is
+// a source-inspection test, mirroring TestRunSlingFormulaCleansDelayedDogFailure
+// in sling_formula_cleanup_test.go — full execution coverage would require
+// a live dog pool, and clearWorkIfMatches' own correctness is already
+// covered by TestCleanupDelayedDogFormulaFailureClearsWorkAfterWispCleanupError.
+func TestRunSlingHardProhibitionRollsBackDogAssignment(t *testing.T) {
+	data, err := os.ReadFile("sling.go")
+	if err != nil {
+		t.Fatalf("read sling.go: %v", err)
+	}
+	source := string(data)
+
+	closureStart := strings.Index(source, "rollbackSpawnedPolecat := func(reason string) {")
+	if closureStart == -1 {
+		t.Fatal("rollbackSpawnedPolecat closure not found")
+	}
+	closureEnd := strings.Index(source[closureStart:], "\n\t}\n")
+	if closureEnd == -1 {
+		t.Fatal("could not find end of rollbackSpawnedPolecat closure")
+	}
+	closureBody := source[closureStart : closureStart+closureEnd]
+
+	if !strings.Contains(closureBody, "delayedDogInfo.clearWorkIfMatches()") {
+		t.Fatal("rollbackSpawnedPolecat must clear the dog's work assignment on rollback (delayedDogInfo.clearWorkIfMatches), or a rejected dog-target dispatch leaves the dog stuck marked working")
+	}
+
+	guardStart := strings.Index(source, "checkHardProhibition(info.Title, info.Description, info.Labels, slingConfirmHumanApproved)")
+	if guardStart == -1 {
+		t.Fatal("hard-prohibition guard call not found in sling.go")
+	}
+	if guardStart < closureStart {
+		t.Fatal("hard-prohibition guard must be defined after rollbackSpawnedPolecat, so it can call it on rejection")
+	}
+	guardBlockEnd := strings.Index(source[guardStart:], "\n\t}\n")
+	guardBlock := source[guardStart : guardStart+guardBlockEnd]
+	if !strings.Contains(guardBlock, "rollbackSpawnedPolecat(") {
+		t.Fatal("hard-prohibition guard must call rollbackSpawnedPolecat on rejection so dog/polecat state is cleaned up")
+	}
+}
