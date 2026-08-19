@@ -165,6 +165,24 @@ func isDeferredBead(info *beadInfo) bool {
 	return false
 }
 
+// moleculeScaffoldRejectReason returns a non-empty reason when info is
+// formula-molecule machinery (a molecule container or a materialized step
+// bead), which must never be dispatched as real work (gt-6va3). It mirrors the
+// closed/tombstone and hard-prohibition guards that scheduleBead, executeSling,
+// and runSling each re-validate independently rather than trusting an upstream
+// caller: every automatic dispatch path funnels through scheduleBead (enqueue)
+// or executeSling (dispatch), so guarding both stops stale molecule step beads
+// regardless of which scanner surfaced them.
+func moleculeScaffoldRejectReason(info *beadInfo) string {
+	if info == nil {
+		return ""
+	}
+	if beads.IsMoleculeContainerOrStep(&beads.Issue{Type: info.IssueType, Dependencies: info.Dependencies}) {
+		return "formula molecule machinery (container or materialized step), not dispatchable work"
+	}
+	return ""
+}
+
 func applyWorkflowStepTargetOverride(args []string) ([]string, error) {
 	if len(args) != 2 {
 		return args, nil

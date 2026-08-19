@@ -191,6 +191,53 @@ func TestIsDeferredBead(t *testing.T) {
 	}
 }
 
+// TestMoleculeScaffoldRejectReason covers the guard scheduleBead and
+// executeSling apply to keep formula-molecule scaffolding out of dispatch
+// (gt-6va3). getBeadInfo populates IssueType and Dependencies from bd show, so
+// the choke points always see the parent's molecule type.
+func TestMoleculeScaffoldRejectReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		info       *beadInfo
+		wantReject bool
+	}{
+		{"nil info", nil, false},
+		{"ordinary task dispatches", &beadInfo{Status: "open", IssueType: "task"}, false},
+		{"molecule container rejected", &beadInfo{Status: "open", IssueType: "molecule"}, true},
+		{
+			name: "molecule step bead rejected via parent-child dependency",
+			info: &beadInfo{
+				Status:    "open",
+				IssueType: "task",
+				Dependencies: []beads.IssueDep{
+					{ID: "gt-vf2u", Type: "molecule", DependencyType: "parent-child"},
+				},
+			},
+			wantReject: true,
+		},
+		{
+			name: "task child of an epic dispatches",
+			info: &beadInfo{
+				Status:    "open",
+				IssueType: "task",
+				Dependencies: []beads.IssueDep{
+					{ID: "gt-epic", Type: "epic", DependencyType: "parent-child"},
+				},
+			},
+			wantReject: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := moleculeScaffoldRejectReason(tt.info)
+			if (reason != "") != tt.wantReject {
+				t.Errorf("moleculeScaffoldRejectReason(%+v) = %q, wantReject=%v", tt.info, reason, tt.wantReject)
+			}
+		})
+	}
+}
+
 func TestCollectExistingMoleculesFiltersClosedMolecules(t *testing.T) {
 	tests := []struct {
 		name string
