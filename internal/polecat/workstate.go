@@ -85,6 +85,11 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 		}
 		if in.ActiveWorkBlocker != "" {
 			d.Blockers = append(d.Blockers, in.ActiveWorkBlocker)
+		} else if needsRecovery {
+			// Every NEEDS_RECOVERY verdict must name the predicate that produced
+			// it. Leaving Blockers empty here renders as an unnameable "unknown
+			// recovery predicate" refusal that cannot be escalated (gt-7j22).
+			d.Blockers = append(d.Blockers, "state="+string(in.State))
 		}
 		return d
 	}

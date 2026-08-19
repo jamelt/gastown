@@ -1329,7 +1329,12 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 				}
 			}
 		} else {
-			fmt.Printf("  %s Cleanup refused by an unknown recovery predicate.\n", style.Warning.Render("⚠"))
+			// DecideWorkstate is expected to name a predicate on every
+			// NEEDS_RECOVERY verdict; reaching here means it did not (a bug in
+			// the classifier, not a real absence of a cause). Dump the status
+			// fields evaluated so the escalation is actionable (gt-7j22).
+			fmt.Printf("  %s Cleanup refused with no named predicate (classifier bug) — reason=%q cleanup_status=%q diagnostics=%q\n",
+				style.Warning.Render("⚠"), status.Reason, status.CleanupStatus, strings.Join(status.Diagnostics, "; "))
 		}
 		fmt.Println("  Escalate to Mayor for recovery before cleanup.")
 	default:
