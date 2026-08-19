@@ -1804,7 +1804,7 @@ func persistAndNotifyConvoyCompletion(townBeads, convoyID, title string) error {
 }
 
 // notifyConvoyCompletion claims and sends the convoy-complete notification
-// set (owner/notify mail, nudge-watchers, mayor/, Mayor-session push) via the
+// set (owner/notify/watcher mail, nudge-watchers, Mayor-session push) via the
 // single authoritative claim+notify path shared with the refinery
 // (internal/convoy.ClaimCompletionNotification / NotifyCompletion). The
 // claim is atomic (per-convoy flock) so concurrent callers — this CLI path,
