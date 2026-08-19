@@ -287,14 +287,30 @@ func TestRunDoneRejectsMayorRigBeforeAutosave(t *testing.T) {
 }
 
 func TestIsDoneCommand(t *testing.T) {
-	done := &cobra.Command{Use: "done"}
 	root := &cobra.Command{Use: "gt"}
-	root.AddCommand(done)
-	if !isDoneCommand(done) {
-		t.Fatal("done command should be detected")
+	root.AddCommand(doneCmd)
+	if !isDoneCommand(doneCmd) {
+		t.Fatal("top-level gt done command should be detected")
 	}
 	if isDoneCommand(root) {
 		t.Fatal("root command should not be detected as done")
+	}
+}
+
+// TestIsDoneCommandIgnoresUnrelatedDoneSubcommands guards against gt-lr6q:
+// `gt dog done` (and `gt mol step done`, `gt wl done`) share the cobra
+// command name "done" with the polecat-only `gt done` but must not trigger
+// its polecat identity checks — dogs and other callers have no BD_ACTOR
+// polecat identity and would be rejected as "for polecats only".
+func TestIsDoneCommandIgnoresUnrelatedDoneSubcommands(t *testing.T) {
+	root := &cobra.Command{Use: "gt"}
+	dog := &cobra.Command{Use: "dog"}
+	dogDone := &cobra.Command{Use: "done [name]"}
+	dog.AddCommand(dogDone)
+	root.AddCommand(dog)
+
+	if isDoneCommand(dogDone) {
+		t.Fatal("gt dog done must not be treated as the polecat-only gt done command")
 	}
 }
 
@@ -315,8 +331,7 @@ func TestPersistentPreRunDoneRejectsBeforeRegistryFallback(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
 
-	done := &cobra.Command{Use: "done"}
-	err = persistentPreRun(done, nil)
+	err = persistentPreRun(doneCmd, nil)
 	if err == nil || !strings.Contains(err.Error(), "assigned polecat worktree") {
 		t.Fatalf("persistentPreRun error = %v, want assigned worktree rejection", err)
 	}
