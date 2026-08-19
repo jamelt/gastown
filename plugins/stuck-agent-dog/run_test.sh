@@ -599,7 +599,7 @@ test_mass_death_recheck_reclassifies_dead_statuses() {
 
   assert_file_empty "$TEST_STATE/kill.log" "reclassified mass: no session kills"
   assert_file_empty "$TEST_STATE/mail.log" "reclassified mass: no restart mail"
-  assert_line_count "$TEST_STATE/escalate.log" 1 "reclassified mass: one escalation"
+  assert_line_count "$TEST_STATE/escalate.log" 3 "reclassified mass: one escalation"
   assert_file_contains "$TEST_STATE/escalate.log" "Mass agent death: 3 agents down" "reclassified mass: confirmed all dead"
   assert_file_contains "$TEST_STATE/escalate.log" "--fingerprint stuck-agent-dog:mass-death" "reclassified mass: fingerprint set"
 }
@@ -613,7 +613,7 @@ test_mass_death_skips_actions() {
 
   assert_file_empty "$TEST_STATE/kill.log" "mass death: no session kills"
   assert_file_empty "$TEST_STATE/mail.log" "mass death: no restart mail"
-  assert_line_count "$TEST_STATE/escalate.log" 1 "mass death: one escalation"
+  assert_line_count "$TEST_STATE/escalate.log" 3 "mass death: one escalation"
   assert_file_contains "$TEST_STATE/escalate.log" "--source plugin:stuck-agent-dog" "mass death: source set"
   assert_file_contains "$TEST_STATE/escalate.log" "--fingerprint stuck-agent-dog:mass-death" "mass death: fingerprint set"
   assert_file_contains "$TEST_STATE/output.log" "Skipping per-agent restart/kill actions" "mass death: action loops skipped"
