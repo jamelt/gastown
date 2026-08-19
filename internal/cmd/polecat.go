@@ -1131,7 +1131,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		hookBead := agentHookBead(agentIssue, fields)
 		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
 		legacyHookSafe = hookSafe
-		workTerminal = beadTerminal || hookTerminal
+		workTerminal = workReferenceTerminal(beadTerminal, status.Issue != "", hookTerminal, hookBead != "")
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
 		targetRefs, targetRefLookupFailed = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
 		if status.Issue == "" && sourceHint != "" {
@@ -1139,8 +1139,8 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		}
 		if !beadTerminal && sourceHint != "" {
 			beadTerminal = isAssignedBeadTerminal(bd, sourceHint)
-			workTerminal = beadTerminal || hookTerminal
 		}
+		workTerminal = workReferenceTerminal(beadTerminal, status.Issue != "", hookTerminal, hookBead != "")
 		if hookBlocker != "" {
 			input.HookBead = hookBead
 		}
@@ -1415,6 +1415,19 @@ func hookBeadSafeForCleanup(bd issueShower, hookBead string) (safe bool, termina
 		return false, false, fmt.Sprintf("hook_bead=%s status=%s", hookBead, issue.Status)
 	}
 	return true, true, ""
+}
+
+// workReferenceTerminal reports whether the polecat's assigned issue and hook
+// bead are safe to treat as concluded. A reference that does not exist is
+// vacuously safe; only a *present but non-terminal* reference should block
+// reconciliation. Without this, a fully idle polecat with no assigned issue
+// and no hook bead — the case with nothing left to be terminal about — was
+// wrongly treated the same as one with live, non-terminal work (gt-ykxo).
+func workReferenceTerminal(beadTerminal, hasIssue, hookTerminal, hasHook bool) bool {
+	if !hasIssue && !hasHook {
+		return true
+	}
+	return beadTerminal || hookTerminal
 }
 
 type cleanupStatusUpdater interface {

@@ -394,6 +394,48 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 	}
 }
 
+func TestWorkReferenceTerminal(t *testing.T) {
+	tests := []struct {
+		name         string
+		beadTerminal bool
+		hasIssue     bool
+		hookTerminal bool
+		hasHook      bool
+		want         bool
+	}{
+		{name: "no issue and no hook is vacuously terminal (gt-ykxo)", want: true},
+		{name: "non-terminal issue with no hook blocks", hasIssue: true},
+		{name: "no issue with non-terminal hook blocks", hasHook: true},
+		{name: "terminal issue with no hook is terminal", beadTerminal: true, hasIssue: true, want: true},
+		{name: "no issue with terminal hook is terminal", hookTerminal: true, hasHook: true, want: true},
+		{name: "terminal issue satisfies non-terminal hook", beadTerminal: true, hasIssue: true, hasHook: true, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := workReferenceTerminal(tt.beadTerminal, tt.hasIssue, tt.hookTerminal, tt.hasHook)
+			if got != tt.want {
+				t.Fatalf("workReferenceTerminal(%v, %v, %v, %v) = %v, want %v",
+					tt.beadTerminal, tt.hasIssue, tt.hookTerminal, tt.hasHook, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFullyIdlePolecatWithProvablyCleanGitCanIgnoreStaleCleanupStatus is the
+// end-to-end regression for gt-ykxo: a polecat with no assigned issue and no
+// hook bead — so workTerminal used to come out false even though there was
+// nothing outstanding — must still be recognized as safe to ignore a stale
+// cleanup_status once workReferenceTerminal is fed the correct value.
+func TestFullyIdlePolecatWithProvablyCleanGitCanIgnoreStaleCleanupStatus(t *testing.T) {
+	workTerminal := workReferenceTerminal(false /* beadTerminal */, false /* hasIssue */, false /* hookTerminal */, false /* hasHook */)
+	if !workTerminal {
+		t.Fatal("workReferenceTerminal() = false for a polecat with no issue and no hook, want true")
+	}
+	if !polecat.CanIgnoreStaleCleanupStatus(polecat.CleanupUncommitted, workTerminal, true /* hookSafe */, true /* activeMRSafe */, true /* gitSafe */) {
+		t.Fatal("CanIgnoreStaleCleanupStatus() = false for a provably clean, fully idle polecat, want true")
+	}
+}
+
 func TestReconcileCleanupStatusIfSafe(t *testing.T) {
 	for _, previous := range []polecat.CleanupStatus{polecat.CleanupUnpushed, polecat.CleanupStash, polecat.CleanupUncommitted} {
 		t.Run(string(previous), func(t *testing.T) {
