@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	convoyops "github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
@@ -2539,69 +2540,29 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 		})
 
 		// Send convoy completion notifications (owner + notify addresses)
-		e.notifyConvoyCompletion(townRoot, convoy.ID, convoy.Title, convoy.Description)
+		e.notifyConvoyCompletion(townRoot, convoy.ID, convoy.Title)
 	}
 
 	return closed
 }
 
-// notifyConvoyCompletion sends notifications to convoy owner and notify addresses.
-func (e *Engineer) notifyConvoyCompletion(townRoot, convoyID, title, description string) {
-	fields, shouldNotify := e.claimConvoyCompletionNotification(townRoot, convoyID, description)
-	if !shouldNotify {
+// notifyConvoyCompletion claims and sends the convoy-complete notification
+// set via the single authoritative claim+notify path shared with the CLI
+// (internal/convoy.ClaimCompletionNotification / NotifyCompletion). The
+// claim is atomic (per-convoy flock) so this post-merge check cannot race
+// with the CLI/deacon `gt convoy check` path and send a duplicate.
+func (e *Engineer) notifyConvoyCompletion(townRoot, convoyID, title string) {
+	claimed, fields, err := convoyops.ClaimCompletionNotification(townRoot, convoyID)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not claim convoy completion notification for %s: %v\n", convoyID, err)
 		return
 	}
-	for _, addr := range fields.NotificationAddresses() {
-		mailCmd := exec.Command("gt", "mail", "send", addr,
-			"-s", fmt.Sprintf("🚚 Convoy landed: %s", title),
-			"-m", fmt.Sprintf("Convoy %s has completed.\n\nAll tracked issues are now closed.\n\nClosed by: %s/refinery", convoyID, e.rig.Name),
-			"--from", "convoy/"+convoyID,
-			"--no-notify")
-		util.SetDetachedProcessGroup(mailCmd)
-		mailCmd.Dir = townRoot
-		if err := mailCmd.Run(); err != nil {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not notify %s: %v\n", addr, err)
-		}
+	if !claimed {
+		return
 	}
-}
-
-func (e *Engineer) claimConvoyCompletionNotification(townRoot, convoyID, fallbackDescription string) (*beads.ConvoyFields, bool) {
-	townBeads := filepath.Join(townRoot, ".beads")
-	description := fallbackDescription
-
-	readEnv := beads.BuildReadOnlyPinnedBDEnv(os.Environ(), townBeads)
-	showArgs := beads.MaybePrependAllowStaleWithEnv(readEnv, []string{"show", convoyID, "--json"})
-	showCmd := beads.Command(townBeads, townBeads, beads.ReadOnlyPinned, showArgs...)
-	var showOut bytes.Buffer
-	showCmd.Stdout = &showOut
-	if err := showCmd.Run(); err == nil && showOut.Len() > 0 {
-		var convoys []struct {
-			Description string `json:"description"`
-		}
-		if err := json.Unmarshal(showOut.Bytes(), &convoys); err == nil && len(convoys) > 0 {
-			description = convoys[0].Description
-		}
-	}
-
-	fields := beads.ParseConvoyFields(&beads.Issue{Description: description})
-	if fields == nil {
-		fields = &beads.ConvoyFields{}
-	}
-	if fields.CompletionNotifiedAt != "" {
-		return fields, false
-	}
-
-	fields.CompletionNotifiedAt = time.Now().UTC().Format(time.RFC3339)
-	newDesc := beads.SetConvoyFields(&beads.Issue{Description: description}, fields)
-	mutationEnv := beads.BuildMutationPinnedBDEnv(os.Environ(), townBeads)
-	updateArgs := beads.MaybePrependAllowStaleWithEnv(mutationEnv, []string{"update", convoyID, "--description=" + newDesc})
-	updateCmd := beads.Command(townBeads, townBeads, beads.MutationPinned, updateArgs...)
-	if err := updateCmd.Run(); err != nil {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not record convoy completion notification state for %s: %v\n", convoyID, err)
-		return fields, false
-	}
-
-	return fields, true
+	convoyops.NotifyCompletion(townRoot, convoyID, title, e.rig.Name+"/refinery", fields, func(format string, args ...interface{}) {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: "+format+"\n", args...)
+	})
 }
 
 // landConvoySwarm checks if a completed convoy has an associated swarm with an
