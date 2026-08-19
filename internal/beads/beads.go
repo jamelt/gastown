@@ -85,10 +85,12 @@ func BdSupportsAllowStaleWithEnv(env []string) bool {
 	cmd.Stdout = &combinedOut
 	cmd.Stderr = &combinedOut
 	err = cmd.Run()
-	// bd v0.60+ exits 0 even on unknown flags, printing the error to stderr.
-	// Check output for "unknown flag" to detect lack of support. Treat probe
-	// errors/timeouts as unsupported so higher-level commands fail closed
-	// instead of hanging on a wedged bd subprocess.
+	// bd's exit behavior on an unknown flag has varied across versions: some
+	// exit 0 and print the error to stderr, others (e.g. 1.2.1) exit non-zero.
+	// Check both the exit status and output for "unknown flag" so either
+	// behavior is detected as unsupported. Treat probe errors/timeouts as
+	// unsupported so higher-level commands fail closed instead of hanging on
+	// a wedged bd subprocess.
 	probeOut := strings.TrimSpace(combinedOut.String())
 	supported := err == nil && probeOut != "" && !strings.Contains(probeOut, "unknown flag")
 
