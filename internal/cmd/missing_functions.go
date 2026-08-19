@@ -48,8 +48,8 @@ func resolveDonePolecatWorktree() (*donePolecatWorktreeInfo, error) {
 // resolveDonePolecatWorktreeAt resolves a polecat worktree from a given directory path.
 func resolveDonePolecatWorktreeAt(cwd string) (*donePolecatWorktreeInfo, error) {
 	// Find town root
-	townRoot, err := workspace.FindFromCwd(cwd)
-	if err != nil {
+	townRoot, err := workspace.Find(cwd)
+	if err != nil || townRoot == "" {
 		return nil, fmt.Errorf("cannot find town root from %q: %w", cwd, err)
 	}
 
