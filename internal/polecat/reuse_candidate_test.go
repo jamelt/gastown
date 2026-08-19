@@ -43,3 +43,77 @@ func TestReuseCandidateStatesMatchWorkstateFallthrough(t *testing.T) {
 		}
 	}
 }
+
+// hq-f2n8c / hq-vv0q: an unknown or missing cleanup_status is an absence of
+// evidence, not evidence of risk, and it is unrecoverable on its own — the only
+// route to a real value is a repair path the predicate itself refuses to run.
+// When the git check succeeded, the git predicates are the real evidence and
+// must decide. When it failed, there is no evidence and we must stay closed.
+func TestUnknownCleanupStatusDefersToGitEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		in          WorkstateInput
+		wantReuse   bool
+		wantBlocker string
+	}{
+		{
+			name:      "unknown cleanup + clean git = reusable",
+			in:        WorkstateInput{State: StateDone, CleanupStatus: CleanupUnknown},
+			wantReuse: true,
+		},
+		{
+			name:      "missing cleanup + clean git = reusable",
+			in:        WorkstateInput{State: StateDone, CleanupStatus: ""},
+			wantReuse: true,
+		},
+		{
+			name:        "unknown cleanup + dirty git = blocked by git, not by cleanup",
+			in:          WorkstateInput{State: StateDone, CleanupStatus: CleanupUnknown, GitDirty: true},
+			wantReuse:   false,
+			wantBlocker: "git_state=has_uncommitted",
+		},
+		{
+			name:        "unknown cleanup + stash = blocked",
+			in:          WorkstateInput{State: StateDone, CleanupStatus: CleanupUnknown, StashCount: 1},
+			wantReuse:   false,
+			wantBlocker: "git_state=has_stash stash_count=1",
+		},
+		{
+			name:        "unknown cleanup + unpushed = blocked",
+			in:          WorkstateInput{State: StateDone, CleanupStatus: CleanupUnknown, UnpushedCommits: 2},
+			wantReuse:   false,
+			wantBlocker: "git_state=has_unpushed unpushed_commits=2",
+		},
+		{
+			name:        "unknown cleanup + git check failed = stays closed, no evidence",
+			in:          WorkstateInput{State: StateDone, CleanupStatus: CleanupUnknown, GitCheckFailed: true},
+			wantReuse:   false,
+			wantBlocker: "cleanup_status=unknown",
+		},
+		{
+			name:        "a REAL unsafe cleanup status still blocks on its own",
+			in:          WorkstateInput{State: StateDone, CleanupStatus: CleanupUncommitted},
+			wantReuse:   false,
+			wantBlocker: "cleanup_status=has_uncommitted",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DecideWorkstate(tc.in)
+			if got := len(d.Blockers) == 0; got != tc.wantReuse {
+				t.Errorf("reusable = %v, want %v (blockers: %v, reason: %q)",
+					got, tc.wantReuse, d.Blockers, d.Reason)
+			}
+			if tc.wantBlocker != "" {
+				found := false
+				for _, b := range d.Blockers {
+					if b == tc.wantBlocker {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("want blocker %q, got %v", tc.wantBlocker, d.Blockers)
+				}
+			}
+		})
+	}
+}

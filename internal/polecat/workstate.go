@@ -126,23 +126,38 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 		block("active-work", in.ActiveWorkBlocker, in.ActiveWorkCountsTowardCapacity)
 	}
 	if !in.IgnoreCleanupStatus && !in.CleanupStatus.IsSafe() {
-		reason := "cleanup-" + string(in.CleanupStatus)
-		blocker := "cleanup_status=" + string(in.CleanupStatus)
-		countsTowardCapacity := true
-		if in.CleanupStatus == "" {
-			reason = "cleanup-unknown"
-			blocker = "cleanup_status=<missing>"
-			// cleanup_status was optional before the integrated lifecycle
-			// classifier. Preserve the fail-closed recovery verdict, but do not
-			// let absent historical metadata alone reserve scheduler capacity.
-			// Direct uncertainty or worktree risk is represented by the git,
-			// hook, work, and MR predicates below and still consumes capacity.
-			countsTowardCapacity = false
-		} else if in.CleanupStatus == CleanupUnknown {
-			reason = "cleanup-unknown"
-			countsTowardCapacity = false
+		// "" (never recorded) and CleanupUnknown (recorded as undetermined) both
+		// mean the same thing: nobody ever computed this value. That is an
+		// absence of evidence, not evidence of risk — and it is unrecoverable on
+		// its own, because the only route to a real cleanup_status is a repair
+		// path that this very predicate refuses to run. A rig whose polecats all
+		// carry it reaches reusable=0 and stops dispatching, and every bead the
+		// scheduler then tries burns its respawn attempts and latches (hq-f2n8c;
+		// trader-z67n, trader-lxfo, trader-nlta).
+		//
+		// The real evidence is git, and the predicates below already read it:
+		// GitCheckFailed, GitDirty, StashCount and UnpushedCommits each block on
+		// their own and are individually fail-closed. When the git check
+		// succeeded we defer to them rather than veto on missing metadata —
+		// which also settles the standing disagreement where git-state reports
+		// CLEAN and check-recovery reports NEEDS_RECOVERY for the same polecat
+		// (hq-vv0q). When the git check did NOT succeed we have no evidence at
+		// all, so we keep blocking.
+		unknownCleanup := in.CleanupStatus == "" || in.CleanupStatus == CleanupUnknown
+		if !unknownCleanup || in.GitCheckFailed {
+			reason := "cleanup-" + string(in.CleanupStatus)
+			blocker := "cleanup_status=" + string(in.CleanupStatus)
+			countsTowardCapacity := true
+			if in.CleanupStatus == "" {
+				reason = "cleanup-unknown"
+				blocker = "cleanup_status=<missing>"
+				countsTowardCapacity = false
+			} else if in.CleanupStatus == CleanupUnknown {
+				reason = "cleanup-unknown"
+				countsTowardCapacity = false
+			}
+			block(reason, blocker, countsTowardCapacity)
 		}
-		block(reason, blocker, countsTowardCapacity)
 	}
 	if in.GitCheckFailed {
 		blocker := in.GitCheckFailedReason
