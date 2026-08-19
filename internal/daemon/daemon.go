@@ -155,6 +155,13 @@ type Daemon struct {
 	// the dogs touch (Dolt server, beads stores, telemetry), so an in-flight dog
 	// cycle cannot use a resource after it is freed. See gt-4ecf.
 	dogWg sync.WaitGroup
+
+	// lifecycleRequestCh triggers the isolated heartbeat goroutine (see
+	// runHeartbeatLoop) to run a lifecycle-request cycle immediately, instead of
+	// Run()'s signal branch calling ProcessLifecycleRequests directly. Buffered 1
+	// and sent to non-blockingly: a signal arriving while a cycle is already
+	// pending/running just coalesces into the next cycle. See gt-kj5j.
+	lifecycleRequestCh chan struct{}
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -567,8 +574,7 @@ func (d *Daemon) Run() (err error) {
 
 	// Fixed recovery-focused heartbeat (no activity-based backoff)
 	// Normal wake is handled by feed subscription (bd activity --follow)
-	timer := time.NewTimer(d.recoveryHeartbeatInterval())
-	defer timer.Stop()
+	d.lifecycleRequestCh = make(chan struct{}, 1)
 	schedulerWakeTicker := time.NewTicker(time.Second)
 	defer schedulerWakeTicker.Stop()
 
@@ -645,10 +651,7 @@ func (d *Daemon) Run() (err error) {
 	// gt-yycw's quota_dog isolation). A slow or hung dog can no longer starve
 	// its siblings. Each loop exits on d.ctx cancellation; d.shutdown() drains
 	// d.dogWg before freeing the Dolt server / beads stores / telemetry a dog
-	// may touch. Only the recovery heartbeat (and the 1s scheduler-wake pump)
-	// remain inline on the select loop — the heartbeat owns lifecycle state
-	// shared with the signal handler, so keeping it serialized there avoids new
-	// synchronization it would otherwise need.
+	// may touch.
 	for _, dog := range d.patrolDogs() {
 		if !dog.enabled() {
 			continue
@@ -665,6 +668,18 @@ func (d *Daemon) Run() (err error) {
 	d.heartbeat(state)
 	startupComplete = true
 
+	// Isolate the recovery heartbeat (and lifecycle-request processing, which the
+	// heartbeat also runs) onto its own dogWg-enrolled goroutine, same as every
+	// other patrol dog. Previously both ran inline on this select loop, so a
+	// hung/slow heartbeat cycle blocked the loop's ctx.Done() arm and delayed
+	// shutdown() indefinitely; now shutdown()'s existing bounded drainDogs covers
+	// it exactly like any other dog. See gt-kj5j.
+	d.dogWg.Add(1)
+	go d.runHeartbeatLoop(d.ctx, d.lifecycleRequestCh,
+		func() { d.runDogWithOverrunCheck("heartbeat", d.recoveryHeartbeatInterval(), func() { d.heartbeat(state) }) },
+		func() { d.processLifecycleRequests(); d.dispatchQueuedWorkIfPressureAllows() },
+	)
+
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -673,10 +688,14 @@ func (d *Daemon) Run() (err error) {
 
 		case sig := <-sigChan:
 			if isLifecycleSignal(sig) {
-				// Lifecycle signal: immediate lifecycle processing (from gt handoff)
+				// Lifecycle signal: trigger immediate lifecycle processing on the
+				// isolated heartbeat goroutine (from gt handoff). Non-blocking send:
+				// a signal arriving mid-cycle coalesces into the next cycle.
 				d.logger.Println("Received lifecycle signal, processing lifecycle requests immediately")
-				d.processLifecycleRequests()
-				d.dispatchQueuedWorkIfPressureAllows()
+				select {
+				case d.lifecycleRequestCh <- struct{}{}:
+				default:
+				}
 			} else if isReloadRestartSignal(sig) {
 				// Reload restart tracker from disk (from 'gt daemon clear-backoff')
 				d.logger.Println("Received reload-restart signal, reloading restart tracker from disk")
@@ -697,12 +716,6 @@ func (d *Daemon) Run() (err error) {
 
 		case <-schedulerWakeTicker.C:
 			d.processSchedulerWake()
-
-		case <-timer.C:
-			d.runDogWithOverrunCheck("heartbeat", d.recoveryHeartbeatInterval(), func() { d.heartbeat(state) })
-
-			// Fixed recovery interval (no activity-based backoff)
-			timer.Reset(d.recoveryHeartbeatInterval())
 		}
 	}
 }
@@ -826,6 +839,54 @@ func (d *Daemon) runDogLoop(ctx context.Context, name string, interval func() ti
 				continue
 			}
 			d.runDogWithOverrunCheck(name, interval(), fn)
+		}
+	}
+}
+
+// runHeartbeatLoop runs the recovery heartbeat and lifecycle-request
+// processing on their own dogWg-enrolled goroutine, isolated from Run()'s
+// shared select loop exactly like every other patrol dog (runDogLoop). Both
+// cycles previously ran inline on that loop, so a hung/slow heartbeat blocked
+// the loop's ctx.Done() arm and delayed shutdown() indefinitely; now
+// shutdown()'s existing bounded drainDogs (dogShutdownDrainTimeout) covers
+// this goroutine the same as any other dog.
+//
+// Unlike patrolDogs()/runDogLoop, the heartbeat's interval is re-read and the
+// timer re-armed after every cycle (not a fixed ticker) to preserve its
+// existing config-hot-reload behavior. lifecycleCh carries immediate
+// lifecycle-request triggers from Run()'s signal branch, which used to call
+// ProcessLifecycleRequests directly from Run()'s own goroutine — dual-entering
+// it alongside the heartbeat's own internal call. Routing both through this
+// single goroutine converges them onto one execution stream, so the
+// syncFailures/deacon-boot-mayor state they share stays serialized without a
+// new lock. See gt-kj5j.
+//
+// heartbeatFn and lifecycleFn are injected so this loop is testable without a
+// fully wired Daemon; production code passes the real heartbeat cycle and
+// ProcessLifecycleRequests+dispatch pair.
+func (d *Daemon) runHeartbeatLoop(ctx context.Context, lifecycleCh <-chan struct{}, heartbeatFn, lifecycleFn func()) {
+	defer d.dogWg.Done()
+
+	timer := time.NewTimer(d.recoveryHeartbeatInterval())
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-lifecycleCh:
+			// Same ctx.Err() race guard as runDogLoop's ticker case: select can
+			// have both this and ctx.Done() ready at once.
+			if ctx.Err() != nil {
+				return
+			}
+			lifecycleFn()
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
+			heartbeatFn()
+			timer.Reset(d.recoveryHeartbeatInterval())
 		}
 	}
 }
