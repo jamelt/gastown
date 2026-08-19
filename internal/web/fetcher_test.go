@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/activity"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 func TestCalculateWorkStatus(t *testing.T) {
@@ -431,6 +433,71 @@ func TestCalculateWorkerWorkStatus_ZeroThresholds(t *testing.T) {
 	got := calculateWorkerWorkStatus(0, "gt-1", "dag", 0, 0)
 	if got != "stuck" {
 		t.Errorf("0 age with 0/0 thresholds should be stuck, got %q", got)
+	}
+}
+
+// --- freshestActivity: heartbeat vs tmux timestamp (gt-fuz) ---
+
+func TestFreshestActivity_HeartbeatNewerThanTmux(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := "gt-crater-dag"
+
+	// Agent is actively running gt/bd commands (heartbeat advancing) but its
+	// tmux pane has produced no terminal output in a while — the exact
+	// scenario that misdiagnosed live ACP/Codex workers as STUCK.
+	tmuxActivity := time.Now().Add(-20 * time.Minute)
+	polecat.TouchSessionHeartbeat(townRoot, sessionName)
+
+	f := &LiveConvoyFetcher{townRoot: townRoot}
+	got := f.freshestActivity(sessionName, tmuxActivity)
+
+	if !got.After(tmuxActivity) {
+		t.Errorf("freshestActivity() = %v, want a time after stale tmux activity %v", got, tmuxActivity)
+	}
+	if time.Since(got) > time.Minute {
+		t.Errorf("freshestActivity() = %v, want ~now (fresh heartbeat)", got)
+	}
+}
+
+func TestFreshestActivity_NoHeartbeatFallsBackToTmux(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := "gt-crater-dag"
+	tmuxActivity := time.Now().Add(-20 * time.Minute)
+
+	f := &LiveConvoyFetcher{townRoot: townRoot}
+	got := f.freshestActivity(sessionName, tmuxActivity)
+
+	if !got.Equal(tmuxActivity) {
+		t.Errorf("freshestActivity() = %v, want unchanged tmux activity %v when no heartbeat exists", got, tmuxActivity)
+	}
+}
+
+func TestFreshestActivity_StaleHeartbeatDoesNotOverrideNewerTmux(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := "gt-crater-dag"
+
+	// Write a heartbeat file whose recorded timestamp is old (e.g. the agent
+	// stopped touching gt/bd a while ago), well before a fresher tmux activity
+	// timestamp.
+	hbDir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(hbDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	old := time.Now().Add(-2 * time.Hour).UTC()
+	data, err := json.Marshal(polecat.SessionHeartbeat{Timestamp: old, State: polecat.HeartbeatWorking})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hbDir, sessionName+".json"), data, 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tmuxActivity := time.Now()
+	f := &LiveConvoyFetcher{townRoot: townRoot}
+	got := f.freshestActivity(sessionName, tmuxActivity)
+
+	if !got.Equal(tmuxActivity) {
+		t.Errorf("freshestActivity() = %v, want tmux activity %v to win when heartbeat content is stale", got, tmuxActivity)
 	}
 }
 

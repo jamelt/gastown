@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -540,16 +541,16 @@ func (f *LiveConvoyFetcher) getWorkersFromAssignees(details map[string]*issueDet
 // getSessionActivityForAssignee looks up tmux session activity for an assignee.
 // Assignee format: "rigname/polecats/polecatname" -> session "gt-rigname-polecatname"
 func (f *LiveConvoyFetcher) getSessionActivityForAssignee(assignee string) *time.Time {
-	// Parse assignee: "roxas/polecats/dag" -> rig="roxas", polecat="dag"
+	// Parse assignee: "roxas/polecats/dag" -> rig="roxas", polecatName="dag"
 	parts := strings.Split(assignee, "/")
 	if len(parts) != 3 || parts[1] != "polecats" {
 		return nil
 	}
 	rig := parts[0]
-	polecat := parts[2]
+	polecatName := parts[2]
 
 	// Construct session name
-	sessionName := session.PolecatSessionName(session.PrefixFor(rig), polecat)
+	sessionName := session.PolecatSessionName(session.PrefixFor(rig), polecatName)
 
 	// Query tmux for session activity
 	// Format: session_activity returns unix timestamp
@@ -575,8 +576,22 @@ func (f *LiveConvoyFetcher) getSessionActivityForAssignee(assignee string) *time
 		return nil
 	}
 
-	activity := time.Unix(activityUnix, 0)
-	return &activity
+	activityTime := f.freshestActivity(sessionName, time.Unix(activityUnix, 0))
+	return &activityTime
+}
+
+// freshestActivity returns the more recent of a tmux activity timestamp and
+// the session's heartbeat file. Polecat/crew sessions touch their heartbeat
+// on every gt/bd invocation (gt-qjtq), which keeps advancing while an
+// ACP/Codex worker runs tool calls even though tmux's pane/session activity
+// timestamps only move on terminal keystrokes or output. Falls back to the
+// tmux timestamp when no heartbeat file exists (rollout period, non-worker
+// sessions).
+func (f *LiveConvoyFetcher) freshestActivity(sessionName string, tmuxActivity time.Time) time.Time {
+	if hb := polecat.ReadSessionHeartbeat(f.townRoot, sessionName); hb != nil && hb.Timestamp.After(tmuxActivity) {
+		return hb.Timestamp
+	}
+	return tmuxActivity
 }
 
 // getAllPolecatActivity returns the most recent activity from any running polecat session.
@@ -902,7 +917,7 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		if _, err := fmt.Sscanf(parts[1], "%d", &activityUnix); err != nil || activityUnix == 0 {
 			continue
 		}
-		activityTime := time.Unix(activityUnix, 0)
+		activityTime := f.freshestActivity(sessionName, time.Unix(activityUnix, 0))
 		activityAge := time.Since(activityTime)
 
 		// Get status hint - special handling for refinery
