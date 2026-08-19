@@ -207,6 +207,128 @@ func TestGetAgentBead_FallsBackToDescriptionAgentState(t *testing.T) {
 	}
 }
 
+// installMockBDShowMissingWithWisps simulates a bead that is absent from the
+// issues table ("bd show" returns an empty array) but present in the wisps
+// table ("bd mol wisp list" returns wispsOutput). Each "bd mol wisp list"
+// invocation appends a line to the returned log path, so tests can assert
+// how many times the full wisps list was actually queried.
+func installMockBDShowMissingWithWisps(t *testing.T, wispsOutput string) string {
+	t.Helper()
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "wisp-calls.log")
+
+	script := `#!/bin/sh
+LOG_FILE='` + logPath + `'
+cmd=""
+sub=""
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *)
+      if [ -z "$cmd" ]; then cmd="$arg";
+      elif [ -z "$sub" ]; then sub="$arg"; fi
+      ;;
+  esac
+done
+
+case "$cmd" in
+  version)
+    exit 0
+    ;;
+  show)
+    printf '[]\n'
+    exit 0
+    ;;
+  mol)
+    if [ "$sub" = "wisp" ]; then
+      printf 'call\n' >> "$LOG_FILE"
+      printf '%s\n' "$MOCK_BD_WISPS_OUTPUT"
+      exit 0
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	scriptPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MOCK_BD_WISPS_OUTPUT", wispsOutput)
+
+	return logPath
+}
+
+func TestGetAgentBead_FallsBackToWispsWhenMissingFromIssues(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	wispsJSON := `{"wisps":[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","issue_type":"agent","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown\nagent_state: idle\nhook_bead: null","agent_state":"idle"}],"count":1}`
+	logPath := installMockBDShowMissingWithWisps(t, wispsJSON)
+
+	bd := NewIsolated(tmpDir)
+
+	issue, fields, err := bd.GetAgentBead("gt-gastown-polecat-nux")
+	if err != nil {
+		t.Fatalf("GetAgentBead: %v", err)
+	}
+	if issue == nil {
+		t.Fatal("GetAgentBead returned nil issue for a wisp-only bead; want the wisps-table fallback to find it")
+	}
+	if fields == nil {
+		t.Fatal("GetAgentBead returned nil fields for a wisp-only bead")
+	}
+	if issue.ID != "gt-gastown-polecat-nux" {
+		t.Fatalf("issue.ID = %q, want %q", issue.ID, "gt-gastown-polecat-nux")
+	}
+	if fields.AgentState != "idle" {
+		t.Fatalf("fields.AgentState = %q, want %q", fields.AgentState, "idle")
+	}
+
+	// A second not-found lookup on the same Beads instance must not re-query
+	// the full wisps list — the cache should already hold the answer.
+	if _, _, err := bd.GetAgentBead("gt-gastown-polecat-nux"); err != nil {
+		t.Fatalf("second GetAgentBead: %v", err)
+	}
+	if _, _, err := bd.GetAgentBead("gt-gastown-polecat-other"); err != nil {
+		t.Fatalf("third GetAgentBead: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading wisp call log: %v", err)
+	}
+	calls := strings.Count(string(logBytes), "call\n")
+	if calls != 1 {
+		t.Fatalf("wisps list queried %d times across 3 GetAgentBead calls, want 1 (cache should bound it)", calls)
+	}
+}
+
+func TestGetAgentBead_NotFoundWhenAbsentFromIssuesAndWisps(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	installMockBDShowMissingWithWisps(t, `{"wisps":[],"count":0}`)
+
+	bd := NewIsolated(tmpDir)
+	issue, fields, err := bd.GetAgentBead("gt-gastown-polecat-ghost")
+	if err != nil {
+		t.Fatalf("GetAgentBead: %v", err)
+	}
+	if issue != nil || fields != nil {
+		t.Fatalf("GetAgentBead(ghost) = (%v, %v), want (nil, nil)", issue, fields)
+	}
+}
+
 func TestUpdateAgentState_UsesUpdateDescriptionPath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mocks for bd")
@@ -233,6 +355,84 @@ func TestUpdateAgentState_UsesUpdateDescriptionPath(t *testing.T) {
 	// Should NOT use the obsolete bd agent state or bd set-state path
 	if strings.Contains(logOutput, "agent state") || strings.Contains(logOutput, "set-state") {
 		t.Fatalf("mock bd log %q unexpectedly used obsolete bd agent state / set-state path", logOutput)
+	}
+}
+
+func TestClearAgentActiveMRIfMatchesClearsExactMatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	logPath := installMockBDShowRecorder(t, `[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","issue_type":"agent","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown\nagent_state: working\nactive_mr: gt-wisp-old\ncleanup_status: clean"}]`)
+	bd := NewIsolated(tmpDir)
+
+	cleared, err := bd.ClearAgentActiveMRIfMatches("gt-gastown-polecat-nux", "gt-wisp-old")
+	if err != nil {
+		t.Fatalf("ClearAgentActiveMRIfMatches: %v", err)
+	}
+	if !cleared {
+		t.Fatal("ClearAgentActiveMRIfMatches cleared = false, want true")
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	if !strings.Contains(logOutput, "show gt-gastown-polecat-nux --json") || !strings.Contains(logOutput, "update gt-gastown-polecat-nux") {
+		t.Fatalf("mock bd log %q missing show/update", logOutput)
+	}
+}
+
+func TestClearAgentActiveMRIfMatchesNoopsWhenDifferent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	logPath := installMockBDShowRecorder(t, `[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","issue_type":"agent","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown\nagent_state: working\nactive_mr: gt-wisp-new"}]`)
+	bd := NewIsolated(tmpDir)
+
+	cleared, err := bd.ClearAgentActiveMRIfMatches("gt-gastown-polecat-nux", "gt-wisp-old")
+	if err != nil {
+		t.Fatalf("ClearAgentActiveMRIfMatches: %v", err)
+	}
+	if cleared {
+		t.Fatal("ClearAgentActiveMRIfMatches cleared = true, want false")
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	if strings.Contains(logOutput, "update gt-gastown-polecat-nux") {
+		t.Fatalf("mock bd log %q unexpectedly updated mismatched active_mr", logOutput)
+	}
+}
+
+func TestClearAgentActiveMRIfMatchesRejectsNonAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	logPath := installMockBDShowRecorder(t, `[{"id":"gt-task","title":"Task","issue_type":"task","labels":["gt:task"],"description":"active_mr: gt-wisp-old"}]`)
+	bd := NewIsolated(tmpDir)
+
+	cleared, err := bd.ClearAgentActiveMRIfMatches("gt-task", "gt-wisp-old")
+	if err == nil {
+		t.Fatal("ClearAgentActiveMRIfMatches expected non-agent error")
+	}
+	if cleared {
+		t.Fatal("ClearAgentActiveMRIfMatches cleared = true, want false")
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	if strings.Contains(logOutput, "update gt-task") {
+		t.Fatalf("mock bd log %q unexpectedly updated non-agent", logOutput)
 	}
 }
 
@@ -346,6 +546,27 @@ func TestMergeAgentBeadSources(t *testing.T) {
 			t.Fatalf("len(merged) = %d, want 0", len(merged))
 		}
 	})
+}
+
+func TestLabelsForAgentBeadReusePreservesOnlySafetyStop(t *testing.T) {
+	got := labelsForAgentBeadReuse([]string{
+		"gt:agent",
+		"heartbeat:123",
+		"idle:2",
+		"done-intent:COMPLETED:123",
+		"safety_stop:hq-vmrwr",
+		"safety_stop:hq-vmrwr",
+		"safety_stop:hq-other",
+	})
+	want := []string{"gt:agent", "safety_stop:hq-vmrwr", "safety_stop:hq-other"}
+	if len(got) != len(want) {
+		t.Fatalf("labels = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("labels = %v, want %v", got, want)
+		}
+	}
 }
 
 func installMockBDCreateRecorder(t *testing.T, logPath string) {
@@ -483,7 +704,7 @@ func TestCreateOrReopenAgentBeadExistingUsesTownBeadsDir(t *testing.T) {
 	if err := WriteRoutes(townBeadsDir, []Route{{Prefix: "hq-", Path: "."}, {Prefix: "gt-", Path: "gastown/mayor/rig"}}); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte("v1\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 		t.Fatalf("write types sentinel: %v", err)
 	}
 
@@ -543,7 +764,7 @@ esac
 	if strings.Contains(logOutput, "beads_dir="+rigBeadsDir) {
 		t.Fatalf("CreateOrReopenAgentBead used rig BEADS_DIR; log:\n%s", logOutput)
 	}
-	if !strings.Contains(logOutput, "beads_dir="+townBeadsDir) || !strings.Contains(logOutput, " show") || !strings.Contains(logOutput, " update") {
+	if !strings.Contains(logOutput, "beads_dir="+townBeadsDir) || !strings.Contains(logOutput, "args=show") || !strings.Contains(logOutput, "args=update") {
 		t.Fatalf("CreateOrReopenAgentBead did not use town BEADS_DIR for existing bead path; log:\n%s", logOutput)
 	}
 }

@@ -230,7 +230,11 @@ func runSynthesisStart(cmd *cobra.Command, args []string) error {
 
 	// Sling to target rig
 	fmt.Printf("  Slinging to %s...\n", targetRig)
-	if err := slingSynthesis(synthesisID, targetRig); err != nil {
+	synthesisAgent := ""
+	if f != nil && f.Synthesis != nil {
+		synthesisAgent = f.Synthesis.Agent
+	}
+	if err := slingSynthesis(synthesisID, targetRig, synthesisAgent); err != nil {
 		return fmt.Errorf("slinging synthesis: %w", err)
 	}
 
@@ -502,15 +506,26 @@ func collectLegOutputs(meta *ConvoyMeta, f *formula.Formula) ([]LegOutput, bool,
 }
 
 // expandOutputPath expands template variables in output paths.
-// Supports: {{review_id}}, {{leg.id}}
+// Supports Go template output syntax plus legacy bare placeholders.
 func expandOutputPath(directory, pattern, reviewID, legID string) string {
-	// Expand directory
-	dir := strings.ReplaceAll(directory, "{{review_id}}", reviewID)
-
-	// Expand pattern
-	file := strings.ReplaceAll(pattern, "{{leg.id}}", legID)
-
+	dir := expandOutputTemplate(directory, reviewID, legID)
+	file := expandOutputTemplate(pattern, reviewID, legID)
 	return filepath.Join(dir, file)
+}
+
+func expandOutputTemplate(tmplText, reviewID, legID string) string {
+	ctx := map[string]interface{}{
+		"review_id": reviewID,
+		"leg": map[string]interface{}{
+			"id": legID,
+		},
+	}
+	if rendered, err := renderTemplate(tmplText, ctx); err == nil {
+		return rendered
+	}
+
+	text := strings.ReplaceAll(tmplText, "{{review_id}}", reviewID)
+	return strings.ReplaceAll(text, "{{leg.id}}", legID)
 }
 
 // createSynthesisBead creates a bead for the synthesis step.
@@ -529,11 +544,31 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 	desc.WriteString(fmt.Sprintf("review_id: %s\n", reviewID))
 	desc.WriteString("\n")
 
+	var outputDir, outputSynthesis string
+	if f != nil && f.Output != nil {
+		outputDir = expandOutputTemplate(f.Output.Directory, reviewID, "")
+		outputSynthesis = f.Output.Synthesis
+	}
+
 	// Add synthesis instructions from formula
 	if f != nil && f.Synthesis != nil && f.Synthesis.Description != "" {
+		formulaName := meta.Formula
+		if formulaName == "" {
+			formulaName = f.Name
+		}
+		synCtx := formulaTemplateContext(formulaName, meta.Title, reviewID, 0, "", nil, nil, nil)
+		synCtx["problem"] = meta.Title
+		addOutputTemplateContext(synCtx, outputDir, outputSynthesis)
+		synDesc := renderTemplateOrDefault(f.Synthesis.Description, synCtx, f.Synthesis.Description)
+
 		desc.WriteString("## Instructions\n\n")
-		desc.WriteString(f.Synthesis.Description)
+		desc.WriteString(synDesc)
 		desc.WriteString("\n\n")
+	}
+	if f != nil && f.Synthesis != nil && f.Synthesis.Agent != "" {
+		current := desc.String()
+		desc.Reset()
+		desc.WriteString(workflowAgentDescription(current, f.Synthesis.Agent))
 	}
 
 	// Add collected leg outputs
@@ -552,8 +587,7 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 
 	// Add output path if configured
 	if f != nil && f.Output != nil && f.Output.Synthesis != "" {
-		outputPath := strings.ReplaceAll(f.Output.Directory, "{{review_id}}", reviewID)
-		outputPath = filepath.Join(outputPath, f.Output.Synthesis)
+		outputPath := filepath.Join(outputDir, f.Output.Synthesis)
 		desc.WriteString(fmt.Sprintf("\n## Output\n\nWrite synthesis to: %s\n", outputPath))
 	}
 
@@ -606,8 +640,11 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 }
 
 // slingSynthesis slings the synthesis bead to a rig.
-func slingSynthesis(beadID, targetRig string) error {
+func slingSynthesis(beadID, targetRig, agent string) error {
 	slingArgs := []string{"sling", beadID, targetRig}
+	if agent != "" {
+		slingArgs = append(slingArgs, "--agent", agent)
+	}
 	slingCmd := exec.Command("gt", slingArgs...)
 	slingCmd.Stdout = os.Stdout
 	slingCmd.Stderr = os.Stderr
@@ -703,7 +740,11 @@ func TriggerSynthesisIfReady(convoyID, targetRig string) error {
 		return fmt.Errorf("creating synthesis bead: %w", err)
 	}
 
-	if err := slingSynthesis(synthesisID, targetRig); err != nil {
+	synthesisAgent := ""
+	if f != nil && f.Synthesis != nil {
+		synthesisAgent = f.Synthesis.Agent
+	}
+	if err := slingSynthesis(synthesisID, targetRig, synthesisAgent); err != nil {
 		return fmt.Errorf("slinging synthesis: %w", err)
 	}
 

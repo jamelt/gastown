@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -580,8 +581,25 @@ func startDeaconSession(t *tmux.Tmux, sessionName, agentOverride string) error {
 	deaconTownRoot, _ := workspace.FindFromCwdOrError()
 	runtimeCfg := config.ResolveRoleAgentConfig("deacon", deaconTownRoot, "")
 	_ = runtime.RunStartupFallback(t, sessionName, "deacon", runtimeCfg)
+	startDeaconNudgePoller(townRoot, sessionName)
 
 	return nil
+}
+
+func startDeaconNudgePoller(townRoot, sessionName string) {
+	if _, pollerErr := nudge.StartPoller(townRoot, sessionName); pollerErr != nil {
+		style.PrintWarning("could not start nudge poller for %s: %v", sessionName, pollerErr)
+	}
+}
+
+func stopDeaconNudgePoller(sessionName string) {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return
+	}
+	if pollerErr := nudge.StopPoller(townRoot, sessionName); pollerErr != nil {
+		style.PrintWarning("could not stop nudge poller for %s: %v", sessionName, pollerErr)
+	}
 }
 
 func runDeaconStop(cmd *cobra.Command, args []string) error {
@@ -599,6 +617,7 @@ func runDeaconStop(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("Stopping Deacon session...")
+	stopDeaconNudgePoller(sessionName)
 
 	// Try graceful shutdown first (best-effort interrupt)
 	_ = t.SendKeysRaw(sessionName, "C-c")
@@ -786,6 +805,8 @@ func runDeaconRestart(cmd *cobra.Command, args []string) error {
 	fmt.Println("Restarting Deacon...")
 
 	if running {
+		stopDeaconNudgePoller(sessionName)
+
 		// Kill existing session.
 		// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 		if err := t.KillSessionWithProcesses(sessionName); err != nil {
@@ -827,15 +848,12 @@ func runDeaconHeartbeat(cmd *cobra.Command, args []string) error {
 		action = strings.Join(args, " ")
 	}
 
+	if err := syncDeaconHeartbeatStores(townRoot, action); err != nil {
+		return fmt.Errorf("updating heartbeat: %w", err)
+	}
 	if action != "" {
-		if err := deacon.TouchWithAction(townRoot, action, 0, 0); err != nil {
-			return fmt.Errorf("updating heartbeat: %w", err)
-		}
 		fmt.Printf("%s Heartbeat updated: %s\n", style.Bold.Render("✓"), action)
 	} else {
-		if err := deacon.Touch(townRoot); err != nil {
-			return fmt.Errorf("updating heartbeat: %w", err)
-		}
 		fmt.Printf("%s Heartbeat updated\n", style.Bold.Render("✓"))
 	}
 

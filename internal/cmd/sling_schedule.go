@@ -9,8 +9,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
@@ -46,22 +47,124 @@ func shouldDeferDispatch() (bool, error) {
 
 // ScheduleOptions holds options for scheduling a bead.
 type ScheduleOptions struct {
-	Formula      string   // Formula to apply at dispatch time (e.g., "mol-polecat-work")
-	Args         string   // Natural language args for executor
-	Vars         []string // Formula variables (key=value)
-	Merge        string   // Merge strategy: direct/mr/local
-	BaseBranch   string   // Override base branch for polecat worktree
-	ResumeBranch string   // Resume an existing branch (gh#3602); mutually exclusive with BaseBranch
-	NoConvoy     bool     // Skip auto-convoy creation
-	Owned        bool     // Mark auto-convoy as caller-managed lifecycle
-	DryRun       bool     // Show what would be done without acting
-	Force        bool     // Force schedule even if bead is hooked/in_progress
-	NoMerge      bool     // Skip merge queue on completion
-	ReviewOnly   bool     // Review-only mode: assignee evaluates and reports back, no merge/commit/push
-	Account      string   // Claude Code account handle
-	Agent        string   // Agent override (e.g., "gemini", "codex")
-	HookRawBead  bool     // Hook raw bead without default formula
-	Ralph        bool     // Ralph Wiggum loop mode
+	Formula       string   // Formula to apply at dispatch time (e.g., "mol-polecat-work")
+	Args          string   // Natural language args for executor
+	Vars          []string // Formula variables (key=value)
+	Merge         string   // Merge strategy: direct/mr/local
+	BaseBranch    string   // Override base branch for polecat worktree
+	BaseRef       string   // Override ref work is based/rebased/diffed against (e.g., "upstream/main")
+	PublishRemote string   // Override remote branches are pushed to (default: "origin")
+	PublishRef    string   // Override remote branch name work publishes under
+	PRTargetRef   string   // Override "<remote>/<branch>" a PR/MR merges into
+	ResumeBranch  string   // Resume an existing branch (gh#3602); mutually exclusive with BaseBranch
+	TargetAgent   string   // Exact existing polecat reservation (canonical <rig>/polecats/<name>)
+	NoConvoy      bool     // Skip auto-convoy creation
+	Owned         bool     // Mark auto-convoy as caller-managed lifecycle
+	DryRun        bool     // Show what would be done without acting
+	Force         bool     // Force schedule even if bead is hooked/in_progress
+	NoMerge       bool     // Skip merge queue on completion
+	ReviewOnly    bool     // Review-only mode: assignee evaluates and reports back, no merge/commit/push
+	Account       string   // Claude Code account handle
+	Agent         string   // Agent override (e.g., "gemini", "codex")
+	HookRawBead   bool     // Hook raw bead without default formula
+	Ralph         bool     // Ralph Wiggum loop mode
+
+	// ConfirmHumanApproved confirms a human has freshly reviewed and approved
+	// THIS dispatch of an hq-1s4w hard-prohibition-labeled bead (gt-b2qi).
+	// Not bypassed by Force — --force is the routine stale-hook escape hatch
+	// and must never silently double as hard-prohibition approval.
+	ConfirmHumanApproved bool
+}
+
+type deferredPolecatTarget struct {
+	RigName     string
+	Agent       string
+	PolecatName string
+	Pane        string
+	WorkDir     string
+}
+
+// scheduleBeadForSling is a test seam for CLI routing. Scheduler internals call
+// scheduleBead directly; only sling argument parsing goes through this seam.
+var scheduleBeadForSling = scheduleBead
+
+var requestSchedulerWake = daemon.RequestSchedulerWake
+
+var (
+	verifyDeferredTargetWorktreeFn = verifyWorktreeExists
+	deferredTargetBranchFn         = func(workDir string) (string, error) { return git.NewGit(workDir).CurrentBranch() }
+	deferredTargetAssignmentFn     = func(rigBeads *beads.Beads, agentID string) (*beads.Issue, error) {
+		return rigBeads.GetAssignedIssue(agentID)
+	}
+)
+
+// resolveDeferredPolecatTarget resolves a deferred-dispatch target without
+// creating or reusing any worktree. Rig targets retain the existing scheduler
+// behavior; explicit polecat targets must already be live and safe to reserve.
+func resolveDeferredPolecatTarget(target, townRoot, beadID, resumeBranch string, force bool) (*deferredPolecatTarget, error) {
+	if rigName, isRig := IsRigName(target); isRig {
+		return &deferredPolecatTarget{RigName: rigName}, nil
+	}
+
+	agentID, pane, workDir, err := resolveTargetAgentFn(target)
+	if err != nil {
+		return nil, fmt.Errorf("explicit deferred target %q is unavailable; target an active existing polecat or use a rig name: %w", target, err)
+	}
+	parts := strings.Split(agentID, "/")
+	if len(parts) != 3 || parts[1] != "polecats" || parts[0] == "" || parts[2] == "" {
+		return nil, fmt.Errorf("explicit deferred target %q resolved to %q; deferred dispatch supports only a rig or an existing <rig>/<polecat> target", target, agentID)
+	}
+	rigName, polecatName := parts[0], parts[2]
+	if _, isRig := IsRigName(rigName); !isRig {
+		return nil, fmt.Errorf("explicit deferred target %q resolved to polecat in unknown rig %q", target, rigName)
+	}
+	if !force {
+		if err := checkCrossRigGuard(beadID, agentID, townRoot); err != nil {
+			return nil, err
+		}
+	}
+	if err := verifyBeadExistsInTargetRigDatabase(beadID, rigName, townRoot); err != nil {
+		return nil, err
+	}
+	rigBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, rigName)
+	if !ok {
+		return nil, fmt.Errorf("cannot resolve target rig %q beads database for explicit polecat %q", rigName, agentID)
+	}
+
+	reservationRoot := filepath.Join(townRoot, rigName, "polecats", polecatName)
+	rel, err := filepath.Rel(reservationRoot, workDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("explicit deferred target %q has unsafe worktree %q (expected it beneath %q)", agentID, workDir, reservationRoot)
+	}
+	if err := verifyDeferredTargetWorktreeFn(workDir); err != nil {
+		return nil, fmt.Errorf("explicit deferred target %q has an unavailable worktree: %w", agentID, err)
+	}
+	if resumeBranch != "" {
+		branch, err := deferredTargetBranchFn(workDir)
+		if err != nil {
+			return nil, fmt.Errorf("cannot verify preserved branch for explicit deferred target %q: %w", agentID, err)
+		}
+		if branch != resumeBranch {
+			return nil, fmt.Errorf("explicit deferred target %q is on branch %q, not requested resume branch %q; refusing to create a duplicate checkout", agentID, branch, resumeBranch)
+		}
+	}
+
+	rigBeads := beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
+	assigned, err := deferredTargetAssignmentFn(rigBeads, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("cannot verify availability of explicit deferred target %q: %w", agentID, err)
+	}
+	if assigned != nil && assigned.ID != beadID {
+		return nil, fmt.Errorf("explicit deferred target %q is busy with %s; refusing to overwrite its hook", agentID, assigned.ID)
+	}
+
+	return &deferredPolecatTarget{
+		RigName:     rigName,
+		Agent:       agentID,
+		PolecatName: polecatName,
+		Pane:        pane,
+		WorkDir:     workDir,
+	}, nil
 }
 
 // scheduleBead schedules a bead for deferred dispatch via the capacity scheduler.
@@ -78,6 +181,15 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 
 	if _, isRig := IsRigName(rigName); !isRig {
 		return fmt.Errorf("'%s' is not a known rig", rigName)
+	}
+	if opts.TargetAgent != "" {
+		resolved, err := resolveDeferredPolecatTarget(opts.TargetAgent, townRoot, beadID, opts.ResumeBranch, opts.Force)
+		if err != nil {
+			return err
+		}
+		if resolved.RigName != rigName || resolved.Agent != opts.TargetAgent {
+			return fmt.Errorf("explicit deferred target %q does not belong to requested rig %q", opts.TargetAgent, rigName)
+		}
 	}
 	if err := verifyBeadExistsInTargetRigDatabase(beadID, rigName, townRoot); err != nil {
 		return err
@@ -100,13 +212,34 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	// Create the sling context in the target rig's beads dir so that the target
 	// rig's witness can discover it during patrol. Previously this used the HQ
 	// beads dir, which meant non-HQ rig witnesses never saw the context. (GH#3468)
-	rigBeadsDir := doltserver.FindRigBeadsDir(townRoot, rigName)
-	rigBeads := beads.NewWithBeadsDir(townRoot, rigBeadsDir)
+	rigBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, rigName)
+	if !ok {
+		return fmt.Errorf("cannot resolve target rig %q beads database for bead %s", rigName, beadID)
+	}
+	// Context identity is local to its owning database. Pin every operation so
+	// legacy wrong-prefix contexts remain addressable by ownership evidence.
+	rigBeads := beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForLocalBeads()
 	existingCtx, _, findErr := rigBeads.FindOpenSlingContext(beadID)
 	if findErr != nil {
 		return fmt.Errorf("checking for existing sling context: %w", findErr)
 	}
 	if existingCtx != nil {
+		existingFields := beads.ParseSlingContextFields(existingCtx.Description)
+		existingTarget := ""
+		if existingFields != nil {
+			existingTarget = existingFields.TargetAgent
+		}
+		if existingTarget != opts.TargetAgent {
+			displayTarget := rigName
+			if existingTarget != "" {
+				displayTarget = existingTarget
+			}
+			requestedTarget := rigName
+			if opts.TargetAgent != "" {
+				requestedTarget = opts.TargetAgent
+			}
+			return fmt.Errorf("bead %s is already scheduled to %s (context: %s), not requested target %s; clear or dispatch the existing context first", beadID, displayTarget, existingCtx.ID, requestedTarget)
+		}
 		fmt.Printf("%s Bead %s is already scheduled (context: %s), no-op\n",
 			style.Dim.Render("○"), beadID, existingCtx.ID)
 		return nil
@@ -122,18 +255,37 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
 	}
 
+	// Molecule-machinery guard (gt-6va3): never enqueue a formula-molecule
+	// container or one of its materialized step beads as real work. Mirrors the
+	// closed/tombstone guard above and the same check in executeSling.
+	if reason := moleculeScaffoldRejectReason(info); reason != "" {
+		return fmt.Errorf("bead %s is %s", beadID, reason)
+	}
+
+	// hq-1s4w hard-prohibition guard (gt-b2qi). Mirrors the closed/tombstone
+	// guard above: independently re-validated here, in runSling's direct
+	// path (sling.go), and in executeSling (sling_dispatch.go) rather than
+	// trusted from an upstream caller — see those files for the same guard.
+	if err := checkHardProhibition(info.Title, info.Description, info.Labels, opts.ConfirmHumanApproved); err != nil {
+		return err
+	}
+
 	if (info.Status == "pinned" || info.Status == "hooked" || info.Status == "in_progress") && !opts.Force {
 		return fmt.Errorf("bead %s is already %s to %s\nUse --force to override", beadID, info.Status, info.Assignee)
 	}
 
 	if opts.Formula != "" {
-		if err := verifyFormulaExists(opts.Formula); err != nil {
+		if err := verifyFormulaExists(opts.Formula, filepath.Dir(rigBeadsDir), townRoot); err != nil {
 			return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
 		}
 	}
 
 	if opts.DryRun {
-		fmt.Printf("Would schedule %s → %s\n", beadID, rigName)
+		target := rigName
+		if opts.TargetAgent != "" {
+			target = opts.TargetAgent
+		}
+		fmt.Printf("Would schedule %s → %s\n", beadID, target)
 		fmt.Printf("  Would create sling context bead\n")
 		if !opts.NoConvoy {
 			fmt.Printf("  Would create auto-convoy\n")
@@ -150,11 +302,14 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	}
 
 	// Build sling context fields
+	actor := detectActor()
 	fields := &capacity.SlingContextFields{
-		Version:    1,
-		WorkBeadID: beadID,
-		TargetRig:  rigName,
-		EnqueuedAt: time.Now().UTC().Format(time.RFC3339),
+		Version:     1,
+		WorkBeadID:  beadID,
+		TargetRig:   rigName,
+		TargetAgent: opts.TargetAgent,
+		EnqueuedBy:  actor,
+		EnqueuedAt:  time.Now().UTC().Format(time.RFC3339),
 	}
 	if opts.Formula != "" {
 		fields.Formula = opts.Formula
@@ -170,6 +325,18 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	}
 	if opts.BaseBranch != "" {
 		fields.BaseBranch = opts.BaseBranch
+	}
+	if opts.BaseRef != "" {
+		fields.BaseRef = opts.BaseRef
+	}
+	if opts.PublishRemote != "" {
+		fields.PublishRemote = opts.PublishRemote
+	}
+	if opts.PublishRef != "" {
+		fields.PublishRef = opts.PublishRef
+	}
+	if opts.PRTargetRef != "" {
+		fields.PRTargetRef = opts.PRTargetRef
 	}
 	if opts.ResumeBranch != "" {
 		fields.ResumeBranch = opts.ResumeBranch
@@ -195,11 +362,24 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("creating sling context: %w", err)
 	}
 
+	// A fresh explicit sling is the only thing that may lift a prior
+	// `gt scheduler clear` on this bead (gt-5ti). Best-effort: the context
+	// is already live either way, and RemoveLabels on an absent label is a
+	// no-op for beads without a prior clear.
+	if err := rigBeads.Update(beadID, beads.UpdateOptions{RemoveLabels: []string{capacity.LabelSchedulerCleared}}); err != nil {
+		fmt.Printf("%s Could not clear scheduler-cleared marker on %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
+	}
+
 	// Auto-convoy (unless --no-convoy)
 	if !opts.NoConvoy {
 		existingConvoy := isTrackedByConvoy(beadID)
 		if existingConvoy == "" {
-			convoyID, err := createAutoConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch)
+			convoyID, err := createAutoConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch, git.WorkRefs{
+				BaseRef:       opts.BaseRef,
+				PublishRemote: opts.PublishRemote,
+				PublishRef:    opts.PublishRef,
+				PRTargetRef:   opts.PRTargetRef,
+			})
 			if err != nil {
 				fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 			} else {
@@ -215,8 +395,10 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		}
 	}
 
-	actor := detectActor()
 	_ = events.LogFeed(events.TypeSchedulerEnqueue, actor, events.SchedulerEnqueuePayload(beadID, rigName))
+	// The context is now durable. Request prompt bounded scheduler cycles;
+	// heartbeat remains the fallback if the daemon is unavailable.
+	requestSchedulerWake(townRoot)
 
 	fmt.Printf("%s Scheduled %s → %s (context: %s)\n", style.Bold.Render("✓"), beadID, rigName, ctxBead.ID)
 	return nil
@@ -239,21 +421,26 @@ func runBatchSchedule(beadIDs []string, rigName, townRoot string) error {
 	for _, beadID := range beadIDs {
 		formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, rigName)
 		err := scheduleBead(beadID, rigName, ScheduleOptions{
-			Formula:      formula,
-			Args:         slingArgs,
-			Vars:         slingVars,
-			NoConvoy:     slingNoConvoy,
-			Owned:        slingOwned,
-			Merge:        slingMerge,
-			BaseBranch:   slingBaseBranch,
-			ResumeBranch: slingResumeBranch,
-			DryRun:       false,
-			Force:        slingForce,
-			NoMerge:      slingNoMerge,
-			Account:      slingAccount,
-			Agent:        slingAgent,
-			HookRawBead:  slingHookRawBead,
-			Ralph:        slingRalph,
+			Formula:       formula,
+			Args:          slingArgs,
+			Vars:          slingVars,
+			NoConvoy:      slingNoConvoy,
+			Owned:         slingOwned,
+			Merge:         slingMerge,
+			BaseBranch:    slingBaseBranch,
+			BaseRef:       slingBaseRef,
+			PublishRemote: slingPublishRemote,
+			PublishRef:    slingPublishRef,
+			PRTargetRef:   slingPRTargetRef,
+			ResumeBranch:  slingResumeBranch,
+			DryRun:        false,
+			Force:         slingForce,
+			NoMerge:       slingNoMerge,
+			ReviewOnly:    slingReviewOnly,
+			Account:       slingAccount,
+			Agent:         slingAgent,
+			HookRawBead:   slingHookRawBead,
+			Ralph:         slingRalph,
 		})
 		if err != nil {
 			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), beadID, err)
@@ -316,20 +503,11 @@ func resolveFormula(explicit string, hookRawBead bool, townRoot, rigName string)
 	return "mol-polecat-work"
 }
 
-// slingContextTTL is the maximum age of a sling context before it's considered
-// stale and ignored by areScheduled(). This prevents orphaned sling contexts
-// (from failed spawns or throttled dispatches) from permanently blocking tasks.
-// See GH#2279.
-const slingContextTTL = 30 * time.Minute
-
 // areScheduled returns a set of bead IDs that have open sling contexts.
 // Scans all rig beads dirs since sling contexts are created in the target
 // rig's beads dir (GH#3468). On error, fails closed: treats ALL requested
 // beads as scheduled to prevent false stranded detection and duplicate
 // scheduling attempts.
-//
-// Sling contexts older than slingContextTTL are ignored — they are likely
-// orphans from failed spawn attempts (GH#2279).
 func areScheduled(beadIDs []string) map[string]bool {
 	result := make(map[string]bool)
 	if len(beadIDs) == 0 {
@@ -346,22 +524,18 @@ func areScheduled(beadIDs []string) map[string]bool {
 	}
 
 	// Scan all rig beads dirs (sling contexts live in target rig's DB). (GH#3468)
-	contexts := listAllSlingContexts(townRoot)
-
-	// Build lookup of work bead IDs from open contexts, skipping stale ones.
-	scheduledWorkBeads := make(map[string]bool)
-	now := time.Now()
-	for _, ctx := range contexts {
-		// Skip stale sling contexts (GH#2279): contexts older than the TTL
-		// are likely orphans from failed spawn attempts. Ignoring them allows
-		// the task to appear as "ready" again for re-dispatch.
-		if ctx.CreatedAt != "" {
-			if created, err := time.Parse(time.RFC3339, ctx.CreatedAt); err == nil {
-				if now.Sub(created) > slingContextTTL {
-					continue
-				}
-			}
+	contexts, err := listAllSlingContexts(townRoot)
+	if err != nil {
+		for _, id := range beadIDs {
+			result[id] = true
 		}
+		return result
+	}
+
+	// Build lookup of work bead IDs from open contexts. Cleanup owns stale-state
+	// closure; idempotency must not use a different definition of scheduled.
+	scheduledWorkBeads := make(map[string]bool)
+	for _, ctx := range contexts {
 		fields := beads.ParseSlingContextFields(ctx.Description)
 		if fields != nil {
 			scheduledWorkBeads[fields.WorkBeadID] = true
@@ -420,7 +594,7 @@ func detectSchedulerIDType(id string) (string, error) {
 // not convoy or epic mode.
 var schedulerTaskOnlyFlagNames = []string{
 	"account", "agent", "ralph", "args", "var",
-	"merge", "base-branch", "no-convoy", "owned", "no-merge",
+	"merge", "base-branch", "no-convoy", "owned", "no-merge", "review-only",
 }
 
 // validateNoTaskOnlySchedulerFlags checks that no task-only flags were set.

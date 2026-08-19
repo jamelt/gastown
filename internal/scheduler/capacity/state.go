@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/testguard"
 )
 
 // SchedulerState represents the runtime operational state of the capacity scheduler.
@@ -62,6 +64,13 @@ func LoadState(townRoot string) (*SchedulerState, error) {
 // Uses write-to-temp + rename to prevent corruption from concurrent writers
 // (e.g., dispatch RecordDispatch racing with gt scheduler pause).
 func SaveState(townRoot string, state *SchedulerState) error {
+	// Fail closed before a test binary can write real scheduler capacity
+	// state (e.g. pausing/unpausing dispatch) into a non-isolated (i.e.
+	// live) town root. See gt-8ik.
+	if err := testguard.RequireIsolated("capacity.SaveState", townRoot); err != nil {
+		return err
+	}
+
 	path := stateFile(townRoot)
 	dir := filepath.Dir(path)
 

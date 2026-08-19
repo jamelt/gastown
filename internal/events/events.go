@@ -55,9 +55,9 @@ const (
 	TypeMassDeath    = "mass_death"    // Multiple sessions died in short window
 
 	// Witness patrol events
-	TypePatrolStarted   = "patrol_started"
-	TypePolecatChecked  = "polecat_checked"
-	TypePolecatNudged   = "polecat_nudged"
+	TypePatrolStarted    = "patrol_started"
+	TypePolecatChecked   = "polecat_checked"
+	TypePolecatNudged    = "polecat_nudged"
 	TypeEscalationSent   = "escalation_sent"
 	TypeEscalationAcked  = "escalation_acked"
 	TypeEscalationClosed = "escalation_closed"
@@ -70,10 +70,11 @@ const (
 	TypeMergeSkipped = "merge_skipped"
 
 	// Scheduler events
-	TypeSchedulerEnqueue        = "scheduler_enqueue"         // Bead scheduled for deferred dispatch
-	TypeSchedulerDispatch       = "scheduler_dispatch"        // Bead dispatched from scheduler
-	TypeSchedulerDispatchFailed = "scheduler_dispatch_failed" // Bead dispatch failed (requeued)
-	TypeSchedulerCloseRetry     = "scheduler_close_retry"     // Context close needed last-resort attempt
+	TypeSchedulerEnqueue         = "scheduler_enqueue"          // Bead scheduled for deferred dispatch
+	TypeSchedulerDispatch        = "scheduler_dispatch"         // Bead dispatched from scheduler
+	TypeSchedulerDispatchFailed  = "scheduler_dispatch_failed"  // Bead dispatch failed (requeued)
+	TypeSchedulerCloseRetry      = "scheduler_close_retry"      // Context close needed last-resort attempt
+	TypeSchedulerCapacityStarved = "scheduler_capacity_starved" // Ready work waiting with zero reusable_idle capacity
 )
 
 // EventsFile is the name of the raw events log.
@@ -366,5 +367,18 @@ func SchedulerDispatchFailedPayload(beadID, rig, errMsg string) map[string]inter
 		"bead":  beadID,
 		"rig":   rig,
 		"error": errMsg,
+	}
+}
+
+// SchedulerCapacityStarvedPayload creates a payload for the capacity-starvation
+// alarm: ready work is waiting for dispatch but there are zero reusable idle
+// polecats to reuse and no free spawn capacity, so the scheduler cannot make
+// progress without operator intervention.
+func SchedulerCapacityStarvedPayload(skipped, working, recoveryBlocked, reusableIdle int) map[string]interface{} {
+	return map[string]interface{}{
+		"skipped":          skipped,
+		"working":          working,
+		"recovery_blocked": recoveryBlocked,
+		"reusable_idle":    reusableIdle,
 	}
 }

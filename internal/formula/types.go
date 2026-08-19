@@ -115,6 +115,7 @@ type Synthesis struct {
 	Title       string   `toml:"title"`
 	Description string   `toml:"description"`
 	DependsOn   []string `toml:"depends_on"`
+	Agent       string   `toml:"agent"` // Runtime for convergence/synthesis; independent from leg agents.
 }
 
 // Step represents a sequential step in a workflow formula.

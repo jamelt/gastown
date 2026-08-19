@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,27 +14,33 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/deps"
-	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
-func TestBuildBdInitArgs_AlwaysIncludesServerPort(t *testing.T) {
+func TestBuildBdInitArgs_AlwaysIncludesServerPortWithoutReinit(t *testing.T) {
 	townDir := t.TempDir()
 	t.Setenv("GT_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_PORT", "")
 
 	args := buildBdInitArgs(townDir)
 
-	if len(args) != 7 {
-		t.Fatalf("expected 7 args, got %d: %v", len(args), args)
+	if len(args) != 8 {
+		t.Fatalf("expected 8 args, got %d: %v", len(args), args)
 	}
-	if args[4] != "--server-port" {
-		t.Fatalf("expected args[4] = --server-port, got %q", args[4])
+	if args[6] != "--server-port" {
+		t.Fatalf("expected args[6] = --server-port, got %q", args[6])
 	}
-	if args[5] != "3307" {
-		t.Fatalf("expected default port 3307, got %q", args[5])
+	if args[7] != "3307" {
+		t.Fatalf("expected default port 3307, got %q", args[7])
 	}
-	if args[6] != "--force" {
-		t.Fatalf("expected args[6] = --force, got %q", args[6])
+	for _, required := range []string{"--skip-agents", "--skip-hooks"} {
+		if !slices.Contains(args, required) {
+			t.Fatalf("expected %s in bd init args: %v", required, args)
+		}
+	}
+	for _, arg := range args {
+		if arg == "--force" || arg == "--reinit-local" {
+			t.Fatalf("expected no destructive reinit flag, got %v", args)
+		}
 	}
 }
 
@@ -44,13 +51,14 @@ func TestBuildBdInitArgs_RespectsGTDoltPortEnv(t *testing.T) {
 
 	args := buildBdInitArgs(townDir)
 
-	if args[5] != "4400" {
-		t.Fatalf("expected port 4400 from GT_DOLT_PORT, got %q", args[5])
+	if args[7] != "4400" {
+		t.Fatalf("expected port 4400 from GT_DOLT_PORT, got %q", args[7])
 	}
 }
 
 func TestBuildBdInitArgs_ConfigYAMLTakesPrecedence(t *testing.T) {
 	townDir := t.TempDir()
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
 	doltDataDir := filepath.Join(townDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -64,20 +72,182 @@ func TestBuildBdInitArgs_ConfigYAMLTakesPrecedence(t *testing.T) {
 
 	args := buildBdInitArgs(townDir)
 
-	if args[5] != "5500" {
-		t.Fatalf("expected port 5500 from config.yaml (precedence over env), got %q", args[5])
+	if args[7] != "5500" {
+		t.Fatalf("expected port 5500 from config.yaml (precedence over env), got %q", args[7])
 	}
 }
 
-func TestBuildBdInitArgs_PortMatchesDefaultConfig(t *testing.T) {
+func TestBdInitDoltConfig_ConfigYAMLHostTakesPrecedence(t *testing.T) {
 	townDir := t.TempDir()
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	t.Setenv("GT_DOLT_HOST", "stale-host")
+	doltDataDir := filepath.Join(townDir, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configYAML := "listener:\n  host: 127.0.0.2\n  port: 5500\n"
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte(configYAML), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	cfg := bdInitDoltConfig(townDir)
+	if cfg.Host != "127.0.0.2" {
+		t.Fatalf("expected host 127.0.0.2 from config.yaml (precedence over env), got %q", cfg.Host)
+	}
+}
+
+func TestBuildBdInitArgs_IgnoresTransientRunningState(t *testing.T) {
+	townDir := t.TempDir()
+	t.Setenv("GT_DOLT_PORT", "")
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	daemonDir := filepath.Join(townDir, "daemon")
+	if err := os.MkdirAll(daemonDir, 0755); err != nil {
+		t.Fatalf("mkdir daemon: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(daemonDir, "dolt-state.json"), []byte(`{"running":true,"port":4417}`), 0644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
 
 	args := buildBdInitArgs(townDir)
-	cfg := doltserver.DefaultConfig(townDir)
 
-	if args[5] != strconv.Itoa(cfg.Port) {
-		t.Fatalf("port should match DefaultConfig: args=%q, config=%d", args[5], cfg.Port)
+	if args[7] != "3307" {
+		t.Fatalf("expected default configured port 3307, got %q", args[7])
 	}
+}
+
+func TestWithBeadsDirEnvUsesHardenedBDEnv(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"rigdb"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DIR", "/wrong")
+	t.Setenv("BEADS_DB", "/wrong.db")
+	t.Setenv("BD_DB", "/wrong.bd")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrongdb")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_DATA_DIR", "/wrong/data")
+	t.Setenv("BEADS_DOLT_AUTO_START", "1")
+	t.Setenv("GT_DOLT_DATA", "/wrong/gt-data")
+	t.Setenv("GT_DOLT_HOST", "127.0.0.2")
+	t.Setenv("GT_DOLT_PORT", "5507")
+
+	env := withBeadsDirEnv(beadsDir)
+	got := installEnvMap(env)
+	if got["BEADS_DIR"] != beadsDir {
+		t.Fatalf("BEADS_DIR = %q, want %q in %v", got["BEADS_DIR"], beadsDir, env)
+	}
+	if got["BEADS_DOLT_SERVER_DATABASE"] != "rigdb" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want rigdb in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
+	}
+	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want 127.0.0.2 in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
+		t.Fatalf("ports = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	}
+	if got["BEADS_DOLT_AUTO_START"] != "0" || got["BD_DOLT_AUTO_COMMIT"] != "on" {
+		t.Fatalf("bd mutation guardrails missing in %v", env)
+	}
+	for _, key := range []string{"BEADS_DB", "BD_DB", "BEADS_DOLT_DATA_DIR", "GT_DOLT_DATA"} {
+		if value, ok := got[key]; ok {
+			t.Fatalf("%s leaked as %q in %v", key, value, env)
+		}
+	}
+}
+
+func TestWithBeadsDirEnvUsesTownConfigBeforeMetadataExists(t *testing.T) {
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test-town"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.2\n  port: 5507\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	t.Setenv("GT_DOLT_HOST", "stale-host")
+	t.Setenv("GT_DOLT_PORT", "4400")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
+
+	env := withBeadsDirEnv(beadsDir)
+	got := installEnvMap(env)
+	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want config host in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
+		t.Fatalf("ports = server:%q legacy:%q, want config port in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	}
+	if got["GT_DOLT_HOST"] != "127.0.0.2" || got["GT_DOLT_PORT"] != "5507" {
+		t.Fatalf("GT endpoint = %q:%q, want config endpoint in %v", got["GT_DOLT_HOST"], got["GT_DOLT_PORT"], env)
+	}
+}
+
+func TestWithBeadsDirEnvClearsStaleHostWhenConfigHasNoHost(t *testing.T) {
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test-town"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  port: 5507\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	t.Setenv("GT_DOLT_HOST", "stale-host")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	t.Setenv("GT_DOLT_PORT", "9999")
+
+	env := withBeadsDirEnv(beadsDir)
+	got := installEnvMap(env)
+	if _, ok := got["GT_DOLT_HOST"]; ok {
+		t.Fatalf("GT_DOLT_HOST leaked from config without host: %v", env)
+	}
+	if _, ok := got["BEADS_DOLT_SERVER_HOST"]; ok {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST leaked from config without host: %v", env)
+	}
+	if got["GT_DOLT_PORT"] != "5507" || got["BEADS_DOLT_SERVER_PORT"] != "5507" {
+		t.Fatalf("ports = GT:%q server:%q, want 5507 in %v", got["GT_DOLT_PORT"], got["BEADS_DOLT_SERVER_PORT"], env)
+	}
+}
+
+func installEnvMap(env []string) map[string]string {
+	out := make(map[string]string)
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func TestEnsureBeadsConfigYAML_CreatesWhenMissing(t *testing.T) {
@@ -93,7 +263,7 @@ func TestEnsureBeadsConfigYAML_CreatesWhenMissing(t *testing.T) {
 	}
 
 	got := string(data)
-	want := "prefix: hq\nissue-prefix: hq\ndolt.idle-timeout: \"0\"\n"
+	want := "prefix: hq\nissue-prefix: hq\ndolt.idle-timeout: \"0\"\nexport.auto: \"false\"\n"
 	if got != want {
 		t.Fatalf("config.yaml = %q, want %q", got, want)
 	}

@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -54,26 +56,7 @@ func findLocalBeadsDir() (string, error) {
 		}
 	}
 
-	// Fallback: walk up from CWD
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-
-	path := cwd
-	for {
-		if _, err := os.Stat(filepath.Join(path, ".beads")); err == nil {
-			return path, nil
-		}
-
-		parent := filepath.Dir(path)
-		if parent == path {
-			break // Reached root
-		}
-		path = parent
-	}
-
-	return "", fmt.Errorf("no .beads directory found")
+	return findCwdBeadsWorkDir()
 }
 
 // detectSender determines the current context's address.
@@ -153,6 +136,62 @@ func detectSenderFromRole(role string) string {
 		// Unknown role, try cwd detection
 		return detectSenderFromCwd()
 	}
+}
+
+// detectSenderVerified resolves the sender the same way detectSender does,
+// but when GT_ROLE claims an identity, cross-checks the claim against the
+// identity of the tmux session this process is actually a descendant of.
+// tmux.ResolveCurrentSession walks the kernel process-ancestry chain to find
+// that session, so it reflects where the process was really spawned, not
+// what its own env vars say -- unlike GT_ROLE, which any local caller can
+// set to an arbitrary value before invoking a subcommand (gt-9z0y: "GT_ROLE=
+// overseer gt mail send ..." forged the exact sender/actor attribution the
+// gt-p7gu --from fix was designed to block).
+//
+// Verification is skipped (the claim is trusted, matching detectSender's
+// pre-existing behavior) when no tmux ancestry can be resolved -- tests, CI,
+// and human terminals outside tmux are unaffected.
+func detectSenderVerified() (string, error) {
+	claimed := detectSender()
+	if os.Getenv("GT_ROLE") == "" {
+		return claimed, nil
+	}
+	verified, ok := verifiedSenderFromSession()
+	return resolveVerifiedSender(claimed, verified, ok)
+}
+
+// resolveVerifiedSender is the pure decision behind detectSenderVerified,
+// factored out so it can be unit tested without a live tmux session.
+func resolveVerifiedSender(claimed, verified string, verifiedOK bool) (string, error) {
+	if !verifiedOK || normalizeAddress(claimed) == normalizeAddress(verified) {
+		return claimed, nil
+	}
+	if strings.HasPrefix(claimed, "convoy/") {
+		// Sole recognized synthetic actor override -- same allowance already
+		// established for --from by gt-p7gu.
+		return claimed, nil
+	}
+	return "", fmt.Errorf("GT_ROLE claims sender %q but this process is running in a session that resolves to %q; refusing to send mail as an unverified identity (gt-9z0y)", claimed, verified)
+}
+
+// verifiedSenderFromSession derives an identity purely from the tmux session
+// this process is actually running under (see detectSenderVerified), not
+// from any environment variable. Returns ok=false when no tmux ancestry is
+// resolvable, meaning verification is unavailable rather than failed.
+func verifiedSenderFromSession() (string, bool) {
+	name, err := tmux.NewTmux().ResolveCurrentSession()
+	if err != nil || name == "" {
+		return "", false
+	}
+	identity, err := session.ParseSessionName(name)
+	if err != nil {
+		return "", false
+	}
+	addr := identity.Address()
+	if addr == "" {
+		return "", false
+	}
+	return addr, true
 }
 
 // detectSenderFromCwd is the legacy cwd-based detection for edge cases.

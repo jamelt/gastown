@@ -3,11 +3,13 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/witness"
@@ -41,6 +43,8 @@ Actions taken automatically:
   - Completion routing: MR cleanup wisps created, refinery nudged
 
 Use --notify to send mail when zombies with active work are detected.
+Long-running scan phases emit progress diagnostics to stderr so JSON stdout
+remains machine-readable while operators can see where a slow patrol is stuck.
 
 Examples:
   gt patrol scan                    # Scan current rig
@@ -59,14 +63,26 @@ func init() {
 	patrolCmd.AddCommand(patrolScanCmd)
 }
 
+var patrolScanProgressInterval = 10 * time.Second
+
 // PatrolScanOutput is the JSON output format for patrol scan results.
 type PatrolScanOutput struct {
-	Rig         string                    `json:"rig"`
-	Timestamp   string                    `json:"timestamp"`
-	Zombies     *PatrolScanZombieOutput   `json:"zombies"`
-	Stalls      *PatrolScanStallOutput    `json:"stalls,omitempty"`
-	Completions *PatrolScanCompleteOutput `json:"completions,omitempty"`
-	Receipts    []witness.PatrolReceipt   `json:"receipts,omitempty"`
+	Rig         string                     `json:"rig"`
+	Timestamp   string                     `json:"timestamp"`
+	Zombies     *PatrolScanZombieOutput    `json:"zombies"`
+	Stalls      *PatrolScanStallOutput     `json:"stalls,omitempty"`
+	Completions *PatrolScanCompleteOutput  `json:"completions,omitempty"`
+	Reconcile   *PatrolScanReconcileOutput `json:"reconcile,omitempty"`
+	Receipts    []witness.PatrolReceipt    `json:"receipts,omitempty"`
+}
+
+// PatrolScanReconcileOutput holds merge-requested cleanup-tracker
+// reconciliation results (gt-e95).
+type PatrolScanReconcileOutput struct {
+	Scanned    int      `json:"scanned"`
+	Closed     []string `json:"closed,omitempty"`
+	NeedsAudit []string `json:"needs_audit,omitempty"`
+	Errors     []string `json:"errors,omitempty"`
 }
 
 // PatrolScanZombieOutput holds zombie detection results.
@@ -106,9 +122,9 @@ type PatrolScanStallItem struct {
 
 // PatrolScanCompleteOutput holds completion discovery results.
 type PatrolScanCompleteOutput struct {
-	Checked   int                       `json:"checked"`
-	Found     int                       `json:"found"`
-	Completed []PatrolScanCompleteItem  `json:"completed,omitempty"`
+	Checked   int                      `json:"checked"`
+	Found     int                      `json:"found"`
+	Completed []PatrolScanCompleteItem `json:"completed,omitempty"`
 }
 
 // PatrolScanCompleteItem is a single completion discovery in scan output.
@@ -152,9 +168,22 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	// Note: DetectZombiePolecats takes a router param but does NOT send mail
 	// internally — it only uses the router for workspace context. Notifications
 	// are sent exclusively below via --notify, avoiding double-send.
-	zombieResult := witness.DetectZombiePolecats(bd, workDir, rigName, router)
-	stallResult := witness.DetectStalledPolecats(workDir, rigName)
-	completionResult := witness.DiscoverCompletions(bd, workDir, rigName, router)
+	diagnostics := cmd.ErrOrStderr()
+	zombieResult := runPatrolScanPhase(diagnostics, "zombie detection", func() *witness.DetectZombiePolecatsResult {
+		return witness.DetectZombiePolecats(bd, workDir, rigName, router)
+	})
+	stallResult := runPatrolScanPhase(diagnostics, "stall detection", func() *witness.DetectStalledPolecatsResult {
+		return witness.DetectStalledPolecats(workDir, rigName)
+	})
+	completionResult := runPatrolScanPhase(diagnostics, "completion discovery", func() *witness.DiscoverCompletionsResult {
+		return witness.DiscoverCompletions(bd, workDir, rigName, router)
+	})
+	// Runs after zombie detection so a merge-requested wisp closed here in
+	// the same cycle it's proven merged doesn't reorder the zombie/nuke
+	// eligibility gates that already ran above (gt-e95).
+	reconcileResult := runPatrolScanPhase(diagnostics, "cleanup-tracker reconciliation", func() *witness.ReconcileResult {
+		return witness.ReconcileMergeRequestedWisps(bd, beads.New(workDir), workDir)
+	})
 
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
@@ -171,10 +200,54 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, reconcileResult, receipts)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, reconcileResult, receipts)
+}
+
+func runPatrolScanPhase[T any](diagnostics io.Writer, name string, fn func() T) T {
+	start := time.Now()
+	if diagnostics != nil {
+		fmt.Fprintf(diagnostics, "gt patrol scan: starting %s\n", name)
+	}
+
+	done := make(chan T, 1)
+	go func() {
+		done <- fn()
+	}()
+
+	if patrolScanProgressInterval <= 0 {
+		result := <-done
+		if diagnostics != nil {
+			fmt.Fprintf(diagnostics, "gt patrol scan: finished %s in %s\n", name, formatPatrolScanElapsed(time.Since(start)))
+		}
+		return result
+	}
+
+	ticker := time.NewTicker(patrolScanProgressInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case result := <-done:
+			if diagnostics != nil {
+				fmt.Fprintf(diagnostics, "gt patrol scan: finished %s in %s\n", name, formatPatrolScanElapsed(time.Since(start)))
+			}
+			return result
+		case <-ticker.C:
+			if diagnostics != nil {
+				fmt.Fprintf(diagnostics, "gt patrol scan: still running %s after %s\n", name, formatPatrolScanElapsed(time.Since(start)))
+			}
+		}
+	}
+}
+
+func formatPatrolScanElapsed(elapsed time.Duration) string {
+	if elapsed < time.Second {
+		return elapsed.Round(time.Millisecond).String()
+	}
+	return elapsed.Round(time.Second).String()
 }
 
 func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
@@ -229,7 +302,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, reconcileResult *witness.ReconcileResult, receipts []witness.PatrolReceipt) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -305,12 +378,25 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 		output.Completions = co
 	}
 
+	// Cleanup-tracker reconciliation
+	if reconcileResult != nil {
+		ro := &PatrolScanReconcileOutput{
+			Scanned:    reconcileResult.Scanned,
+			Closed:     reconcileResult.Closed,
+			NeedsAudit: reconcileResult.NeedsAudit,
+		}
+		for _, e := range reconcileResult.Errors {
+			ro.Errors = append(ro.Errors, e.Error())
+		}
+		output.Reconcile = ro
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, _ []witness.PatrolReceipt) error {
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, reconcileResult *witness.ReconcileResult, _ []witness.PatrolReceipt) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -391,6 +477,30 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 				}
 				fmt.Println()
 				fmt.Printf("    Action: %s\n", d.Action)
+			}
+		}
+		fmt.Println()
+	}
+
+	// Cleanup-tracker reconciliation
+	if reconcileResult != nil && (len(reconcileResult.Closed) > 0 || len(reconcileResult.NeedsAudit) > 0 || patrolScanVerbose) {
+		fmt.Printf("%s Cleanup-Tracker Reconciliation: scanned %d wisp(s)\n",
+			style.Bold.Render("🧹"), reconcileResult.Scanned)
+
+		if len(reconcileResult.Closed) == 0 && len(reconcileResult.NeedsAudit) == 0 {
+			fmt.Printf("  %s\n", style.Dim.Render("Nothing to reconcile"))
+		} else {
+			for _, id := range reconcileResult.Closed {
+				fmt.Printf("  ✓ %s: closed (merged)\n", id)
+			}
+			for _, id := range reconcileResult.NeedsAudit {
+				fmt.Printf("  ⚠ %s: needs audit (no correlated MR found)\n", id)
+			}
+		}
+		if len(reconcileResult.Errors) > 0 && patrolScanVerbose {
+			fmt.Printf("  Errors: %d\n", len(reconcileResult.Errors))
+			for _, e := range reconcileResult.Errors {
+				fmt.Printf("    - %v\n", e)
 			}
 		}
 		fmt.Println()

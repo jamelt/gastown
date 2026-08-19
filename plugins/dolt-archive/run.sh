@@ -10,8 +10,8 @@ set -euo pipefail
 
 # --- Configuration -----------------------------------------------------------
 
-DOLT_HOST="${DOLT_HOST:-127.0.0.1}"
-DOLT_PORT="${DOLT_PORT:-3307}"
+DOLT_HOST="${GT_DOLT_HOST:-${DOLT_HOST:-127.0.0.1}}"
+DOLT_PORT="${GT_DOLT_PORT:-${DOLT_PORT:-3307}}"
 DOLT_USER="${DOLT_USER:-root}"
 DOLT_DATA_DIR="${DOLT_DATA_DIR:-$HOME/gt/.dolt-data}"
 JSONL_EXPORT_DIR="$HOME/gt/.dolt-archive/jsonl"
@@ -224,9 +224,8 @@ if [[ "$EXPORT_FAILED" -gt 0 ]] || [[ "$DOLT_PUSH_FAILED" -gt 0 ]]; then
   RESULT="warning"
 fi
 
-bd create "$SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:dolt-archive,result:$RESULT \
-  -d "$SUMMARY" --silent 2>/dev/null || true
+gt plugin record-run --plugin dolt-archive --result "$RESULT" \
+  --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 
 if [[ "$EXPORT_FAILED" -gt 0 ]]; then
   gt escalate "dolt-archive: JSONL export failed for $EXPORT_FAILED databases ($EXPORT_ERRORS)" \

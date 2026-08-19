@@ -1,9 +1,35 @@
 package daemon
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
+
+// TestReapWispsInlineSafetyCheckIsPerDatabase is a regression test for
+// gt-reaper-alert-flood-root-cause: the open-wisp safety-net check must be
+// evaluated per database (inside the reap loop), never against a
+// cross-database sum — summing first makes the check scale with the number
+// of monitored databases rather than any single database's health.
+func TestReapWispsInlineSafetyCheckIsPerDatabase(t *testing.T) {
+	data, err := os.ReadFile("wisp_reaper.go")
+	if err != nil {
+		t.Fatalf("read wisp_reaper.go: %v", err)
+	}
+	source := string(data)
+	if strings.Contains(source, "totalOpen > wispAlertThreshold") {
+		t.Fatal("reapWispsInline should not compare a cross-database totalOpen sum against wispAlertThreshold")
+	}
+	if !strings.Contains(source, "reaper.ExceedsOpenWispSafetyThreshold(result.OpenRemain)") {
+		t.Fatal("reapWispsInline should evaluate ExceedsOpenWispSafetyThreshold per database (result.OpenRemain), inside the reap loop")
+	}
+}
 
 func TestWispReaperInterval(t *testing.T) {
 	// Default (now 1h after Dog-driven refactor)
@@ -71,5 +97,72 @@ func TestDefaultReaperIntervalIsOneHour(t *testing.T) {
 	// Verify the default changed from 30m to 1h per issue gt-caf7.
 	if defaultWispReaperInterval != 1*time.Hour {
 		t.Errorf("expected default interval 1h, got %v", defaultWispReaperInterval)
+	}
+}
+
+func TestDispatchReaperDogUsesDogPoolSling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock")
+	}
+
+	townRoot := t.TempDir()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "gt-args.log")
+	fakeGT := filepath.Join(binDir, "gt")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", logPath)
+	if err := os.WriteFile(fakeGT, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		gtPath: fakeGT,
+	}
+	if err := d.dispatchReaperDog(map[string]string{"max_age": "1h"}); err != nil {
+		t.Fatalf("dispatchReaperDog() error = %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read gt args log: %v", err)
+	}
+	args := strings.Split(strings.TrimSpace(string(data)), "\n")
+	wantPrefix := []string{"sling", constants.MolDogReaper, "deacon/dogs"}
+	if len(args) < len(wantPrefix) {
+		t.Fatalf("gt args = %v, want prefix %v", args, wantPrefix)
+	}
+	for i, want := range wantPrefix {
+		if args[i] != want {
+			t.Fatalf("gt arg %d = %q, want %q (all args: %v)", i, args[i], want, args)
+		}
+	}
+}
+
+func TestDoltServerHostIgnoresStaleBeadsHost(t *testing.T) {
+	t.Setenv("GT_DOLT_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}}
+	if got := d.doltServerHost(); got != "127.0.0.1" {
+		t.Fatalf("doltServerHost() = %q, want default localhost", got)
+	}
+}
+
+func TestDoltServerHostUsesConfiguredTownHost(t *testing.T) {
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	t.Setenv("GT_DOLT_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	townRoot := t.TempDir()
+	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.2\n  port: 5507\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{config: &Config{TownRoot: townRoot}}
+	if got := d.doltServerHost(); got != "127.0.0.2" {
+		t.Fatalf("doltServerHost() = %q, want configured host", got)
 	}
 }

@@ -499,6 +499,97 @@ func TestConcurrentEnqueueNoDuplicateLoss(t *testing.T) {
 	}
 }
 
+// --- EnqueueUniqueByKindThread tests ---
+
+func TestEnqueueUniqueByKindThread_SecondCallIsNoOp(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-unique"
+
+	n := QueuedNudge{Sender: "system", Message: "first", Kind: "reply-reminder", ThreadID: "thread-1"}
+	written, err := EnqueueUniqueByKindThread(townRoot, session, n)
+	if err != nil {
+		t.Fatalf("first EnqueueUniqueByKindThread: %v", err)
+	}
+	if !written {
+		t.Fatal("first call should have written a new nudge")
+	}
+
+	n2 := QueuedNudge{Sender: "system", Message: "retry", Kind: "reply-reminder", ThreadID: "thread-1"}
+	written, err = EnqueueUniqueByKindThread(townRoot, session, n2)
+	if err != nil {
+		t.Fatalf("second EnqueueUniqueByKindThread: %v", err)
+	}
+	if written {
+		t.Fatal("second call for the same Kind+ThreadID should have been a no-op")
+	}
+
+	pending, err := Pending(townRoot, session)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("Pending = %d, want 1 (duplicate reminder should not have been queued)", pending)
+	}
+}
+
+func TestEnqueueUniqueByKindThread_DifferentThreadStillQueues(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-unique-distinct"
+
+	if _, err := EnqueueUniqueByKindThread(townRoot, session, QueuedNudge{Sender: "system", Kind: "reply-reminder", ThreadID: "thread-1"}); err != nil {
+		t.Fatalf("enqueue thread-1: %v", err)
+	}
+	if _, err := EnqueueUniqueByKindThread(townRoot, session, QueuedNudge{Sender: "system", Kind: "reply-reminder", ThreadID: "thread-2"}); err != nil {
+		t.Fatalf("enqueue thread-2: %v", err)
+	}
+
+	pending, err := Pending(townRoot, session)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 2 {
+		t.Fatalf("Pending = %d, want 2 (distinct threads should both queue)", pending)
+	}
+}
+
+// TestConcurrentEnqueueUniqueByKindThreadNoDuplicates verifies that concurrent
+// retries for the same Kind+ThreadID (e.g. a mail send retried after a
+// transient failure) can never result in more than one queued reminder —
+// the scenario EnqueueUniqueByKindThread exists to close off.
+func TestConcurrentEnqueueUniqueByKindThreadNoDuplicates(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-unique-concurrent"
+
+	const count = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, count)
+
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n := QueuedNudge{Sender: "system", Message: "retry reminder", Kind: "reply-reminder", ThreadID: "thread-race"}
+			if _, err := EnqueueUniqueByKindThread(townRoot, session, n); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent EnqueueUniqueByKindThread failed: %v", err)
+	}
+
+	pending, err := Pending(townRoot, session)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("Pending = %d, want 1 (concurrent retries raced past dedup)", pending)
+	}
+}
+
 // --- DeliverAfter tests ---
 
 // TestDrainSkipsDeferredNudge verifies that a nudge with a future DeliverAfter
@@ -649,6 +740,100 @@ func TestRemoveKindByThread(t *testing.T) {
 	}
 	if nudges[1].Message != "other-thread" {
 		t.Fatalf("nudges[1].Message = %q, want %q", nudges[1].Message, "other-thread")
+	}
+}
+
+// TestRemoveKindByThreadClaimedFile simulates the race where a reply arrives
+// and calls RemoveKindByThread while a matching reminder has already been
+// claimed by an in-flight Drain (renamed to .claimed.<suffix>) but not yet
+// delivered. RemoveKindByThread must find and remove the claimed file too,
+// not just plain .json files, so the stale reminder isn't delivered anyway.
+func TestRemoveKindByThreadClaimedFile(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-claimed-race"
+
+	dir := filepath.Join(townRoot, ".runtime", "nudge_queue", session)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A matching reminder claimed by an in-flight Drain (not yet delivered).
+	claimedPath := filepath.Join(dir, "100.json.claimed.deadbeef")
+	claimedBody := `{"sender":"system","message":"remove-me","kind":"reply-reminder","thread_id":"thread-1"}`
+	if err := os.WriteFile(claimedPath, []byte(claimedBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unrelated claimed file (different thread) that must survive.
+	otherClaimedPath := filepath.Join(dir, "200.json.claimed.cafebabe")
+	otherClaimedBody := `{"sender":"system","message":"keep-me","kind":"reply-reminder","thread_id":"thread-2"}`
+	if err := os.WriteFile(otherClaimedPath, []byte(otherClaimedBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := RemoveKindByThread(townRoot, session, "reply-reminder", "thread-1")
+	if err != nil {
+		t.Fatalf("RemoveKindByThread: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	if _, err := os.Stat(claimedPath); !os.IsNotExist(err) {
+		t.Error("matching claimed file should have been removed")
+	}
+	if _, err := os.Stat(otherClaimedPath); os.IsNotExist(err) {
+		t.Error("unrelated claimed file should NOT have been removed")
+	}
+}
+
+func TestEnqueueUniqueByKindThreadConcurrent(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-unique-reminder"
+	const writers = 20
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	created := make(chan bool, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			added, err := EnqueueUniqueByKindThread(townRoot, session, QueuedNudge{
+				Sender:   "system",
+				Message:  "reply via mail",
+				Kind:     "reply-reminder",
+				ThreadID: "thread-one",
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			created <- added
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(created)
+
+	for err := range errs {
+		t.Errorf("EnqueueUniqueByKindThread: %v", err)
+	}
+	addedCount := 0
+	for added := range created {
+		if added {
+			addedCount++
+		}
+	}
+	if addedCount != 1 {
+		t.Fatalf("created count = %d, want 1", addedCount)
+	}
+	pending, err := Pending(townRoot, session)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("Pending = %d, want 1", pending)
 	}
 }
 

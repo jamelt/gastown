@@ -94,6 +94,7 @@ func newTestEngineer(t *testing.T, workDir string, g *gitpkg.Git) *Engineer {
 	e.git = g
 	e.workDir = workDir
 	e.output = &bytes.Buffer{}
+	e.testAllowSyntheticMRs = true
 	// No-op merge slot functions for tests
 	e.mergeSlotEnsureExists = func() (string, error) { return "test-slot", nil }
 	e.mergeSlotAcquire = func(holder string, addWaiter bool) (*beads.MergeSlotStatus, error) {
@@ -131,6 +132,24 @@ func TestDefaultBatchConfig(t *testing.T) {
 	if !cfg.RetryBatchOnFlaky {
 		t.Error("expected RetryBatchOnFlaky true")
 	}
+}
+
+func TestFastForwardBatch_BlocksForkBackedDefaultPush(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	addDistinctUpstreamRemote(t, workDir, g)
+	e := newTestEngineer(t, workDir, g)
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	writeFile(t, workDir, "batched.txt", "batched\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "batch result")
+
+	result := e.fastForwardBatch(context.Background(), nil, "main", &BatchResult{})
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "refusing direct push") {
+		t.Fatalf("expected fork-backed default push refusal, got: %+v", result)
+	}
+	assertOriginMainUnchangedAndReset(t, workDir, before)
 }
 
 // --- AssembleBatch tests ---
@@ -360,6 +379,36 @@ func TestBuildRebaseStack_MissingBranch(t *testing.T) {
 	}
 }
 
+func TestBuildRebaseStack_RejectsAdvancedSourceBranch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "feature-advanced"
+	createFeatureBranch(t, workDir, branch, "a.txt", "submitted\n")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "checkout", branch)
+	writeFile(t, workDir, "later.txt", "not submitted\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: later")
+	run(t, workDir, "git", "checkout", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	batch := []*MRInfo{{
+		ID:        "mr-advanced",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: commit,
+	}}
+
+	_, _, err := e.BuildRebaseStack(context.Background(), batch, "main")
+	if err == nil {
+		t.Fatal("BuildRebaseStack succeeded for advanced source branch")
+	}
+	if !strings.Contains(err.Error(), "changed from submitted head") {
+		t.Fatalf("BuildRebaseStack error = %q, want submitted-head drift", err.Error())
+	}
+}
+
 // --- ProcessBatch tests ---
 
 func TestProcessBatch_EmptyBatch(t *testing.T) {
@@ -430,6 +479,43 @@ func TestProcessBatch_MultipleMRs_AllPass(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(workDir, f)); os.IsNotExist(err) {
 			t.Errorf("expected %s on main after batch merge", f)
 		}
+	}
+}
+
+// TestProcessBatch_NoOpMRInBatch covers gt-v2zr for the batch path: a batch
+// containing an already-landed (0-commits-ahead) MR alongside a real MR must land
+// cleanly. The no-op MR is handled (not failed) and contributes no commits, so the
+// batch tip reflects only the real MR's work. (Close-reason=no-op on the MR bead is
+// asserted by the Dolt-backed TestEngineerCloseMRWithReasonRecordsNoOp.)
+func TestProcessBatch_NoOpMRInBatch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-real", "real.txt", "real work\n")
+	// No-op MR: branch points at main's tip, so it has 0 commits ahead of target.
+	run(t, workDir, "git", "branch", "feature-noop", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	batch := []*MRInfo{
+		makeMR("mr-noop", "feature-noop", "main"),
+		makeMR("mr-real", "feature-real", "main"),
+	}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	// A no-op is handled successfully, not treated as a failure.
+	if len(result.Merged) != 2 {
+		t.Fatalf("expected 2 handled MRs, got %d: %v", len(result.Merged), stackedIDs(result.Merged))
+	}
+	if len(result.Conflicts) != 0 || len(result.Culprits) != 0 {
+		t.Fatalf("unexpected conflicts=%v culprits=%v", stackedIDs(result.Conflicts), stackedIDs(result.Culprits))
+	}
+	// The real work landed and the no-op branch contributed nothing.
+	run(t, workDir, "git", "checkout", "main")
+	if _, err := os.Stat(filepath.Join(workDir, "real.txt")); os.IsNotExist(err) {
+		t.Error("expected real.txt on main after batch merge")
 	}
 }
 
@@ -823,7 +909,7 @@ func TestGetMergeMessage_Fallback(t *testing.T) {
 	}
 
 	msg := e.getMergeMessage(mr)
-	if !strings.Contains(msg, "Squash merge") {
+	if !strings.Contains(msg, "Merge") {
 		t.Errorf("expected fallback message, got %q", msg)
 	}
 	if !strings.Contains(msg, "gt-abc") {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,6 +17,389 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+func TestWitnessHasSubmittableWorkUsesBranchTargetStatus(t *testing.T) {
+	repo := setupWitnessSquashPreservedRepo(t)
+	if got := witnessHasSubmittableWork(repo, "origin", []string{"integration/test"}); got {
+		t.Fatal("squash-preserved branch should not require MQ submission through witness helper")
+	}
+
+	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\nthree\n")
+	runWitnessGit(t, repo, "add", "feature.txt")
+	runWitnessGit(t, repo, "commit", "-m", "extra local work")
+	if got := witnessHasSubmittableWork(repo, "origin", []string{"integration/test"}); !got {
+		t.Fatal("new local work after squash preservation should still require MQ submission")
+	}
+}
+
+func TestVerifyBranchAlreadyMergedUsesBranchTargetStatus(t *testing.T) {
+	townRoot, workDir := setupSlotOpenTestTown(t)
+	repo := filepath.Join(townRoot, "gastown", "polecats", "institute", "gastown")
+	setupWitnessSquashPreservedRepoAt(t, repo, filepath.Join(t.TempDir(), "remote.git"))
+	runWitnessGit(t, repo, "push", "origin", "integration/test:main")
+
+	merged, err := _verifyBranchAlreadyMerged(workDir, "gastown", "institute")
+	if err != nil {
+		t.Fatalf("_verifyBranchAlreadyMerged: %v", err)
+	}
+	if !merged {
+		t.Fatal("squash-preserved branch on advanced default target should be treated as already merged")
+	}
+
+	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\nthree\n")
+	runWitnessGit(t, repo, "add", "feature.txt")
+	runWitnessGit(t, repo, "commit", "-m", "extra local work")
+	merged, err = _verifyBranchAlreadyMerged(workDir, "gastown", "institute")
+	if err != nil {
+		t.Fatalf("_verifyBranchAlreadyMerged after extra work: %v", err)
+	}
+	if merged {
+		t.Fatal("new local work after squash preservation should not be treated as already merged")
+	}
+}
+
+func setupWitnessSquashPreservedRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	repo := filepath.Join(root, "repo")
+	setupWitnessSquashPreservedRepoAt(t, repo, remote)
+	return repo
+}
+
+func setupWitnessSquashPreservedRepoAt(t *testing.T, repo, remote string) {
+	t.Helper()
+	runWitnessGit(t, filepath.Dir(remote), "init", "--bare", remote)
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runWitnessGit(t, repo, "init")
+	runWitnessGit(t, repo, "config", "user.email", "test@example.com")
+	runWitnessGit(t, repo, "config", "user.name", "Test User")
+	witnessWriteFile(t, filepath.Join(repo, "README.md"), "base\n")
+	runWitnessGit(t, repo, "add", "README.md")
+	runWitnessGit(t, repo, "commit", "-m", "base")
+	runWitnessGit(t, repo, "branch", "-M", "main")
+	runWitnessGit(t, repo, "remote", "add", "origin", remote)
+	runWitnessGit(t, repo, "push", "-u", "origin", "main")
+	runWitnessGit(t, repo, "switch", "-c", "integration/test")
+	runWitnessGit(t, repo, "push", "-u", "origin", "integration/test")
+	if err := exec.Command("git", "-C", repo, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
+		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
+	}
+
+	runWitnessGit(t, repo, "switch", "-c", "polecat/squash")
+	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\n")
+	runWitnessGit(t, repo, "add", "feature.txt")
+	runWitnessGit(t, repo, "commit", "-m", "checkpoint one")
+	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\n")
+	runWitnessGit(t, repo, "add", "feature.txt")
+	runWitnessGit(t, repo, "commit", "-m", "checkpoint two")
+	runWitnessGit(t, repo, "switch", "integration/test")
+	runWitnessGit(t, repo, "merge", "--squash", "polecat/squash")
+	runWitnessGit(t, repo, "commit", "-m", "squash polecat work")
+	witnessWriteFile(t, filepath.Join(repo, "target.txt"), "target advanced\n")
+	runWitnessGit(t, repo, "add", "target.txt")
+	runWitnessGit(t, repo, "commit", "-m", "advance target")
+	runWitnessGit(t, repo, "push", "origin", "integration/test")
+	runWitnessGit(t, repo, "switch", "polecat/squash")
+}
+
+func witnessWriteFile(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runWitnessGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
+func setupSlotOpenTestTown(t *testing.T) (string, string) {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(townRoot, "gastown", "witness")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot, workDir
+}
+
+func assertNoMayorEvents(t *testing.T, townRoot string) {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(townRoot, "events", "mayor", "*.event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("mayor event files = %v, want none", paths)
+	}
+}
+
+func setupMayorMailFallback(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "mail.log")
+	t.Setenv("GT_TEST_MAYOR_MAIL_LOG", logPath)
+	t.Setenv("PATH", binDir)
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$GT_TEST_MAYOR_MAIL_LOG\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return logPath
+}
+
+func assertMayorMailFallback(t *testing.T, logPath string) {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read mayor mail fallback: %v", err)
+	}
+	if !strings.Contains(string(data), "mail send mayor/") {
+		t.Fatalf("mayor mail fallback = %q, want mail send mayor/", data)
+	}
+}
+
+func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
+	townRoot, workDir := setupSlotOpenTestTown(t)
+
+	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeDeferred))
+
+	assertNoMayorEvents(t, townRoot)
+}
+
+func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	townRoot, workDir := setupSlotOpenTestTown(t)
+
+	prevRecovery := slotOpenRecoveryCheck
+	prevDecision := slotOpenDecisionForNotify
+	prevScheduler := runSchedulerForSlotOpen
+	t.Cleanup(func() {
+		slotOpenRecoveryCheck = prevRecovery
+		slotOpenDecisionForNotify = prevDecision
+		runSchedulerForSlotOpen = prevScheduler
+	})
+
+	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+		return `{"verdict":"SAFE_TO_NUKE"}`, nil
+	}
+	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+		return polecat.SlotReuseDecision{Reusable: true}
+	}
+	called := false
+	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+		called = true
+		if gotTownRoot != townRoot {
+			t.Fatalf("townRoot = %q, want %q", gotTownRoot, townRoot)
+		}
+		return slotOpenSchedulerResult{Dispatched: 1}, nil
+	}
+
+	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+
+	if !called {
+		t.Fatal("scheduler trigger was not called")
+	}
+	assertNoMayorEvents(t, townRoot)
+}
+
+func TestNotifyMayorSlotOpen_DispatchThenEmptyNotifiesWithoutEvent(t *testing.T) {
+	mailLog := setupMayorMailFallback(t)
+	townRoot, workDir := setupSlotOpenTestTown(t)
+
+	prevRecovery := slotOpenRecoveryCheck
+	prevDecision := slotOpenDecisionForNotify
+	prevScheduler := runSchedulerForSlotOpen
+	t.Cleanup(func() {
+		slotOpenRecoveryCheck = prevRecovery
+		slotOpenDecisionForNotify = prevDecision
+		runSchedulerForSlotOpen = prevScheduler
+	})
+
+	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+		return `{"verdict":"SAFE_TO_NUKE"}`, nil
+	}
+	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+		return polecat.SlotReuseDecision{Reusable: true}
+	}
+	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+		var result slotOpenSchedulerResult
+		result.Ran = true
+		result.Dispatched = 1
+		result.After.Capacity.Max = 10
+		result.After.Capacity.Free = 1
+		result.After.QueuedReady = 0
+		return result, nil
+	}
+
+	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+
+	assertNoMayorEvents(t, townRoot)
+	assertMayorMailFallback(t, mailLog)
+}
+
+func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	townRoot, workDir := setupSlotOpenTestTown(t)
+
+	prevRecovery := slotOpenRecoveryCheck
+	prevDecision := slotOpenDecisionForNotify
+	prevScheduler := runSchedulerForSlotOpen
+	t.Cleanup(func() {
+		slotOpenRecoveryCheck = prevRecovery
+		slotOpenDecisionForNotify = prevDecision
+		runSchedulerForSlotOpen = prevScheduler
+	})
+
+	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+		return `{"verdict":"SAFE_TO_NUKE"}`, nil
+	}
+	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+		return polecat.SlotReuseDecision{Reusable: true}
+	}
+	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+		return slotOpenSchedulerResult{Dispatched: 1}, errors.New("status read failed")
+	}
+
+	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+
+	assertNoMayorEvents(t, townRoot)
+}
+
+func TestNotifyMayorSlotOpen_QueueEmptyNotifiesWithoutEvent(t *testing.T) {
+	mailLog := setupMayorMailFallback(t)
+	townRoot, workDir := setupSlotOpenTestTown(t)
+
+	prevRecovery := slotOpenRecoveryCheck
+	prevDecision := slotOpenDecisionForNotify
+	prevScheduler := runSchedulerForSlotOpen
+	t.Cleanup(func() {
+		slotOpenRecoveryCheck = prevRecovery
+		slotOpenDecisionForNotify = prevDecision
+		runSchedulerForSlotOpen = prevScheduler
+	})
+
+	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+		return `{"verdict":"SAFE_TO_NUKE"}`, nil
+	}
+	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+		return polecat.SlotReuseDecision{Reusable: true}
+	}
+	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+		var result slotOpenSchedulerResult
+		result.Before.Capacity.Max = 10
+		result.Before.Capacity.Free = 2
+		result.Before.QueuedReady = 0
+		return result, nil
+	}
+
+	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+
+	assertNoMayorEvents(t, townRoot)
+	assertMayorMailFallback(t, mailLog)
+}
+
+func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	townRoot, workDir := setupSlotOpenTestTown(t)
+
+	prevRecovery := slotOpenRecoveryCheck
+	prevDecision := slotOpenDecisionForNotify
+	prevScheduler := runSchedulerForSlotOpen
+	t.Cleanup(func() {
+		slotOpenRecoveryCheck = prevRecovery
+		slotOpenDecisionForNotify = prevDecision
+		runSchedulerForSlotOpen = prevScheduler
+	})
+
+	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+		return `{"verdict":"SAFE_TO_NUKE"}`, nil
+	}
+	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+		return polecat.SlotReuseDecision{Reusable: true}
+	}
+	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+		var result slotOpenSchedulerResult
+		result.Before.Capacity.Max = 10
+		result.Before.Capacity.Free = 1
+		result.Before.QueuedReady = 1
+		result.After = result.Before
+		result.Ran = true
+		return result, nil
+	}
+
+	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+
+	assertNoMayorEvents(t, townRoot)
+}
+
+func TestNotifyMayorSlotOpen_NoDispatchAfterCapacityFillsSuppressesMayor(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	townRoot, workDir := setupSlotOpenTestTown(t)
+
+	prevRecovery := slotOpenRecoveryCheck
+	prevDecision := slotOpenDecisionForNotify
+	prevScheduler := runSchedulerForSlotOpen
+	t.Cleanup(func() {
+		slotOpenRecoveryCheck = prevRecovery
+		slotOpenDecisionForNotify = prevDecision
+		runSchedulerForSlotOpen = prevScheduler
+	})
+
+	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+		return `{"verdict":"SAFE_TO_NUKE"}`, nil
+	}
+	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+		return polecat.SlotReuseDecision{Reusable: true}
+	}
+	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+		var result slotOpenSchedulerResult
+		result.Before.Capacity.Max = 10
+		result.Before.Capacity.Free = 1
+		result.Before.QueuedReady = 1
+		result.After.Capacity.Max = 10
+		result.After.Capacity.Free = 0
+		result.After.QueuedReady = 1
+		result.Ran = true
+		return result, nil
+	}
+
+	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+
+	assertNoMayorEvents(t, townRoot)
+}
+
+func TestParseSchedulerRunDispatched(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{name: "dispatched", output: "\n✓ Dispatched 2, failed 0 (reason: batch)\n", want: 2},
+		{name: "skipped", output: "\n○ Skipped 1 bead(s) — zero capacity\n", want: 0},
+		{name: "cleanup only", output: "", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseSchedulerRunDispatched(tt.output); got != tt.want {
+				t.Fatalf("parseSchedulerRunDispatched() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestShouldNotifyMayorSlotOpenRequiresSafeRecovery(t *testing.T) {
 	prev := slotOpenRecoveryCheck
@@ -67,6 +451,37 @@ func TestShouldNotifyMayorSlotOpenRequiresSafeRecovery(t *testing.T) {
 			}
 			if tt.wantMsg != "" && !strings.Contains(gotMsg, tt.wantMsg) {
 				t.Fatalf("message %q does not contain %q", gotMsg, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestActiveMRBlockerFromCLIUsesTerminalStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		err    error
+		want   string
+	}{
+		{name: "empty active mr", want: ""},
+		{name: "open mr blocks", output: `[{"status":"open"}]`, want: "active_mr=gt-mr status=open"},
+		{name: "closed mr does not block", output: `[{"status":"closed"}]`, want: ""},
+		{name: "not found does not block", err: fmt.Errorf("issue not found"), want: ""},
+		{name: "lookup error blocks", err: fmt.Errorf("bd unavailable"), want: "active_mr=gt-mr status=lookup_error: bd unavailable"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bd, _ := mockBd(
+				func(args []string) (string, error) { return tt.output, tt.err },
+				func(args []string) error { return nil },
+			)
+			mrID := "gt-mr"
+			if tt.name == "empty active mr" {
+				mrID = ""
+			}
+			if got := activeMRBlockerFromCLI(bd, t.TempDir(), mrID); got != tt.want {
+				t.Fatalf("activeMRBlockerFromCLI() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -437,6 +852,231 @@ func fakeBd() (*BdCli, *mockBdCalls) {
 		},
 		func(args []string) error { return nil },
 	)
+}
+
+func setupActiveMRGitSafeWorkDir(t *testing.T, rigName, polecatName string) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	clonePath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	if err := os.MkdirAll(clonePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit(clonePath, "init")
+	runGit(clonePath, "config", "user.email", "test@example.com")
+	runGit(clonePath, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(clonePath, "README.md"), []byte("test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(clonePath, "add", "README.md")
+	runGit(clonePath, "commit", "-m", "initial")
+	remotePath := filepath.Join(townRoot, "origin.git")
+	runGit(townRoot, "init", "--bare", remotePath)
+	runGit(clonePath, "remote", "add", "origin", remotePath)
+	runGit(clonePath, "push", "-u", "origin", "HEAD")
+	return townRoot
+}
+
+func TestHasPendingMRFromSnapshotAssessesMRStatus(t *testing.T) {
+	issueJSON := func(id, status, desc string) string {
+		b, err := json.Marshal([]map[string]any{{"id": id, "status": status, "description": desc}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	tests := []struct {
+		name string
+		show func(id string) (string, error)
+		want bool
+	}{
+		{
+			name: "open MR is pending",
+			show: func(id string) (string, error) {
+				return issueJSON(id, "open", ""), nil
+			},
+			want: true,
+		},
+		{
+			name: "closed MR with terminal source is not pending",
+			show: func(id string) (string, error) {
+				if id == "gt-mr" {
+					return issueJSON(id, "closed", ""), nil
+				}
+				return issueJSON(id, "closed", ""), nil
+			},
+		},
+		{
+			name: "missing MR with terminal source is not pending",
+			show: func(id string) (string, error) {
+				if id == "gt-mr" {
+					return "", errors.New("not found")
+				}
+				return issueJSON(id, "closed", ""), nil
+			},
+		},
+		{
+			name: "lookup error is pending",
+			show: func(id string) (string, error) { return "", errors.New("bd exploded") },
+			want: true,
+		},
+		{
+			name: "closed MR with open source is pending",
+			show: func(id string) (string, error) {
+				if id == "gt-mr" {
+					return issueJSON(id, "closed", ""), nil
+				}
+				return issueJSON(id, "open", ""), nil
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := setupActiveMRGitSafeWorkDir(t, "gastown", "nux")
+			bd, _ := mockBd(
+				func(args []string) (string, error) {
+					if len(args) == 0 {
+						return "", nil
+					}
+					switch args[0] {
+					case "list":
+						return "[]", nil
+					case "show":
+						return tt.show(args[1])
+					}
+					return "", nil
+				},
+				func(args []string) error { return nil },
+			)
+			snap := &agentBeadSnapshot{ActiveMR: "gt-mr", Fields: &beads.AgentFields{ActiveMR: "gt-mr", LastSourceIssue: "gt-src"}}
+			if got := hasPendingMRFromSnapshot(bd, workDir, "gastown", "nux", snap); got != tt.want {
+				t.Fatalf("hasPendingMRFromSnapshot() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasPendingMRUsesAgentLastSourceIssue(t *testing.T) {
+	workDir := setupActiveMRGitSafeWorkDir(t, "gastown", "nux")
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 {
+				return "", nil
+			}
+			switch args[0] {
+			case "list":
+				return "[]", nil
+			case "show":
+				switch args[1] {
+				case "gt-agent":
+					return `[{"active_mr":"gt-mr","description":"active_mr: gt-mr\nlast_source_issue: gt-src\n"}]`, nil
+				case "gt-mr":
+					return "", errors.New("not found")
+				case "gt-src":
+					return `[{"id":"gt-src","status":"closed"}]`, nil
+				}
+			}
+			return "", errors.New("not found")
+		},
+		func(args []string) error { return nil },
+	)
+
+	if got := hasPendingMR(bd, workDir, "gastown", "nux", "gt-agent"); got {
+		t.Fatalf("hasPendingMR() = true, want false for missing MR with terminal source")
+	}
+}
+
+func TestHasPendingMRFromSnapshotRequiresGitSafe(t *testing.T) {
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 {
+				return "", nil
+			}
+			switch args[0] {
+			case "list":
+				return "[]", nil
+			case "show":
+				if args[1] == "gt-mr" {
+					return "", errors.New("not found")
+				}
+				return `[{"id":"gt-src","status":"closed"}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error { return nil },
+	)
+	snap := &agentBeadSnapshot{ActiveMR: "gt-mr", Fields: &beads.AgentFields{ActiveMR: "gt-mr", LastSourceIssue: "gt-src"}}
+	if got := hasPendingMRFromSnapshot(bd, t.TempDir(), "gastown", "nux", snap); !got {
+		t.Fatalf("hasPendingMRFromSnapshot() = false, want true when git is unsafe")
+	}
+}
+
+func TestHasPendingMRCleanupWispFailsClosed(t *testing.T) {
+	workDir := setupActiveMRGitSafeWorkDir(t, "gastown", "nux")
+	tests := []struct {
+		name string
+		list string
+		err  error
+	}{
+		{name: "cleanup wisp present", list: `[{"id":"gt-cleanup"}]`},
+		{name: "cleanup wisp lookup error", err: errors.New("bd exploded")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bd, _ := mockBd(
+				func(args []string) (string, error) {
+					if len(args) == 0 {
+						return "", nil
+					}
+					if args[0] == "list" {
+						return tt.list, tt.err
+					}
+					if args[0] == "show" && args[1] == "gt-agent" {
+						return `[{"active_mr":"gt-mr","description":"active_mr: gt-mr\nlast_source_issue: gt-src\n"}]`, nil
+					}
+					if args[0] == "show" && args[1] == "gt-mr" {
+						return "", errors.New("not found")
+					}
+					return `[{"id":"gt-src","status":"closed"}]`, nil
+				},
+				func(args []string) error { return nil },
+			)
+			if got := hasPendingMR(bd, workDir, "gastown", "nux", "gt-agent"); !got {
+				t.Fatalf("hasPendingMR() = false, want true")
+			}
+		})
+	}
+}
+
+func TestTerminalSafeDoneSnapshot(t *testing.T) {
+	workDir := setupActiveMRGitSafeWorkDir(t, "gastown", "nux")
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 || args[0] != "show" {
+				return "[]", nil
+			}
+			return `[{"id":"gt-src","status":"closed"}]`, nil
+		},
+		func(args []string) error { return nil },
+	)
+	snap := &agentBeadSnapshot{Fields: &beads.AgentFields{LastSourceIssue: "gt-src"}}
+	if !terminalSafeDoneSnapshot(bd, workDir, "gastown", "nux", snap) {
+		t.Fatalf("terminalSafeDoneSnapshot() = false, want true")
+	}
+	snap.Fields.HookBead = "gt-hook"
+	if terminalSafeDoneSnapshot(bd, workDir, "gastown", "nux", snap) {
+		t.Fatalf("terminalSafeDoneSnapshot() = true with hook set, want false")
+	}
 }
 
 func TestFindCleanupWisp_UsesCorrectBdListFlags(t *testing.T) {
@@ -906,8 +1546,7 @@ func TestResetAbandonedBead_NoRouter(t *testing.T) {
 
 func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	// Not parallel: overrides package-level verifyCommitOnMain.
-	// When verifyCommitOnMain returns true, resetAbandonedBead should close the
-	// bead instead of resetting it for re-dispatch. This is the fix for #2036.
+	// An on-main commit plus a successful submission receipt may close source.
 
 	oldVerify := verifyCommitOnMain
 	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
@@ -915,9 +1554,25 @@ func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	}
 	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
 
+	agentDescription := beads.FormatAgentDescription("agent", &beads.AgentFields{
+		RoleType:        "polecat",
+		Rig:             "testrig",
+		AgentState:      "done",
+		ExitType:        string(ExitTypeCompleted),
+		MRID:            "gt-mr-123",
+		LastSourceIssue: "gt-work123",
+		CompletionTime:  time.Now().UTC().Format(time.RFC3339),
+	})
+	agentJSON, err := json.Marshal([]map[string]string{{"description": agentDescription}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	bd, mock := mockBd(
 		func(args []string) (string, error) {
 			if len(args) >= 1 && args[0] == "show" {
+				if len(args) > 1 && strings.Contains(args[1], "polecat-alpha") {
+					return string(agentJSON), nil
+				}
 				return `[{"status":"hooked"}]`, nil
 			}
 			return "", nil
@@ -948,6 +1603,68 @@ func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	}
 	if foundUpdate {
 		t.Error("bd update --status=open should NOT be called when work is on main")
+	}
+}
+
+func TestResetAbandonedBead_ZeroCommitWithoutSubmissionEvidenceIsResumable(t *testing.T) {
+	// A fresh branch is an ancestor of main. This exact scheduler/Witness race
+	// must reset the source rather than falsely reporting successful closure.
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 1 && args[0] == "show" && args[1] == "gt-work123" {
+				return `[{"status":"hooked"}]`, nil
+			}
+			return `[{"description":"agent_state: spawning\\nhook_bead: null"}]`, nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	if !resetAbandonedBead(bd, t.TempDir(), "testrig", "gt-work123", "alpha", nil) {
+		t.Fatal("zero-commit dispatch without MR evidence must remain resumable")
+	}
+	var foundClose, foundReset, foundAbort bool
+	for _, call := range mock.calls {
+		foundClose = foundClose || strings.Contains(call, "close gt-work123")
+		foundReset = foundReset || (strings.Contains(call, "update gt-work123") && strings.Contains(call, "--status=open"))
+		foundAbort = foundAbort || strings.Contains(call, "comments add gt-work123 DISPATCH_ABORTED")
+	}
+	if foundClose || !foundReset || !foundAbort {
+		t.Fatalf("close=%v reset=%v abort_provenance=%v calls=%v", foundClose, foundReset, foundAbort, mock.calls)
+	}
+}
+
+func TestWitnessHasCompletionEvidence(t *testing.T) {
+	valid := &beads.AgentFields{
+		ExitType:        string(ExitTypeCompleted),
+		MRID:            "gt-mr-1",
+		LastSourceIssue: "gt-source",
+		CompletionTime:  time.Now().UTC().Format(time.RFC3339),
+	}
+	if !witnessHasCompletionEvidence(valid, "gt-source") {
+		t.Fatal("complete matching MR receipt should be accepted")
+	}
+	for name, mutate := range map[string]func(*beads.AgentFields){
+		"no MR":       func(f *beads.AgentFields) { f.MRID = "" },
+		"MR failed":   func(f *beads.AgentFields) { f.MRFailed = true },
+		"push failed": func(f *beads.AgentFields) { f.PushFailed = true },
+		"wrong source": func(f *beads.AgentFields) {
+			f.LastSourceIssue = "gt-other"
+		},
+		"no timestamp": func(f *beads.AgentFields) { f.CompletionTime = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fields := *valid
+			mutate(&fields)
+			if witnessHasCompletionEvidence(&fields, "gt-source") {
+				t.Fatalf("%s must not authorize source closure", name)
+			}
+		})
 	}
 }
 
@@ -1930,6 +2647,69 @@ func TestZombieNeverHeartbeated_Classification(t *testing.T) {
 	}
 }
 
+func TestZombieIdleAtPromptWorking_Classification(t *testing.T) {
+	t.Parallel()
+	if ZombieIdleAtPromptWorking != "idle-at-prompt-working" {
+		t.Errorf("ZombieIdleAtPromptWorking = %q, want %q", ZombieIdleAtPromptWorking, "idle-at-prompt-working")
+	}
+	// Reported state says "working" — implies active work, same as the other
+	// working-state classifications.
+	if !ZombieIdleAtPromptWorking.ImpliesActiveWork() {
+		t.Error("ZombieIdleAtPromptWorking should imply active work")
+	}
+}
+
+// TestIsIdleAtPromptWorkingAnomaly exercises the gt-xwdn invariant check
+// directly: agent_state="working" reported alongside a session that a
+// point-in-time tmux read shows sitting idle at its input prompt is an
+// anomaly regardless of which code path produced the stale "working" state
+// (see gt-k2ab, the specific bug this generalizes defense against).
+func TestIsIdleAtPromptWorkingAnomaly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		agentState  string
+		sessionIdle bool
+		want        bool
+	}{
+		{"working + idle at prompt → anomaly", "working", true, true},
+		{"working + busy → healthy", "working", false, false},
+		{"idle + idle at prompt → healthy (expected)", "idle", true, false},
+		{"idle + busy → healthy", "idle", false, false},
+		{"running + idle at prompt → not this invariant", "running", true, false},
+		{"empty state + idle at prompt → not this invariant", "", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isIdleAtPromptWorkingAnomaly(tt.agentState, tt.sessionIdle)
+			if got != tt.want {
+				t.Errorf("isIdleAtPromptWorkingAnomaly(%q, %v) = %v, want %v",
+					tt.agentState, tt.sessionIdle, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewIdleAtPromptWorkingZombie(t *testing.T) {
+	t.Parallel()
+	z := newIdleAtPromptWorkingZombie("alpha", "working", "gt-hook-1", "test reason")
+
+	if z.Classification != ZombieIdleAtPromptWorking {
+		t.Errorf("Classification = %q, want %q", z.Classification, ZombieIdleAtPromptWorking)
+	}
+	if !z.WasActive {
+		t.Error("WasActive = false, want true (agent_state=working is evidence of active work)")
+	}
+	if z.PolecatName != "alpha" || z.AgentState != "working" || z.HookBead != "gt-hook-1" {
+		t.Errorf("unexpected zombie fields: %+v", z)
+	}
+	if z.Action != "flagged-for-review (test reason)" {
+		t.Errorf("Action = %q, want flag-only action with reason", z.Action)
+	}
+}
+
 func TestSubmittedStillRunningCandidate(t *testing.T) {
 	t.Parallel()
 
@@ -2047,8 +2827,9 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	// notifyRefineryMergeReady takes workDir and calls workspace.Find(workDir) internally
 	notifyRefineryMergeReady(townRoot, "dashboard", result)
 
-	// Verify that a MERGE_READY event file was created in the refinery channel
-	eventDir := filepath.Join(townRoot, "events", "refinery")
+	// Verify that a MERGE_READY event file was created in the rig-scoped
+	// refinery channel (gt-v5d4: channel must not be shared across rigs).
+	eventDir := filepath.Join(townRoot, "events", "refinery-dashboard")
 	entries, err := os.ReadDir(eventDir)
 	if err != nil {
 		t.Fatalf("reading event dir: %v", err)
@@ -2062,7 +2843,7 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 
 	if len(eventFiles) == 0 {
-		t.Fatal("expected at least one .event file in ~/gt/events/refinery/, got none")
+		t.Fatal("expected at least one .event file in ~/gt/events/refinery-dashboard/, got none")
 	}
 
 	// Read and verify the event content
@@ -2079,8 +2860,8 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	if event["type"] != "MERGE_READY" {
 		t.Errorf("event type = %v, want MERGE_READY", event["type"])
 	}
-	if event["channel"] != "refinery" {
-		t.Errorf("event channel = %v, want refinery", event["channel"])
+	if event["channel"] != "refinery-dashboard" {
+		t.Errorf("event channel = %v, want refinery-dashboard", event["channel"])
 	}
 
 	payload, ok := event["payload"].(map[string]interface{})
@@ -2095,30 +2876,32 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 }
 
-// TestCherryHasUnmergedCommits covers the git-cherry output parser used by
-// verifyBranchAlreadyMerged (aa-apw).
-func TestCherryHasUnmergedCommits(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{"empty output — branch has no commits beyond base", "", false},
-		{"whitespace only", "  \n\n", false},
-		{"all squash-applied (-)", "- abc123\n- def456\n", false},
-		{"one unmerged (+)", "+ abc123\n", true},
-		{"mixed", "- abc123\n+ def456\n", true},
-		{"unmerged only", "+ a\n+ b\n+ c\n", true},
+// TestNotifyRefineryMergeReady_DoesNotCrossRigChannels is the gt-v5d4
+// regression test: an emit for rig A's refinery must land only in rig A's
+// channel directory, never in rig B's. Before the fix, every rig shared the
+// literal "refinery" channel, so any rig's MQ_SUBMIT/MERGE_READY woke every
+// other rig's refinery await-event loop, resetting its idle backoff and
+// causing a fleet-wide busy loop.
+func TestNotifyRefineryMergeReady_DoesNotCrossRigChannels(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := cherryHasUnmergedCommits(tc.in); got != tc.want {
-				t.Errorf("cherryHasUnmergedCommits(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
+
+	notifyRefineryMergeReady(townRoot, "rig-a", &HandlerResult{})
+
+	rigAEventDir := filepath.Join(townRoot, "events", "refinery-rig-a")
+	if entries, err := os.ReadDir(rigAEventDir); err != nil || len(entries) == 0 {
+		t.Fatalf("expected an event in %s, got entries=%v err=%v", rigAEventDir, entries, err)
+	}
+
+	rigBEventDir := filepath.Join(townRoot, "events", "refinery-rig-b")
+	if _, err := os.ReadDir(rigBEventDir); err == nil {
+		t.Fatalf("rig A's emit must not create rig B's channel dir %s", rigBEventDir)
 	}
 }
 
@@ -2176,5 +2959,50 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 	// Should NOT take the archive path.
 	if strings.Contains(z.Action, "work-already-merged") {
 		t.Errorf("action = %q, should not archive when work is not merged", z.Action)
+	}
+}
+
+// TestHandleZombieRestart_InvalidatesCleanupStatusBeforeRestart is part of
+// gt-h6u4: a confirmed-dead session's persisted cleanup_status must be
+// invalidated before restart, since it may be stale relative to whatever the
+// dead session actually left behind and gt polecat list / gt scheduler
+// status trust it between witness patrol sweeps.
+//
+// Not parallel: overrides package-level vars.
+func TestHandleZombieRestart_InvalidatesCleanupStatusBeforeRestart(t *testing.T) {
+	oldVerify := verifyBranchAlreadyMerged
+	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+
+	oldInvalidate := invalidateZombieCleanupStatus
+	var invalidated bool
+	var gotRig, gotPolecat, gotSnapshot string
+	invalidateZombieCleanupStatus = func(townRoot, workDir, rigName, polecatName, snapshotCleanupStatus string) {
+		invalidated = true
+		gotRig, gotPolecat, gotSnapshot = rigName, polecatName, snapshotCleanupStatus
+	}
+	t.Cleanup(func() { invalidateZombieCleanupStatus = oldInvalidate })
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	z := &ZombieResult{PolecatName: "scavenger", HookBead: "ma-poc.4"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "scavenger", "ma-poc.4", "clean", z)
+
+	if !invalidated {
+		t.Fatal("cleanup_status was never invalidated")
+	}
+	if gotRig != "testrig" || gotPolecat != "scavenger" {
+		t.Errorf("invalidateZombieCleanupStatus(rig=%q, polecat=%q), want (testrig, scavenger)", gotRig, gotPolecat)
+	}
+	// The snapshot value passed through must be the one handleZombieRestart
+	// read, not a hardcoded guess — this is what lets the write no-op if a
+	// concurrent restart's fresh self-report has already moved it on.
+	if gotSnapshot != "clean" {
+		t.Errorf("invalidateZombieCleanupStatus snapshot = %q, want %q", gotSnapshot, "clean")
 	}
 }

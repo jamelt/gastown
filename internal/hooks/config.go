@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
 // HookEntry represents a single hook matcher with its associated hooks.
@@ -218,6 +220,59 @@ func LoadSettings(path string) (*SettingsJSON, error) {
 	return settings, nil
 }
 
+// SyncManagedClaudeSettings merges computed managed hooks into a Claude
+// settings.json file while preserving non-hook settings fields.
+func SyncManagedClaudeSettings(target Target, dryRun bool) (SyncResult, error) {
+	expected, err := ComputeExpected(target.Key)
+	if err != nil {
+		return 0, fmt.Errorf("computing expected config: %w", err)
+	}
+
+	current, err := LoadSettings(target.Path)
+	if err != nil {
+		return 0, fmt.Errorf("loading current settings: %w", err)
+	}
+
+	_, statErr := os.Stat(target.Path)
+	fileExists := statErr == nil
+
+	if fileExists && HooksEqual(expected, &current.Hooks) && HasClaudePromptDefaults(current) {
+		return SyncUnchanged, nil
+	}
+
+	if dryRun {
+		if fileExists {
+			return SyncUpdated, nil
+		}
+		return SyncCreated, nil
+	}
+
+	current.Hooks = *expected
+	if current.EnabledPlugins == nil {
+		current.EnabledPlugins = make(map[string]bool)
+	}
+	current.EnabledPlugins["beads@beads-marketplace"] = false
+
+	if err := os.MkdirAll(filepath.Dir(target.Path), 0755); err != nil {
+		return 0, fmt.Errorf("creating .claude directory: %w", err)
+	}
+
+	data, err := MarshalSettings(current)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling settings: %w", err)
+	}
+	data = append(data, '\n')
+
+	if err := atomicfile.WriteFile(target.Path, data, 0600); err != nil {
+		return 0, fmt.Errorf("writing settings: %w", err)
+	}
+
+	if fileExists {
+		return SyncUpdated, nil
+	}
+	return SyncCreated, nil
+}
+
 // HooksEqual returns true if two HooksConfigs are structurally equal.
 // Compares by serializing to JSON for reliable deep equality.
 func HooksEqual(a, b *HooksConfig) bool {
@@ -310,6 +365,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// Without this, witnesses could accidentally create permanent patrol molecules
 		// that survive session restarts and accumulate unbounded.
 		"witness": {
+			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
 					Matcher: "Bash(*bd mol pour*patrol*)",
@@ -341,9 +397,22 @@ func DefaultOverrides() map[string]*HooksConfig {
 				},
 			},
 		},
+		"boot": {
+			UserPromptSubmit: []HookEntry{{Matcher: ""}},
+			PreToolUse: []HookEntry{
+				{
+					Matcher: "Bash(*tmux*send-keys*)",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: "echo 'BLOCKED: Boot must not use raw tmux send-keys; it can leave unsubmitted text staged in the Deacon TUI.' && echo 'Use: gt nudge --mode=immediate deacon \"message\" (do not add --force).' && exit 2",
+					}},
+				},
+			},
+		},
 		// Deacon roles: patrol-formula-guard (same as witness).
 		// Deacons also run patrols and must use wisps, not persistent molecules.
 		"deacon": {
+			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
 					Matcher: "Bash(*for *seq*)",
@@ -399,6 +468,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// Refinery roles: patrol-formula-guard (same as witness).
 		// Refineries also run patrols and must use wisps, not persistent molecules.
 		"refinery": {
+			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
 					Matcher: "Bash(*bd mol pour*patrol*)",
@@ -949,10 +1019,16 @@ func DefaultBase() *HooksConfig {
 		PreToolUse: []HookEntry{
 			{
 				Matcher: "Bash(gh pr create*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard pr-workflow"),
-				}},
+				Hooks: []Hook{
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard pr-workflow"),
+					},
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard branch-hygiene"),
+					},
+				},
 			},
 			{
 				Matcher: "Bash(git checkout -b*)",
@@ -987,6 +1063,18 @@ func DefaultBase() *HooksConfig {
 				Hooks: []Hook{{
 					Type:    "command",
 					Command: gtCommand("gt tap guard dangerous-command"),
+				}},
+			},
+			{
+				// Block `go test` from a stale (pre-gt-8ik) worktree whose
+				// recompiled test binary would carry no isolation guard and
+				// could mutate the live control plane. The guard fires only for
+				// a real `go test` from a stale gastown worktree against a live
+				// town; current worktrees self-isolate and pass through (gt-x3yy).
+				Matcher: "Bash(*go test*)",
+				Hooks: []Hook{{
+					Type:    "command",
+					Command: gtCommand("gt tap guard test-isolation"),
 				}},
 			},
 		},

@@ -1,6 +1,8 @@
 package beads
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -38,8 +40,15 @@ func (b *Beads) CreateSlingContext(workBeadTitle, workBeadID string, fields *cap
 	}
 
 	description := FormatSlingContextDescription(fields)
+	var entropy [5]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return nil, fmt.Errorf("generating sling context id: %w", err)
+	}
+	id := fmt.Sprintf("%s-sc-%s", detectPrefix(b.getResolvedBeadsDir()), hex.EncodeToString(entropy[:]))
 
 	args := []string{"create", "--json",
+		"--id=" + id,
+		"--force",
 		"--ephemeral",
 		"--title=" + title,
 		"--description=" + description,
@@ -92,29 +101,13 @@ func (b *Beads) FindOpenSlingContext(workBeadID string) (*Issue, *capacity.Sling
 
 // ListOpenSlingContexts returns all open sling context beads.
 func (b *Beads) ListOpenSlingContexts() ([]*Issue, error) {
-	out, err := b.run("list",
-		"--label="+capacity.LabelSlingContext,
-		"--status=open",
-		"--json",
-		"--limit=0",
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// Handle empty output or non-JSON responses.
-	// bd list --json may return plain text like "No issues found." instead
-	// of an empty JSON array when there are no results.
-	if len(out) == 0 || !isJSONBytes(out) {
-		return nil, nil
-	}
-
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing sling context list: %w", err)
-	}
-
-	return issues, nil
+	return b.List(ListOptions{
+		Status:    "open",
+		Label:     capacity.LabelSlingContext,
+		Priority:  -1,
+		Limit:     0,
+		Ephemeral: true,
+	})
 }
 
 // CloseSlingContext closes a sling context bead with a reason.
@@ -130,5 +123,5 @@ func (b *Beads) CloseSlingContext(contextID, reason string) error {
 // UpdateSlingContextFields updates the description (fields) of a sling context bead.
 func (b *Beads) UpdateSlingContextFields(contextID string, fields *capacity.SlingContextFields) error {
 	description := FormatSlingContextDescription(fields)
-	return b.Update(contextID, UpdateOptions{Description: &description})
+	return b.ForLocalBeads().Update(contextID, UpdateOptions{Description: &description})
 }

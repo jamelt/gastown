@@ -84,7 +84,7 @@ convoys and creates whichever tags/branches are missing.
 ## Step 1: Build and start the snapshot watcher
 
 The Go binary handles all Dolt operations with parameterized SQL.
-It connects using gastown's standard Dolt config (127.0.0.1:3307, root, no password)
+It connects using gastown's standard Dolt config (`GT_DOLT_HOST` / `GT_DOLT_PORT`, defaulting to 127.0.0.1:3307, root, no password)
 and reads routes.jsonl to discover rig databases.
 
 In `--watch` mode, the binary tails `~/.events.jsonl` and runs a snapshot cycle
@@ -135,7 +135,7 @@ if [ $SNAPSHOT_EXIT -ne 0 ]; then
   RESULT="failure"
 fi
 
-bd create "dolt-snapshots: $RESULT" -t chore --ephemeral \
-  -l type:plugin-run,plugin:dolt-snapshots,result:$RESULT \
-  -d "dolt-snapshots plugin completed with exit code $SNAPSHOT_EXIT. Watcher started." --silent 2>/dev/null || true
+gt plugin record-run --plugin dolt-snapshots --result "$RESULT" \
+  --title "dolt-snapshots: $RESULT" \
+  --description "dolt-snapshots plugin completed with exit code $SNAPSHOT_EXIT. Watcher started." >/dev/null 2>&1 || true
 ```

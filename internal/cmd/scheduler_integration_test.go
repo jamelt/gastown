@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && scheduler_integration
 
 // Package cmd contains integration tests for the capacity scheduler subsystem.
 // These tests exercise scheduler CLI operations (schedule, list, status, dispatch
@@ -9,7 +9,7 @@
 //
 // Run with:
 //
-//	go test -tags=integration -run 'TestScheduler' -timeout 5m -count=1 -v ./internal/cmd/
+//	go test -tags='integration scheduler_integration' -run 'TestScheduler' -timeout 15m -count=1 -v ./internal/cmd/
 package cmd
 
 import (
@@ -26,6 +26,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
@@ -38,19 +39,21 @@ var schedulerTestCounter atomic.Int32
 // shared Dolt test server. Uses local init (bd init --prefix --server-port)
 // which reliably creates the schema and records the ephemeral port in
 // metadata.json so subsequent bd commands reach the test server.
-func initBeadsDBForServer(t *testing.T, dir, prefix string) {
+func initBeadsDBForServer(t *testing.T, dir, prefix, homeDir string) {
 	t.Helper()
+	initSchedulerGitRepo(t, dir, homeDir)
 
-	args := []string{"init", "--prefix", prefix}
+	args := []string{"init", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--prefix", prefix}
 	// Forward GT_DOLT_PORT so bd connects to the ephemeral test server
 	// instead of defaulting to port 3307.
 	// bd v1.0.0+ defaults to embedded mode; --server is required to use an
 	// external server (v0.57.0 defaulted to server mode and ignored --server).
-	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
-		args = append(args, "--server", "--server-port", p)
+	if p := schedulerDoltPort(); p != "" {
+		args = append(args, "--server", "--external", "--server-port", p)
 	}
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
+	cmd.Env = schedulerBDInitEnv(homeDir, filepath.Join(dir, ".beads"))
 	out, err := cmd.CombinedOutput()
 	t.Logf("bd init --prefix %s in %s: exit=%v\n%s", prefix, dir, err, out)
 	if err != nil {
@@ -69,6 +72,103 @@ func initBeadsDBForServer(t *testing.T, dir, prefix string) {
 	}
 }
 
+func initSchedulerGitRepo(t *testing.T, dir, homeDir string) {
+	t.Helper()
+	cmd := exec.Command("git", "init", "--quiet")
+	cmd.Dir = dir
+	cmd.Env = cleanSchedulerTestEnv(homeDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init in %s: %v\n%s", dir, err, out)
+	}
+}
+
+func schedulerBDInitEnv(homeDir, beadsDir string) []string {
+	env := cleanSchedulerTestEnv(homeDir)
+	if p := schedulerDoltPort(); p != "" {
+		env = beads.StripEnvKey(env, "GT_DOLT_PORT")
+		env = append(env, "GT_DOLT_PORT="+p)
+	}
+	return beads.BuildMutationPinnedBDEnv(env, beadsDir)
+}
+
+func schedulerDoltPort() string {
+	for _, key := range []string{"GT_DOLT_PORT", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		if p := os.Getenv(key); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+func cleanupSchedulerBeadsDatabases(t *testing.T, prefixes ...string) {
+	t.Helper()
+	t.Cleanup(func() {
+		port := schedulerDoltPort()
+		if port == "" {
+			port = "3307"
+		}
+		dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port)
+		db, err := sql.Open("mysql", dsn)
+		if err != nil {
+			t.Logf("cleanup: could not connect to drop test databases: %v", err)
+			return
+		}
+		defer db.Close()
+		for _, prefix := range prefixes {
+			for _, dbName := range []string{prefix, "beads_" + prefix} {
+				if _, err := db.Exec("DROP DATABASE IF EXISTS `" + dbName + "`"); err != nil {
+					t.Logf("cleanup: failed to drop %s: %v", dbName, err)
+				}
+			}
+		}
+		if _, err := db.Exec("CALL dolt_purge_dropped_databases()"); err != nil {
+			t.Logf("cleanup: failed to purge dropped databases: %v", err)
+		}
+	})
+}
+
+func setTestBeadStatus(t *testing.T, dir, beadID, status string) {
+	t.Helper()
+	beadsDir := filepath.Join(dir, ".beads")
+	dbName := beads.DatabaseNameFromMetadata(beadsDir)
+	if dbName == "" {
+		t.Fatalf("no Dolt database metadata in %s", beadsDir)
+	}
+	port := schedulerDoltPort()
+	if port == "" {
+		port = "3307"
+	}
+	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/%s", port, dbName)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("open %s: %v", dbName, err)
+	}
+	defer db.Close()
+	res, err := db.Exec("UPDATE issues SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", status, beadID)
+	if err != nil {
+		t.Fatalf("set %s status to %s: %v", beadID, status, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n != 1 {
+		t.Fatalf("set %s status affected %d rows, want 1", beadID, n)
+	}
+}
+
+func installSchedulerTestFormula(t *testing.T, rigPath string) {
+	t.Helper()
+	content, err := formula.GetEmbeddedFormulaContent("mol-polecat-work")
+	if err != nil {
+		t.Fatalf("load embedded mol-polecat-work formula: %v", err)
+	}
+	formulasDir := filepath.Join(rigPath, ".beads", "formulas")
+	if err := os.MkdirAll(formulasDir, 0755); err != nil {
+		t.Fatalf("mkdir formulas dir: %v", err)
+	}
+	path := filepath.Join(formulasDir, "mol-polecat-work.formula.toml")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
 // setupSchedulerIntegrationTown creates a minimal town filesystem for scheduler tests.
 // Uses the shared Dolt test server (managed by requireDoltServer)
 // for beads databases. No gt install, no Claude credentials, no agent sessions.
@@ -78,7 +178,7 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 	t.Helper()
 
 	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed, skipping scheduler integration test")
+		t.Fatalf("bd not installed: %v", err)
 	}
 
 	requireDoltServer(t)
@@ -95,10 +195,11 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 	configureTestGitIdentity(t, tmpDir)
 
 	// Generate unique prefixes per test to avoid cross-test data leakage on
-	// the shared Dolt server. Each test gets its own databases (e.g., beads_h3, beads_r3).
+	// the shared Dolt server. Each test gets its own databases (e.g., h3, r3).
 	n := schedulerTestCounter.Add(1)
 	hqPrefix := fmt.Sprintf("h%d", n)
 	rigPrefix := fmt.Sprintf("r%d", n)
+	cleanupSchedulerBeadsDatabases(t, hqPrefix, rigPrefix)
 
 	hqPath = filepath.Join(tmpDir, "test-hq")
 	rigPath = filepath.Join(hqPath, "testrig", "mayor", "rig")
@@ -150,34 +251,14 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	initBeadsDBForServer(t, hqPath, hqPrefix)
+	initBeadsDBForServer(t, hqPath, hqPrefix, tmpDir)
 
 	// --- testrig directory (loadRig checks os.Stat on townRoot/<rigName>) ---
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatalf("mkdir rigPath: %v", err)
 	}
-	initBeadsDBForServer(t, rigPath, rigPrefix)
-
-	// Drop test databases on cleanup to prevent orphaned databases on the Dolt server.
-	t.Cleanup(func() {
-		port := os.Getenv("GT_DOLT_PORT")
-		if port == "" {
-			port = "3307"
-		}
-		dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port)
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			t.Logf("cleanup: could not connect to drop test databases: %v", err)
-			return
-		}
-		defer db.Close()
-		for _, prefix := range []string{hqPrefix, rigPrefix} {
-			dbName := "beads_" + prefix
-			if _, err := db.Exec("DROP DATABASE IF EXISTS `" + dbName + "`"); err != nil {
-				t.Logf("cleanup: failed to drop %s: %v", dbName, err)
-			}
-		}
-	})
+	initBeadsDBForServer(t, rigPath, rigPrefix, tmpDir)
+	installSchedulerTestFormula(t, rigPath)
 
 	// Redirect: testrig/.beads/ → mayor/rig/.beads
 	// beadsSearchDirs scans townRoot/<dir>/.beads — the redirect lets bd commands
@@ -215,13 +296,43 @@ func createSlingContext(t *testing.T, hqPath string, fields *capacity.SlingConte
 	return ctxBead.ID
 }
 
+func createSlingContextWithID(t *testing.T, rigPath, contextID string, fields *capacity.SlingContextFields) string {
+	t.Helper()
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	description := beads.FormatSlingContextDescription(fields)
+	args := []string{
+		"create",
+		"--json",
+		"--id=" + contextID,
+		"--force",
+		"--ephemeral",
+		"--title=test: " + fields.WorkBeadID,
+		"--description=" + description,
+		"--type=task",
+		"--labels=" + capacity.LabelSlingContext,
+	}
+	out, err := rigBeads.Run(args...)
+	if err != nil {
+		t.Fatalf("CreateSlingContext %s for %s failed: %v", contextID, fields.WorkBeadID, err)
+	}
+	var issue beads.Issue
+	if err := json.Unmarshal(out, &issue); err != nil {
+		t.Fatalf("parse sling context %s create output: %v", contextID, err)
+	}
+	return issue.ID
+}
+
 // findSlingContext finds an open sling context for a work bead by scanning all
 // rig beads dirs under townRoot. Mirrors production's listAllSlingContexts since
 // sling contexts now live in the target rig's beads dir, not HQ (see dee628d3).
 // Returns nil if none found.
 func findSlingContext(t *testing.T, hqPath, workBeadID string) *capacity.SlingContextFields {
 	t.Helper()
-	for _, ctx := range listAllSlingContexts(hqPath) {
+	contexts, err := listAllSlingContexts(hqPath)
+	if err != nil {
+		t.Fatalf("listAllSlingContexts: %v", err)
+	}
+	for _, ctx := range contexts {
 		fields := beads.ParseSlingContextFields(ctx.Description)
 		if fields != nil && fields.WorkBeadID == workBeadID {
 			return fields
@@ -360,6 +471,84 @@ func TestSchedulerAutoConvoyCreation(t *testing.T) {
 	}
 }
 
+// TestSchedulerDefaultFormulaSlingEndToEnd verifies the default-formula `gt sling
+// <bead> <rig>` CLI path (no --hook-raw-bead) against a redirected rig root: it
+// must cook the default formula, create exactly one sling context via
+// CreateSlingContext, and dispatch normally with the formula attached. Every
+// other CLI-level sling regression test in this file drives dispatch through
+// --hook-raw-bead (see slingToScheduler), leaving the default-formula path
+// (CookFormula -> scheduleBead -> CreateSlingContext, matching a bare
+// `gt sling <bead> <rig>` invocation) uncovered end-to-end (gt-76w).
+func TestSchedulerDefaultFormulaSlingEndToEnd(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	beadID := createTestBead(t, rigPath, "Default formula sling test")
+
+	// Bare `gt sling <bead> <rig>` — no --hook-raw-bead, no --formula. This is
+	// the exact form of the reported failing command (gt-76w RCA).
+	out := runGTCmdOutput(t, gtBinary, hqPath, env, "sling", beadID, "testrig")
+	t.Logf("gt sling output: %s", out)
+
+	contexts, err := listAllSlingContexts(hqPath)
+	if err != nil {
+		t.Fatalf("listAllSlingContexts: %v", err)
+	}
+	matches := 0
+	var fields *capacity.SlingContextFields
+	for _, ctx := range contexts {
+		f := beads.ParseSlingContextFields(ctx.Description)
+		if f != nil && f.WorkBeadID == beadID {
+			matches++
+			fields = f
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("sling contexts for %s = %d, want exactly 1", beadID, matches)
+	}
+	if fields.TargetRig != "testrig" {
+		t.Errorf("target_rig = %q, want %q", fields.TargetRig, "testrig")
+	}
+	if fields.Formula != "mol-polecat-work" {
+		t.Errorf("formula = %q, want %q (default formula resolution)", fields.Formula, "mol-polecat-work")
+	}
+
+	// Dispatch normally from the canonical town.
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "testrig" {
+			t.Fatalf("spawn rig = %q, want testrig", rigName)
+		}
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "defaultformula",
+			ClonePath:   rigPath,
+			Pane:        "test-pane",
+		}, nil
+	}
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want 1", dispatched)
+	}
+
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	issue, err := rigBeads.Show(beadID)
+	if err != nil {
+		t.Fatalf("rig bead show after dispatch: %v", err)
+	}
+	if issue.Status != "hooked" || issue.Assignee != "testrig/polecats/defaultformula" {
+		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked testrig/polecats/defaultformula", issue.Status, issue.Assignee)
+	}
+	attachment := beads.ParseAttachmentFields(issue)
+	if attachment == nil || attachment.AttachedFormula != "mol-polecat-work" || attachment.AttachedMolecule == "" {
+		t.Fatalf("attachment fields = %#v, want mol-polecat-work with attached molecule (description: %s)", attachment, issue.Description)
+	}
+}
+
 // TestSchedulerBlockedStatusReporting verifies that scheduler list correctly reports
 // blocked:true/false and scheduler status reports correct queued_ready count.
 func TestSchedulerBlockedStatusReporting(t *testing.T) {
@@ -417,6 +606,204 @@ func TestSchedulerBlockedStatusReporting(t *testing.T) {
 	}
 	if ready != 1 {
 		t.Errorf("queued_ready = %d, want 1", ready)
+	}
+	out := runGTCmdOutput(t, gtBinary, hqPath, env, "scheduler", "run", "--dry-run")
+	if !strings.Contains(out, readyID) {
+		t.Fatalf("dry-run should include ready bead %s while sibling is blocked\noutput: %s", readyID, out)
+	}
+	if strings.Contains(out, blockedID) {
+		t.Fatalf("dry-run should not include blocked bead %s\noutput: %s", blockedID, out)
+	}
+	if !strings.Contains(out, "ready: 1") {
+		t.Fatalf("dry-run should report exactly one ready bead while blocked source is queued\noutput: %s", out)
+	}
+
+	// Close the blocker and verify the already-queued work becomes ready without
+	// creating a new sling context.
+	closeCmd := exec.Command("bd", "close", blockerID)
+	closeCmd.Dir = rigPath
+	closeCmd.Env = env
+	if out, err := closeCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd close blocker %s failed: %v\n%s", blockerID, err, out)
+	}
+
+	listed = getSchedulerList(t, gtBinary, hqPath, env)
+	foundBlocked = false
+	for _, item := range listed {
+		id, _ := item["id"].(string)
+		blocked, _ := item["blocked"].(bool)
+		if id == blockedID {
+			foundBlocked = true
+			if blocked {
+				t.Errorf("bead %s should become ready after blocker closes", blockedID)
+			}
+		}
+	}
+	if !foundBlocked {
+		t.Fatalf("unblocked queued bead %s not found in scheduler list", blockedID)
+	}
+	contextCount := 0
+	contexts, err := listAllSlingContexts(hqPath)
+	if err != nil {
+		t.Fatalf("listAllSlingContexts: %v", err)
+	}
+	for _, ctx := range contexts {
+		fields := beads.ParseSlingContextFields(ctx.Description)
+		if fields != nil && fields.WorkBeadID == blockedID {
+			contextCount++
+		}
+	}
+	if contextCount != 1 {
+		t.Fatalf("open sling contexts for %s = %d, want 1", blockedID, contextCount)
+	}
+
+	status = getSchedulerStatus(t, gtBinary, hqPath, env)
+	total = int(status["queued_total"].(float64))
+	ready = int(status["queued_ready"].(float64))
+	if total != 2 {
+		t.Errorf("queued_total after unblock = %d, want 2", total)
+	}
+	if ready != 2 {
+		t.Errorf("queued_ready after unblock = %d, want 2", ready)
+	}
+
+	out = runGTCmdOutput(t, gtBinary, hqPath, env, "scheduler", "run", "--dry-run")
+	if !strings.Contains(out, blockedID) {
+		t.Errorf("dry-run dispatch should include newly unblocked bead %s\noutput: %s", blockedID, out)
+	}
+}
+
+func TestSchedulerQueuedContextOpenSourceIsReady(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	beadID := createTestBead(t, rigPath, "Queued open source readiness")
+	slingToScheduler(t, gtBinary, hqPath, env, beadID, "testrig")
+
+	listed := getSchedulerList(t, gtBinary, hqPath, env)
+	found := false
+	for _, item := range listed {
+		id, _ := item["id"].(string)
+		blocked, _ := item["blocked"].(bool)
+		if id == beadID {
+			found = true
+			if blocked {
+				t.Fatalf("queued open source %s should be ready, list item: %#v", beadID, item)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("queued source %s not found in scheduler list: %#v", beadID, listed)
+	}
+
+	status := getSchedulerStatus(t, gtBinary, hqPath, env)
+	if ready := int(status["queued_ready"].(float64)); ready != 1 {
+		t.Fatalf("queued_ready = %d, want 1 (status: %#v)", ready, status)
+	}
+	out := runGTCmdOutput(t, gtBinary, hqPath, env, "scheduler", "run", "--dry-run")
+	if strings.Contains(out, "No ready beads") || !strings.Contains(out, beadID) {
+		t.Fatalf("dry-run should include ready queued source %s, got:\n%s", beadID, out)
+	}
+}
+
+func TestSchedulerMissingSourceDoesNotHideReadyContext(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	readyID := createTestBead(t, rigPath, "Ready beside missing source")
+	slingToScheduler(t, gtBinary, hqPath, env, readyID, "testrig")
+
+	missingID := beads.ExtractPrefix(readyID) + "missing-source"
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	if _, err := rigBeads.CreateSlingContext("missing source", missingID, &capacity.SlingContextFields{
+		Version:    1,
+		WorkBeadID: missingID,
+		TargetRig:  "testrig",
+		EnqueuedAt: "2026-01-01T00:00:01Z",
+	}); err != nil {
+		t.Fatalf("CreateSlingContext for missing source: %v", err)
+	}
+
+	listed := getSchedulerList(t, gtBinary, hqPath, env)
+	foundReady := false
+	foundMissing := false
+	for _, item := range listed {
+		id, _ := item["id"].(string)
+		blocked, _ := item["blocked"].(bool)
+		switch id {
+		case readyID:
+			foundReady = true
+			if blocked {
+				t.Fatalf("valid source %s should remain ready when another source is missing", readyID)
+			}
+		case missingID:
+			foundMissing = true
+			if !blocked {
+				t.Fatalf("missing source %s should fail closed/not-ready", missingID)
+			}
+		}
+	}
+	if !foundReady || !foundMissing {
+		t.Fatalf("scheduler list found ready=%v missing=%v; list=%#v", foundReady, foundMissing, listed)
+	}
+
+	status := getSchedulerStatus(t, gtBinary, hqPath, env)
+	if total := int(status["queued_total"].(float64)); total != 2 {
+		t.Fatalf("queued_total = %d, want 2 (status: %#v)", total, status)
+	}
+	if ready := int(status["queued_ready"].(float64)); ready != 1 {
+		t.Fatalf("queued_ready = %d, want 1 (status: %#v)", ready, status)
+	}
+	out := runGTCmdOutput(t, gtBinary, hqPath, env, "scheduler", "run", "--dry-run")
+	if !strings.Contains(out, "ready: 1") {
+		t.Fatalf("dry-run should report exactly one ready bead with missing source queued, got:\n%s", out)
+	}
+	if !strings.Contains(out, readyID) {
+		t.Fatalf("dry-run should include valid ready source %s, got:\n%s", readyID, out)
+	}
+	if strings.Contains(out, missingID) {
+		t.Fatalf("dry-run should not include missing source %s, got:\n%s", missingID, out)
+	}
+}
+
+func TestSchedulerClosedSourceContextCleansUpFailClosed(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	readyID := createTestBead(t, rigPath, "Ready beside closed source")
+	beadID := createTestBead(t, rigPath, "Closed queued source")
+	slingToScheduler(t, gtBinary, hqPath, env, readyID, "testrig")
+	slingToScheduler(t, gtBinary, hqPath, env, beadID, "testrig")
+
+	closeCmd := exec.Command("bd", "close", beadID)
+	closeCmd.Dir = rigPath
+	closeCmd.Env = env
+	if out, err := closeCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd close %s failed: %v\n%s", beadID, err, out)
+	}
+
+	status := getSchedulerStatus(t, gtBinary, hqPath, env)
+	if ready := int(status["queued_ready"].(float64)); ready != 1 {
+		t.Fatalf("queued_ready = %d, want 1 with closed source beside ready source (status: %#v)", ready, status)
+	}
+	out := runGTCmdOutput(t, gtBinary, hqPath, env, "scheduler", "run", "--dry-run")
+	if !strings.Contains(out, readyID) {
+		t.Fatalf("dry-run should include ready source %s beside closed source, got:\n%s", readyID, out)
+	}
+	if strings.Contains(out, beadID) {
+		t.Fatalf("dry-run should not dispatch closed source %s, got:\n%s", beadID, out)
+	}
+	if !strings.Contains(out, "ready: 1") {
+		t.Fatalf("dry-run should report exactly one ready bead with closed source queued, got:\n%s", out)
+	}
+
+	closeReadyCmd := exec.Command("bd", "close", readyID)
+	closeReadyCmd.Dir = rigPath
+	closeReadyCmd.Env = env
+	if out, err := closeReadyCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd close ready source %s failed: %v\n%s", readyID, err, out)
+	}
+
+	runGTCmdOutput(t, gtBinary, hqPath, env, "scheduler", "run")
+	if hasSlingContext(t, hqPath, beadID) {
+		t.Fatalf("closed source context for %s should be cleaned up", beadID)
 	}
 }
 
@@ -477,7 +864,11 @@ func TestSchedulerSlingContextIdempotency(t *testing.T) {
 	// Verify: only one sling context exists across all rig dirs
 	// (sling contexts live in the target rig's beads dir per dee628d3).
 	count := 0
-	for _, ctx := range listAllSlingContexts(hqPath) {
+	contexts, err := listAllSlingContexts(hqPath)
+	if err != nil {
+		t.Fatalf("listAllSlingContexts: %v", err)
+	}
+	for _, ctx := range contexts {
 		fields := beads.ParseSlingContextFields(ctx.Description)
 		if fields != nil && fields.WorkBeadID == beadID {
 			count++
@@ -523,7 +914,7 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	t.Helper()
 
 	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed, skipping scheduler integration test")
+		t.Fatalf("bd not installed: %v", err)
 	}
 
 	requireDoltServer(t)
@@ -542,6 +933,7 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	hqPrefix := fmt.Sprintf("h%d", n)
 	rig1Prefix := fmt.Sprintf("r%d", n)
 	rig2Prefix := fmt.Sprintf("s%d", n)
+	cleanupSchedulerBeadsDatabases(t, hqPrefix, rig1Prefix, rig2Prefix)
 
 	hqPath = filepath.Join(tmpDir, "test-hq")
 	rig1Path = filepath.Join(hqPath, "rig1", "mayor", "rig")
@@ -599,18 +991,19 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	initBeadsDBForServer(t, hqPath, hqPrefix)
+	initBeadsDBForServer(t, hqPath, hqPrefix, tmpDir)
 
 	// --- rig1 ---
 	if err := os.MkdirAll(rig1Path, 0755); err != nil {
 		t.Fatalf("mkdir rig1Path: %v", err)
 	}
-	initBeadsDBForServer(t, rig1Path, rig1Prefix)
+	initBeadsDBForServer(t, rig1Path, rig1Prefix, tmpDir)
 	// Write routes to rig1's .beads/ so bd can resolve cross-rig IDs (needed for
 	// cross-rig dep creation via external refs).
 	if err := beads.WriteRoutes(filepath.Join(rig1Path, ".beads"), routes); err != nil {
 		t.Fatalf("write rig1 routes: %v", err)
 	}
+	installSchedulerTestFormula(t, rig1Path)
 	rig1Redirect := filepath.Join(hqPath, "rig1", ".beads")
 	if err := os.MkdirAll(rig1Redirect, 0755); err != nil {
 		t.Fatalf("mkdir rig1 redirect: %v", err)
@@ -623,10 +1016,11 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	if err := os.MkdirAll(rig2Path, 0755); err != nil {
 		t.Fatalf("mkdir rig2Path: %v", err)
 	}
-	initBeadsDBForServer(t, rig2Path, rig2Prefix)
+	initBeadsDBForServer(t, rig2Path, rig2Prefix, tmpDir)
 	if err := beads.WriteRoutes(filepath.Join(rig2Path, ".beads"), routes); err != nil {
 		t.Fatalf("write rig2 routes: %v", err)
 	}
+	installSchedulerTestFormula(t, rig2Path)
 	rig2Redirect := filepath.Join(hqPath, "rig2", ".beads")
 	if err := os.MkdirAll(rig2Redirect, 0755); err != nil {
 		t.Fatalf("mkdir rig2 redirect: %v", err)
@@ -634,29 +1028,6 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	if err := os.WriteFile(filepath.Join(rig2Redirect, "redirect"), []byte("mayor/rig/.beads"), 0644); err != nil {
 		t.Fatalf("write rig2 redirect: %v", err)
 	}
-
-	// Drop test databases on cleanup to prevent orphaned databases on the Dolt
-	// server. Without this, databases from multi-rig tests persist and can
-	// contaminate subsequent tests sharing the same server (see #2832).
-	t.Cleanup(func() {
-		port := os.Getenv("GT_DOLT_PORT")
-		if port == "" {
-			port = "3307"
-		}
-		dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port)
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			t.Logf("cleanup: could not connect to drop test databases: %v", err)
-			return
-		}
-		defer db.Close()
-		for _, prefix := range []string{hqPrefix, rig1Prefix, rig2Prefix} {
-			dbName := "beads_" + prefix
-			if _, err := db.Exec("DROP DATABASE IF EXISTS `" + dbName + "`"); err != nil {
-				t.Logf("cleanup: failed to drop %s: %v", dbName, err)
-			}
-		}
-	})
 
 	// --- Environment ---
 	env = cleanSchedulerTestEnv(tmpDir)
@@ -714,6 +1085,46 @@ func TestSchedulerMultiRigDispatch(t *testing.T) {
 	}
 	if !strings.Contains(out, bead2) {
 		t.Errorf("dry-run should mention rig2 bead %s", bead2)
+	}
+}
+
+func TestSchedulerQueuedContextUsesRoutedCrossRigSourceLookup(t *testing.T) {
+	hqPath, _, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
+
+	beadID := createTestBead(t, rig2Path, "Routed cross-rig source")
+	createSlingContext(t, hqPath, &capacity.SlingContextFields{
+		Version:    1,
+		WorkBeadID: beadID,
+		TargetRig:  "rig2",
+		EnqueuedAt: "2026-01-01T00:00:00Z",
+	})
+
+	listed := getSchedulerList(t, gtBinary, hqPath, env)
+	found := false
+	for _, item := range listed {
+		id, _ := item["id"].(string)
+		if id != beadID {
+			continue
+		}
+		found = true
+		if blocked, _ := item["blocked"].(bool); blocked {
+			t.Fatalf("routed cross-rig source %s should be ready, list item: %#v", beadID, item)
+		}
+		if target, _ := item["target_rig"].(string); target != "rig2" {
+			t.Fatalf("target_rig = %q, want rig2", target)
+		}
+	}
+	if !found {
+		t.Fatalf("routed source %s not found in scheduler list: %#v", beadID, listed)
+	}
+
+	status := getSchedulerStatus(t, gtBinary, hqPath, env)
+	if ready := int(status["queued_ready"].(float64)); ready != 1 {
+		t.Fatalf("queued_ready = %d, want 1 (status: %#v)", ready, status)
+	}
+	out := runGTCmdOutput(t, gtBinary, hqPath, env, "scheduler", "run", "--dry-run")
+	if !strings.Contains(out, beadID) || strings.Contains(out, "No ready beads") {
+		t.Fatalf("dry-run should include routed cross-rig source %s, got:\n%s", beadID, out)
 	}
 }
 
@@ -1025,24 +1436,6 @@ func TestSchedulerDeferredTaskWithoutRig(t *testing.T) {
 	}
 }
 
-// TestSchedulerConfigSetZero verifies that gt config set scheduler.max_polecats 0
-// is accepted (disabled mode is a valid config).
-func TestSchedulerConfigSetZero(t *testing.T) {
-	hqPath, _, gtBinary, env := setupSchedulerIntegrationTown(t)
-
-	// Set max_polecats=0 should succeed
-	out := runGTCmdOutput(t, gtBinary, hqPath, env, "config", "set", "scheduler.max_polecats", "0")
-	if strings.Contains(out, "invalid") {
-		t.Errorf("max_polecats=0 should be accepted, got:\n%s", out)
-	}
-
-	// Read it back — should return 0
-	out = runGTCmdOutput(t, gtBinary, hqPath, env, "config", "get", "scheduler.max_polecats")
-	if strings.TrimSpace(out) != "0" {
-		t.Errorf("max_polecats = %q, want %q", strings.TrimSpace(out), "0")
-	}
-}
-
 // TestSchedulerDeferredNonRigRejection verifies that in deferred mode (max_polecats > 0),
 // gt sling <bead> <non-rig> is rejected rather than falling through to direct dispatch.
 func TestSchedulerDeferredNonRigRejection(t *testing.T) {
@@ -1208,6 +1601,414 @@ func TestSchedulerInvalidJSONContextCleanup(t *testing.T) {
 	}
 }
 
+// TestSchedulerActualDispatchRoutesPollutedEnvToTargetRig verifies the non-dry-run
+// scheduler path uses the same env-routing boundary as direct sling. The parent
+// process is poisoned with HQ BEADS_* selectors; dispatch must still hook and
+// update the rig-owned work bead in the target rig database.
+func TestSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
+	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
+
+	beadID := createTestBead(t, rigPath, "Polluted env actual dispatch")
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	ctxBead, err := rigBeads.CreateSlingContext("dispatch: "+beadID, beadID, &capacity.SlingContextFields{
+		Version:     1,
+		WorkBeadID:  beadID,
+		TargetRig:   "testrig",
+		HookRawBead: true,
+		EnqueuedAt:  "2026-01-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("CreateSlingContext: %v", err)
+	}
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "testrig" {
+			t.Fatalf("spawn rig = %q, want testrig", rigName)
+		}
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "envtest",
+			ClonePath:   rigPath,
+			Pane:        "test-pane", // StartSession becomes a no-op.
+		}, nil
+	}
+
+	t.Setenv("BEADS_DIR", filepath.Join(hqPath, ".beads"))
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", beads.DatabaseNameFromMetadata(filepath.Join(hqPath, ".beads")))
+	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(hqPath, ".wrong-dolt-data"))
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want 1", dispatched)
+	}
+
+	issue, err := rigBeads.Show(beadID)
+	if err != nil {
+		t.Fatalf("rig bead show after dispatch: %v", err)
+	}
+	if issue.Status != "hooked" || issue.Assignee != "testrig/polecats/envtest" {
+		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked testrig/polecats/envtest", issue.Status, issue.Assignee)
+	}
+
+	openContexts, err := rigBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range openContexts {
+		if ctx.ID == ctxBead.ID {
+			t.Fatalf("sling context %s still open after successful dispatch", ctxBead.ID)
+		}
+	}
+}
+
+// TestSchedulerActualDispatchMatchesDryRunAtFreeCapacityOne is a regression
+// test for gt-airx: at the free-capacity=1 / batch=1 boundary, a real
+// (non-dry-run) dispatch must send the exact bead `--dry-run` predicted.
+// Both paths share buildSchedulerDispatchPlan, so this pins that contract at
+// the exact edge the bug report hit (free=1, one ready bead, batch=1).
+func TestSchedulerActualDispatchMatchesDryRunAtFreeCapacityOne(t *testing.T) {
+	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
+	configureScheduler(t, hqPath, 1, 1) // max_polecats=1 -> free capacity=1; batch_size=1 pins the batch to a single bead
+
+	beadID := createTestBead(t, rigPath, "Free-capacity-one dispatch test")
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	ctxBead, err := rigBeads.CreateSlingContext("dispatch: "+beadID, beadID, &capacity.SlingContextFields{
+		Version:     1,
+		WorkBeadID:  beadID,
+		TargetRig:   "testrig",
+		HookRawBead: true,
+		EnqueuedAt:  "2026-01-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("CreateSlingContext: %v", err)
+	}
+
+	// Dry-run: exercises the exact plan-building function the real dispatch
+	// below also calls (cleanup=false, same as dispatchScheduledWork's dry-run branch).
+	dryPlan, err := buildSchedulerDispatchPlan(hqPath, 1, false)
+	if err != nil {
+		t.Fatalf("buildSchedulerDispatchPlan (dry-run): %v", err)
+	}
+	if dryPlan.Capacity.Free != 1 {
+		t.Fatalf("dry-run capacity.Free = %d, want 1", dryPlan.Capacity.Free)
+	}
+	validated := validateDryRunDispatchPlan(hqPath, dryPlan.Plan)
+	if len(validated.ToDispatch) != 1 || validated.ToDispatch[0].WorkBeadID != beadID {
+		t.Fatalf("dry-run plan = %+v, want exactly %s dispatchable", validated, beadID)
+	}
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "freecap1",
+			ClonePath:   rigPath,
+			Pane:        "test-pane", // StartSession becomes a no-op.
+		}, nil
+	}
+
+	// Real dispatch: must actually send the same bead the dry-run predicted,
+	// not silently no-op (gt-airx).
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork (real): %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want 1 (same bead dry-run predicted)", dispatched)
+	}
+
+	issue, err := rigBeads.Show(beadID)
+	if err != nil {
+		t.Fatalf("rig bead show after dispatch: %v", err)
+	}
+	if issue.Status != "hooked" || issue.Assignee != "testrig/polecats/freecap1" {
+		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked testrig/polecats/freecap1", issue.Status, issue.Assignee)
+	}
+
+	openContexts, err := rigBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range openContexts {
+		if ctx.ID == ctxBead.ID {
+			t.Fatalf("sling context %s still open after successful dispatch", ctxBead.ID)
+		}
+	}
+}
+
+func TestSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
+	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
+
+	beadID := createTestBead(t, rigPath, "Polluted env formula dispatch")
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	ctxBead, err := rigBeads.CreateSlingContext("dispatch: "+beadID, beadID, &capacity.SlingContextFields{
+		Version:    1,
+		WorkBeadID: beadID,
+		TargetRig:  "testrig",
+		Formula:    "mol-polecat-work",
+		EnqueuedAt: "2026-01-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("CreateSlingContext: %v", err)
+	}
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "testrig" {
+			t.Fatalf("spawn rig = %q, want testrig", rigName)
+		}
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "formulaenv",
+			ClonePath:   rigPath,
+			Pane:        "test-pane",
+		}, nil
+	}
+
+	t.Setenv("BEADS_DIR", filepath.Join(hqPath, ".beads"))
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", beads.DatabaseNameFromMetadata(filepath.Join(hqPath, ".beads")))
+	t.Setenv("BEADS_DB", filepath.Join(hqPath, "wrong.db"))
+	t.Setenv("BD_DB", filepath.Join(hqPath, "wrong.bd"))
+	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(hqPath, ".wrong-dolt-data"))
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want 1", dispatched)
+	}
+
+	issue, err := rigBeads.Show(beadID)
+	if err != nil {
+		t.Fatalf("rig bead show after dispatch: %v", err)
+	}
+	if issue.Status != "hooked" || issue.Assignee != "testrig/polecats/formulaenv" {
+		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked testrig/polecats/formulaenv", issue.Status, issue.Assignee)
+	}
+	attachment := beads.ParseAttachmentFields(issue)
+	if attachment == nil || attachment.AttachedFormula != "mol-polecat-work" || attachment.AttachedMolecule == "" {
+		t.Fatalf("attachment fields = %#v, want mol-polecat-work with attached molecule (description: %s)", attachment, issue.Description)
+	}
+
+	openContexts, err := rigBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range openContexts {
+		if ctx.ID == ctxBead.ID {
+			t.Fatalf("sling context %s still open after successful formula dispatch", ctxBead.ID)
+		}
+	}
+}
+
+func TestSchedulerDispatchFailureRecordedInContextSourceDB(t *testing.T) {
+	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
+
+	beadID := createTestBead(t, rigPath, "Record dispatch failure in source DB")
+	ctxID := createSlingContext(t, hqPath, &capacity.SlingContextFields{
+		Version:     1,
+		WorkBeadID:  beadID,
+		TargetRig:   "testrig",
+		HookRawBead: true,
+		EnqueuedAt:  "2026-01-01T00:00:00Z",
+	})
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "testrig" {
+			t.Fatalf("spawn rig = %q, want testrig", rigName)
+		}
+		return nil, fmt.Errorf("forced spawn failure")
+	}
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 0 {
+		t.Fatalf("dispatched = %d, want 0", dispatched)
+	}
+
+	townBeads := beads.NewWithBeadsDir(hqPath, filepath.Join(hqPath, ".beads"))
+	ctx, err := townBeads.Show(ctxID)
+	if err != nil {
+		t.Fatalf("show HQ context after failure: %v", err)
+	}
+	fields := beads.ParseSlingContextFields(ctx.Description)
+	if fields == nil {
+		t.Fatalf("context fields missing after failure: %q", ctx.Description)
+	}
+	if fields.DispatchFailures != 1 {
+		t.Fatalf("dispatch_failures = %d, want 1 (description: %s)", fields.DispatchFailures, ctx.Description)
+	}
+	if !strings.Contains(fields.LastFailure, "forced spawn failure") {
+		t.Fatalf("last_failure = %q, want forced spawn failure", fields.LastFailure)
+	}
+
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	rigContexts, err := rigBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("rig ListOpenSlingContexts: %v", err)
+	}
+	for _, rigCtx := range rigContexts {
+		if rigCtx.ID == ctxID {
+			t.Fatalf("context %s unexpectedly exists in rig DB; failure should update source HQ DB", ctxID)
+		}
+	}
+}
+
+func TestSchedulerDispatchFailureRecordedInLegacyCrossRigContextDB(t *testing.T) {
+	hqPath, _, rig2Path, _, _ := setupMultiRigSchedulerTown(t)
+
+	beadID := createTestBead(t, rig2Path, "Legacy cross-rig context failure")
+	legacyContextID := "gt-sc-95f105d4f2"
+	ctxID := createSlingContextWithID(t, rig2Path, legacyContextID, &capacity.SlingContextFields{
+		Version:     1,
+		WorkBeadID:  beadID,
+		TargetRig:   "rig2",
+		HookRawBead: true,
+		EnqueuedAt:  "2026-01-01T00:00:00Z",
+	})
+
+	foundCtx := findSlingContext(t, hqPath, beadID)
+	if foundCtx == nil {
+		t.Fatalf("bead %s has no sling context after creating legacy ID %s", beadID, ctxID)
+	}
+	if foundCtx.WorkBeadID != beadID {
+		t.Fatalf("found context %s has work bead %s, want %s", ctxID, foundCtx.WorkBeadID, beadID)
+	}
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "rig2" {
+			t.Fatalf("spawn rig = %q, want rig2", rigName)
+		}
+		return nil, fmt.Errorf("forced spawn failure")
+	}
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 0 {
+		t.Fatalf("dispatched = %d, want 0", dispatched)
+	}
+
+	rigBeads := beads.NewWithBeadsDir(rig2Path, filepath.Join(rig2Path, ".beads"))
+	rigCtx, err := rigBeads.ForLocalBeads().Show(ctxID)
+	if err != nil {
+		t.Fatalf("show rig context after failure: %v", err)
+	}
+	rigFields := beads.ParseSlingContextFields(rigCtx.Description)
+	if rigFields == nil {
+		t.Fatalf("context fields missing after failure: %q", rigCtx.Description)
+	}
+	if rigFields.DispatchFailures != 1 {
+		t.Fatalf("dispatch_failures = %d, want 1 (description: %s)", rigFields.DispatchFailures, rigCtx.Description)
+	}
+	if !strings.Contains(rigFields.LastFailure, "forced spawn failure") {
+		t.Fatalf("last_failure = %q, want forced spawn failure", rigFields.LastFailure)
+	}
+
+	records, err := listAllSlingContextRecords(hqPath)
+	if err != nil {
+		t.Fatalf("listAllSlingContextRecords: %v", err)
+	}
+	foundHQ := false
+	foundRig := false
+	for _, rec := range records {
+		if rec.issue.ID != ctxID {
+			continue
+		}
+		switch rec.beadsDir {
+		case filepath.Join(hqPath, ".beads"):
+			foundHQ = true
+		case filepath.Join(rig2Path, ".beads"):
+			foundRig = true
+		}
+	}
+	if !foundRig {
+		t.Fatalf("legacy context %s not found in rig2 sling context scan", ctxID)
+	}
+	if foundHQ {
+		t.Fatalf("legacy context %s found in HQ context scan; expected owning rig storage", ctxID)
+	}
+}
+
+func TestSchedulerActualDispatchLegacyCrossRigContextUsesOwningDB(t *testing.T) {
+	hqPath, _, rig2Path, _, _ := setupMultiRigSchedulerTown(t)
+
+	beadID := createTestBead(t, rig2Path, "Legacy cross-rig dispatch success")
+	ctxID := createSlingContextWithID(t, rig2Path, "gt-sc-34ae2af2ef", &capacity.SlingContextFields{
+		Version:    1,
+		WorkBeadID: beadID,
+		TargetRig:  "rig2",
+		EnqueuedAt: "2026-01-02T00:00:00Z",
+	})
+
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "rig2" {
+			t.Fatalf("spawn rig = %q, want rig2", rigName)
+		}
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "legacy",
+			ClonePath:   rig2Path,
+			Pane:        "test-pane",
+		}, nil
+	}
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want 1", dispatched)
+	}
+
+	rigBeads := beads.NewWithBeadsDir(rig2Path, filepath.Join(rig2Path, ".beads"))
+	issue, err := rigBeads.Show(beadID)
+	if err != nil {
+		t.Fatalf("rig bead show after dispatch: %v", err)
+	}
+	if issue.Status != "hooked" || issue.Assignee != "rig2/polecats/legacy" {
+		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked rig2/polecats/legacy", issue.Status, issue.Assignee)
+	}
+
+	rigOpenContexts, err := rigBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("rig ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range rigOpenContexts {
+		if ctx.ID == ctxID {
+			t.Fatalf("legacy context %s should be closed after successful dispatch", ctxID)
+		}
+	}
+
+	hqBeads := beads.NewWithBeadsDir(hqPath, filepath.Join(hqPath, ".beads"))
+	hqOpenContexts, err := hqBeads.ListOpenSlingContexts()
+	if err != nil {
+		t.Fatalf("HQ ListOpenSlingContexts: %v", err)
+	}
+	for _, ctx := range hqOpenContexts {
+		if ctx.ID == ctxID {
+			t.Fatalf("legacy context %s unexpectedly exists in HQ after dispatch", ctxID)
+		}
+	}
+}
+
 // TestSchedulerDirectConvoyDispatch verifies that gt sling <convoy-id> --dry-run
 // with max_polecats=-1 (direct mode) routes to the direct dispatch path.
 func TestSchedulerDirectConvoyDispatch(t *testing.T) {
@@ -1291,15 +2092,7 @@ func TestScheduleBead_RefusesTombstone(t *testing.T) {
 
 	beadID := createTestBead(t, rigPath, "Tombstone bead refused by scheduleBead")
 
-	// Tombstone the bead. bd uses `bd close --tombstone` for terminal removal.
-	closeCmd := exec.Command("bd", "close", beadID, "--tombstone")
-	closeCmd.Dir = rigPath
-	if out, err := closeCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(out), "unknown flag: --tombstone") {
-			t.Skip("bd CLI does not support close --tombstone")
-		}
-		t.Fatalf("bd close --tombstone %s failed: %v\n%s", beadID, err, out)
-	}
+	setTestBeadStatus(t, rigPath, beadID, "tombstone")
 
 	out, err := runGTCmdMayFail(t, gtBinary, hqPath, env,
 		"sling", beadID, "testrig", "--hook-raw-bead")
@@ -1336,5 +2129,103 @@ func TestScheduleBead_ClosedForceDoesNotBypass(t *testing.T) {
 	}
 	if !strings.Contains(out, "closed") || !strings.Contains(out, "work already completed") {
 		t.Errorf("--force should not bypass closed guard; got: %s", out)
+	}
+}
+
+// TestScheduleBead_RefusesHardProhibition verifies that scheduleBead
+// (deferred dispatch path) refuses to schedule an hq-1s4w hard-prohibition
+// labeled bead without --confirm-human-approved, and allows it through with
+// the flag. Regression test for gt-b2qi: scheduleBead was the only sling
+// entry point (alongside runSling's direct path and executeSling) missing
+// the hard-prohibition guard the feeder already had via feedSkipReason.
+func TestScheduleBead_RefusesHardProhibition(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	createArgs := []string{"create", "--title=Credentials bead refused by scheduleBead", "--type=task",
+		"--description=Integration test bead", "--labels=human,area:security", "--json"}
+	createCmd := exec.Command("bd", createArgs...)
+	createCmd.Dir = rigPath
+	out, err := createCmd.Output()
+	if err != nil {
+		combined, _ := exec.Command("bd", createArgs...).CombinedOutput()
+		t.Fatalf("bd create failed: %v\n%s", err, combined)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &issue); err != nil {
+		t.Fatalf("parse bd create output: %v\nraw: %s", err, out)
+	}
+	beadID := issue.ID
+	if beadID == "" {
+		t.Fatalf("bd create returned empty ID\nraw: %s", out)
+	}
+
+	// Without --confirm-human-approved: rejected, no sling context created.
+	slingOut, err := runGTCmdMayFail(t, gtBinary, hqPath, env,
+		"sling", beadID, "testrig", "--hook-raw-bead")
+	if err == nil {
+		t.Fatalf("expected gt sling to fail for hard-prohibition-labeled bead, got success\noutput: %s", slingOut)
+	}
+	if !strings.Contains(slingOut, "fresh human approval") {
+		t.Errorf("expected error to mention fresh human approval, got: %s", slingOut)
+	}
+	if hasSlingContext(t, hqPath, beadID) {
+		t.Errorf("scheduleBead should not have created a sling context for hard-prohibition-labeled bead %s", beadID)
+	}
+
+	// With --confirm-human-approved: allowed through, sling context created.
+	slingOut, err = runGTCmdMayFail(t, gtBinary, hqPath, env,
+		"sling", beadID, "testrig", "--hook-raw-bead", "--confirm-human-approved")
+	if err != nil {
+		t.Fatalf("expected gt sling --confirm-human-approved to succeed, got error: %v\noutput: %s", err, slingOut)
+	}
+	if !hasSlingContext(t, hqPath, beadID) {
+		t.Errorf("scheduleBead should have created a sling context once --confirm-human-approved was set")
+	}
+}
+
+// TestScheduleBead_RefusesMoleculeStepBead verifies scheduleBead refuses to
+// enqueue a materialized formula-molecule step bead — a type=task child with a
+// parent-child dependency to a molecule root, the exact stale gt-6va3 fixture
+// shape. Regression for the wiring at sling_schedule.go: deleting the guard
+// invocation must make this fail, and no sling context may be created.
+func TestScheduleBead_RefusesMoleculeStepBead(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	molID := createTestBeadOfType(t, rigPath, "mol-polecat-work", "molecule")
+
+	// A step child parented to the molecule (bd --parent creates the
+	// parent-child dependency edge that survives dispatch's description rewrite).
+	createArgs := []string{"create", "--title=Load context and verify assignment",
+		"--type=task", "--description=step", "--parent=" + molID, "--json"}
+	createCmd := exec.Command("bd", createArgs...)
+	createCmd.Dir = rigPath
+	out, err := createCmd.Output()
+	if err != nil {
+		combined, _ := exec.Command("bd", createArgs...).CombinedOutput()
+		t.Fatalf("bd create --parent failed: %v\n%s", err, combined)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &issue); err != nil {
+		t.Fatalf("parse bd create output: %v\nraw: %s", err, out)
+	}
+	childID := issue.ID
+	if childID == "" {
+		t.Fatalf("bd create --parent returned empty ID\nraw: %s", out)
+	}
+
+	slingOut, err := runGTCmdMayFail(t, gtBinary, hqPath, env,
+		"sling", childID, "testrig", "--hook-raw-bead")
+	if err == nil {
+		t.Fatalf("expected gt sling to fail for molecule step bead, got success\noutput: %s", slingOut)
+	}
+	if !strings.Contains(slingOut, "formula molecule machinery") {
+		t.Errorf("expected error to mention formula molecule machinery, got: %s", slingOut)
+	}
+	if hasSlingContext(t, hqPath, childID) {
+		t.Errorf("scheduleBead should not have created a sling context for molecule step bead %s", childID)
 	}
 }

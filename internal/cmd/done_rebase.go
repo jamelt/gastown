@@ -12,6 +12,48 @@ type rebaseGit interface {
 	AbortRebase() error
 }
 
+// preVerifiedGit is the subset of *git.Git that preVerifiedFields needs to
+// validate and record a pre-verification attestation. Defined as an interface
+// so the ancestry check can be unit-tested without a real repository.
+type preVerifiedGit interface {
+	CleanBaseRef(remote, defaultBranch, target string) string
+	Rev(ref string) (string, error)
+	IsAncestor(ancestor, descendant string) (bool, error)
+}
+
+// preVerifiedFields returns the MR-description lines that attest pre-verification,
+// or an empty string plus a human-readable reason when the attestation cannot be
+// made honestly.
+//
+// The attestation is only emitted when the submitted commit is a descendant of
+// (or equal to) the recorded target base. A branch that was never rebased onto
+// the target must NOT be recorded as pre-verified: the recorded base is the
+// current target HEAD, so an unrebased branch would produce a base that the
+// submitted commit is not based on, and the refinery would fast-path merge it
+// past the integrated-tree gates (gt-fi6e).
+func preVerifiedFields(g preVerifiedGit, defaultBranch, target, commitSHA, verifiedAt string) (lines, skipReason string) {
+	if commitSHA == "" {
+		return "", "submitted commit SHA is unknown"
+	}
+	verifiedBaseRef := g.CleanBaseRef("origin", defaultBranch, target)
+	verifiedBase, err := g.Rev(verifiedBaseRef)
+	if err != nil {
+		return "", fmt.Sprintf("could not resolve %s: %v", verifiedBaseRef, err)
+	}
+	based, err := g.IsAncestor(verifiedBase, commitSHA)
+	if err != nil {
+		return "", fmt.Sprintf("could not verify ancestry against %s: %v", shortHash(verifiedBase), err)
+	}
+	if !based {
+		return "", fmt.Sprintf("submitted commit %s is not based on target %s (branch was not rebased)",
+			shortHash(commitSHA), shortHash(verifiedBase))
+	}
+	lines = "\npre_verified: true"
+	lines += fmt.Sprintf("\npre_verified_at: %s", verifiedAt)
+	lines += fmt.Sprintf("\npre_verified_base: %s", verifiedBase)
+	return lines, ""
+}
+
 // autoRebaseOnTarget rebases the current branch onto base when the branch is
 // behind the target. It is a no-op when there is nothing to rebase, when the
 // polecat ran the formula's pre-verify step (rebasing again would invalidate

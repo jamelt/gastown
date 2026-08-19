@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,6 +42,249 @@ func initTestRepo(t *testing.T) string {
 	_ = cmd.Run()
 
 	return dir
+}
+
+type townRootSafetySnapshot struct {
+	Head   string
+	Branch string
+	Files  map[string]string
+}
+
+func initTownRootSafetyRepo(t *testing.T) string {
+	t.Helper()
+
+	root := initTestRepo(t)
+	g := NewGit(root)
+	cmd := exec.Command("git", "branch", "polecat/safety")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create safety branch: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("committed\n"), 0644); err != nil {
+		t.Fatalf("write tracked file: %v", err)
+	}
+	if err := g.Add("tracked.txt"); err != nil {
+		t.Fatalf("git add tracked: %v", err)
+	}
+	if err := g.Commit("add tracked file"); err != nil {
+		t.Fatalf("git commit tracked: %v", err)
+	}
+
+	writeTownSafetyFile(t, root, "mayor/town.json", `{"name":"test-town"}\n`)
+	writeTownSafetyFile(t, root, "mayor/rigs.json", `{"rigs":[]}\n`)
+	writeTownSafetyFile(t, root, ".dolt-data/gastown/.dolt/noms/manifest", "manifest sentinel\n")
+	writeTownSafetyFile(t, root, ".runtime/sentinel", "runtime sentinel\n")
+	writeTownSafetyFile(t, root, ".beads/metadata.json", `{"prefix":"hq"}\n`)
+	writeTownSafetyFile(t, root, "daemon/daemon.pid", "12345\n")
+	writeTownSafetyFile(t, root, "user-work.txt", "untracked user work\n")
+	writeTownSafetyFile(t, root, "tracked.txt", "dirty tracked work\n")
+
+	return root
+}
+
+func writeTownSafetyFile(t *testing.T, root, rel, contents string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatalf("write %s: %v", rel, err)
+	}
+}
+
+func snapshotTownRootSafety(t *testing.T, root string) townRootSafetySnapshot {
+	t.Helper()
+	g := NewGit(root)
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("current branch: %v", err)
+	}
+	s := townRootSafetySnapshot{
+		Head:   head,
+		Branch: branch,
+		Files:  make(map[string]string),
+	}
+	for _, rel := range townRootSafetyFiles() {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		s.Files[rel] = string(contents)
+	}
+	return s
+}
+
+func townRootSafetyFiles() []string {
+	return []string{
+		"mayor/town.json",
+		"mayor/rigs.json",
+		".dolt-data/gastown/.dolt/noms/manifest",
+		".runtime/sentinel",
+		".beads/metadata.json",
+		"daemon/daemon.pid",
+		"user-work.txt",
+		"tracked.txt",
+	}
+}
+
+func assertTownRootSafetyPreserved(t *testing.T, root string, before townRootSafetySnapshot) {
+	t.Helper()
+	after := snapshotTownRootSafety(t, root)
+	if after.Head != before.Head {
+		t.Fatalf("HEAD changed: got %s, want %s", after.Head, before.Head)
+	}
+	if after.Branch != before.Branch {
+		t.Fatalf("branch changed: got %s, want %s", after.Branch, before.Branch)
+	}
+	for rel, want := range before.Files {
+		if got := after.Files[rel]; got != want {
+			t.Fatalf("%s changed: got %q, want %q", rel, got, want)
+		}
+	}
+}
+
+func requireTownRootSafetyError(t *testing.T, err error) {
+	t.Helper()
+	if !errors.Is(err, ErrUnsafeTownRootGitMutation) {
+		t.Fatalf("error = %v, want ErrUnsafeTownRootGitMutation", err)
+	}
+}
+
+func TestTownRootMutatingGitCommandsAreBlocked(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*Git) error
+	}{
+		{name: "checkout", run: func(g *Git) error { return g.Checkout("polecat/safety") }},
+		{name: "checkout new branch", run: func(g *Git) error { return g.CheckoutNewBranch("polecat/new", "polecat/safety") }},
+		{name: "checkout reset branch", run: func(g *Git) error { return g.CheckoutResetBranch("polecat/reset", "polecat/safety") }},
+		{name: "reset hard", run: func(g *Git) error { return g.ResetHard("polecat/safety") }},
+		{name: "clean force", run: func(g *Git) error { return g.CleanForce() }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := initTownRootSafetyRepo(t)
+			before := snapshotTownRootSafety(t, root)
+			err := tt.run(NewGit(root))
+			requireTownRootSafetyError(t, err)
+			assertTownRootSafetyPreserved(t, root, before)
+		})
+	}
+}
+
+func TestTownRootReadOnlyStashListIsAllowed(t *testing.T) {
+	root := initTownRootSafetyRepo(t)
+	count, err := NewGit(root).StashCount()
+	if err != nil {
+		t.Fatalf("stash count should be allowed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("stash count = %d, want 0", count)
+	}
+}
+
+func TestNestedWorkDirResolvingToTownRootGitIsBlocked(t *testing.T) {
+	root := initTownRootSafetyRepo(t)
+	rigDir := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatalf("mkdir rig dir: %v", err)
+	}
+	cmd := exec.Command("git", "-C", rigDir, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("raw git top-level: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != root {
+		t.Fatalf("raw git top-level = %q, want %q", got, root)
+	}
+
+	before := snapshotTownRootSafety(t, root)
+	for _, tt := range []struct {
+		name string
+		run  func(*Git) error
+	}{
+		{name: "checkout", run: func(g *Git) error { return g.Checkout("polecat/safety") }},
+		{name: "reset hard", run: func(g *Git) error { return g.ResetHard("polecat/safety") }},
+		{name: "clean force", run: func(g *Git) error { return g.CleanForce() }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err = tt.run(NewGit(rigDir))
+			requireTownRootSafetyError(t, err)
+			assertTownRootSafetyPreserved(t, root, before)
+		})
+	}
+}
+
+func TestWorktreeAddCannotTargetTownRootRuntimePaths(t *testing.T) {
+	root := initTownRootSafetyRepo(t)
+	before := snapshotTownRootSafety(t, root)
+
+	src := initTestRepo(t)
+	bareDir := filepath.Join(t.TempDir(), ".repo.git")
+	cmd := exec.Command("git", "clone", "--bare", src, bareDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone bare: %v\n%s", err, out)
+	}
+
+	for i, target := range []string{
+		root,
+		filepath.Join(root, "mayor", "bad-worktree"),
+		filepath.Join(root, ".dolt-data", "bad-worktree"),
+		filepath.Join(root, ".runtime", "bad-worktree"),
+		filepath.Join(root, ".beads", "bad-worktree"),
+		filepath.Join(root, "daemon", "bad-worktree"),
+	} {
+		t.Run(filepath.Base(filepath.Dir(target))+"/"+filepath.Base(target), func(t *testing.T) {
+			err := NewGitWithDir(bareDir, "").WorktreeAddFromRef(target, fmt.Sprintf("polecat/town-root-%d", i), "HEAD")
+			requireTownRootSafetyError(t, err)
+			assertTownRootSafetyPreserved(t, root, before)
+		})
+	}
+
+	link := filepath.Join(t.TempDir(), "townlink")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	err := NewGitWithDir(bareDir, "").WorktreeAddFromRef(filepath.Join(link, ".runtime", "linked-worktree"), "polecat/town-root-symlink", "HEAD")
+	requireTownRootSafetyError(t, err)
+	assertTownRootSafetyPreserved(t, root, before)
+}
+
+func TestCloneCannotTargetTownRootRuntimePaths(t *testing.T) {
+	root := initTownRootSafetyRepo(t)
+	before := snapshotTownRootSafety(t, root)
+	src := initTestRepo(t)
+
+	err := NewGit(t.TempDir()).Clone(src, root)
+	requireTownRootSafetyError(t, err)
+	assertTownRootSafetyPreserved(t, root, before)
+
+	link := filepath.Join(t.TempDir(), "townlink")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	err = NewGit(t.TempDir()).Clone(src, filepath.Join(link, ".dolt-data", "clone"))
+	requireTownRootSafetyError(t, err)
+	assertTownRootSafetyPreserved(t, root, before)
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir town root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	err = NewGit(t.TempDir()).Clone(src, filepath.Join(".runtime", "relative-clone"))
+	requireTownRootSafetyError(t, err)
+	assertTownRootSafetyPreserved(t, root, before)
 }
 
 func TestIsRepo(t *testing.T) {
@@ -191,6 +435,37 @@ func TestStatus(t *testing.T) {
 	}
 }
 
+// TestStatusModifiedInWorktreeOnlyFirstLine guards against a regression where
+// Status() lost the leading space of a porcelain " M" (modified-in-worktree,
+// not staged) code on the first status line. run()'s blanket strings.TrimSpace
+// ate that space before parsePorcelainStatusEntry ever saw it, off-by-one
+// shifting the parsed path (e.g. "mayor/daemon.json" became "ayor/daemon.json").
+// TestStatus above never caught this because "??" (untracked) doesn't start
+// with a space. See gt-2xrj.
+func TestStatusModifiedInWorktreeOnlyFirstLine(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// README.md already exists and is committed (from initTestRepo); modify
+	// it in the worktree without staging, so it is the sole, first status
+	// line with code " M".
+	readme := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Test\nmodified\n"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	status, err := g.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.Clean {
+		t.Fatal("expected dirty status")
+	}
+	if len(status.Modified) != 1 || status.Modified[0] != "README.md" {
+		t.Errorf("Modified = %v, want [\"README.md\"]", status.Modified)
+	}
+}
+
 func TestAddAndCommit(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)
@@ -263,6 +538,56 @@ func TestCheckout(t *testing.T) {
 	branch, _ := g.CurrentBranch()
 	if branch != "feature" {
 		t.Errorf("branch = %q, want feature", branch)
+	}
+}
+
+func TestCheckoutDetachAllowsBranchCheckedOutInAnotherWorktree(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	mainBranch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	mainSHA, err := g.Rev(mainBranch)
+	if err != nil {
+		t.Fatalf("Rev %s: %v", mainBranch, err)
+	}
+
+	worktreePath := filepath.Join(t.TempDir(), "worker")
+	runGit(t, dir, "worktree", "add", "-b", "polecat/test-detach", worktreePath, "HEAD")
+	workerGit := NewGit(worktreePath)
+
+	if err := os.WriteFile(filepath.Join(dir, "after-worker.txt"), []byte("new main commit\n"), 0644); err != nil {
+		t.Fatalf("write after-worker file: %v", err)
+	}
+	runGit(t, dir, "add", "after-worker.txt")
+	runGit(t, dir, "commit", "-m", "advance main")
+	mainSHA, err = g.Rev(mainBranch)
+	if err != nil {
+		t.Fatalf("Rev advanced %s: %v", mainBranch, err)
+	}
+
+	if err := workerGit.Checkout(mainBranch); err == nil {
+		t.Fatalf("Checkout(%s) succeeded, expected branch-in-use failure", mainBranch)
+	}
+	if err := workerGit.CheckoutDetach(mainBranch); err != nil {
+		t.Fatalf("CheckoutDetach(%s): %v", mainBranch, err)
+	}
+
+	branch, err := workerGit.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch after detach: %v", err)
+	}
+	if branch != "HEAD" {
+		t.Fatalf("branch after detach = %q, want HEAD", branch)
+	}
+	headSHA, err := workerGit.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev HEAD after detach: %v", err)
+	}
+	if headSHA != mainSHA {
+		t.Fatalf("detached HEAD = %q, want %q", headSHA, mainSHA)
 	}
 }
 
@@ -1921,16 +2246,40 @@ func TestIsGasTownRuntimePath(t *testing.T) {
 		{".runtime/", true},
 		{".runtime/state.json", true},
 		{".runtime", true},
+		{".opencode/", true},
+		{".opencode/plugins/gastown.js", true},
+		{".opencode/commands/handoff.md", true},
+		{".codex/", true},
+		{".codex/config.toml", true},
+		{".codex/agents/trade-risk-reviewer.toml", true},
+		{".agents/", true},
+		{".agents/skills/pr-sheriff/SKILL.md", true},
 		{".beads/", true},
 		{".beads/db.json", true},
+		{".beads\\db.json", true},
+		{".beads/.runtime/state.json", true},
 		{".logs/agent.log", true},
 		{"__pycache__/", true},
 		{"__pycache__/foo.cpython-312.pyc", true},
 		{"src/__pycache__/bar.pyc", true},
+		{"services/cyrus/workflow-cyrus-edge/node_modules/pkg/index.js", true},
+		{"services\\cyrus\\workflow-cyrus-edge\\node_modules\\pkg\\index.js", true},
+		{"dashboard/public/meridian-dashboard/.vite/vitest/hash/results.json", true},
+		{"services/workflows/collateral-internal/execution_log.db", true},
+		{"api/.pytest_cache/v/cache/nodeids", true},
+		{"api/.mypy_cache/3.12/module.meta.json", true},
+		{"api/.ruff_cache/0.8.0/cache", true},
+		{"coverage/lcov.info", true},
+		{"htmlcov/index.html", true},
+		{"src/module.pyc", true},
+		{"frontend/.DS_Store", true},
 		{"src/main.go", false},
 		{"README.md", false},
 		{".gitignore", false},
 		{"claude-stuff/foo", false},
+		{"codex-notes/foo", false},
+		{"agents-list.md", false},
+		{"src/coverage_report.go", false},
 	}
 
 	for _, tt := range tests {
@@ -1953,7 +2302,7 @@ func TestCleanExcludingRuntime(t *testing.T) {
 			name: "only runtime artifacts",
 			s: UncommittedWorkStatus{
 				HasUncommittedChanges: true,
-				UntrackedFiles:        []string{".claude/", ".runtime/state.json"},
+				UntrackedFiles:        []string{".claude/", ".opencode/plugins/gastown.js", ".runtime/state.json"},
 			},
 			want: true,
 		},
@@ -1962,6 +2311,14 @@ func TestCleanExcludingRuntime(t *testing.T) {
 			s: UncommittedWorkStatus{
 				HasUncommittedChanges: true,
 				ModifiedFiles:         []string{"src/main.go"},
+			},
+			want: false,
+		},
+		{
+			name: "runtime path conflict blocks",
+			s: UncommittedWorkStatus{
+				HasUncommittedChanges: true,
+				UnmergedFiles:         []string{".opencode/plugins/gastown.js"},
 			},
 			want: false,
 		},
@@ -2017,6 +2374,20 @@ func TestCleanExcludingRuntime(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "nested dependency and cache artifacts",
+			s: UncommittedWorkStatus{
+				HasUncommittedChanges: true,
+				UntrackedFiles: []string{
+					"services/cyrus/workflow-cyrus-edge/node_modules/pkg/index.js",
+					"dashboard/public/meridian-dashboard/.vite/vitest/hash/results.json",
+					"services/workflows/collateral-internal/execution_log.db",
+					"api/.pytest_cache/v/cache/nodeids",
+					"src/__pycache__/module.cpython-312.pyc",
+				},
+			},
+			want: true,
+		},
+		{
 			// CLAUDE.local.md is a Gas Town overlay file (gt-p35) that must not
 			// block gt done or be auto-committed.
 			name: "CLAUDE.local.md is runtime artifact",
@@ -2035,6 +2406,284 @@ func TestCleanExcludingRuntime(t *testing.T) {
 				t.Errorf("CleanExcludingRuntime() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRuntimeArtifactPaths(t *testing.T) {
+	status := UncommittedWorkStatus{
+		HasUncommittedChanges: true,
+		ModifiedFiles: []string{
+			"services/workflows/collateral-internal/execution_log.db",
+			"src/handler.go",
+		},
+		UntrackedFiles: []string{
+			".opencode/plugins/gastown.js",
+			"services/cyrus/workflow-cyrus-edge/node_modules/pkg/index.js",
+			"services/cyrus/workflow-cyrus-edge/node_modules/pkg/package.json",
+			"dashboard/public/meridian-dashboard/.vite/vitest/hash/results.json",
+			"api/.pytest_cache/v/cache/nodeids",
+			"src/__pycache__/module.cpython-312.pyc",
+			"cmd/new_feature.go",
+		},
+	}
+
+	got := status.RuntimeArtifactPaths()
+	want := []string{
+		"services/workflows/collateral-internal/execution_log.db",
+		".opencode/",
+		"services/cyrus/workflow-cyrus-edge/node_modules/",
+		"dashboard/public/meridian-dashboard/.vite/",
+		"api/.pytest_cache/",
+		"src/__pycache__/",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("RuntimeArtifactPaths() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RuntimeArtifactPaths()[%d] = %q, want %q (all: %#v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestRuntimeArtifactPathspecs(t *testing.T) {
+	got := RuntimeArtifactPathspecs([]string{
+		".beads/redirect",
+		"web/.beads/redirect",
+		"web/.beads/db.sqlite",
+		".opencode/settings.json",
+		"api/.opencode/settings.json",
+		"./.runtime/state.json",
+		"svc/.runtime/state.json",
+		"tools/.claude/settings.json",
+		"src/main.go",
+		"pkg/cache.pyc",
+	})
+	want := []string{
+		".beads/",
+		"web/.beads/",
+		".opencode/",
+		"api/.opencode/",
+		".runtime/",
+		"svc/.runtime/",
+		"tools/.claude/",
+		"pkg/cache.pyc",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("RuntimeArtifactPathspecs() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RuntimeArtifactPathspecs()[%d] = %q, want %q (all: %#v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestParsePorcelainStatusEntryPreservesRenameCopySourceAndConflict(t *testing.T) {
+	tests := []struct {
+		name       string
+		line       string
+		wantCode   string
+		wantSource string
+		wantPath   string
+		wantPaths  []string
+		unmerged   bool
+	}{
+		{
+			name:       "rename",
+			line:       "R  README.md -> .opencode/plugins/gastown.js",
+			wantCode:   "R ",
+			wantSource: "README.md",
+			wantPath:   ".opencode/plugins/gastown.js",
+			wantPaths:  []string{"README.md", ".opencode/plugins/gastown.js"},
+		},
+		{
+			name:       "copy",
+			line:       "C  README.md -> .opencode/plugins/gastown.js",
+			wantCode:   "C ",
+			wantSource: "README.md",
+			wantPath:   ".opencode/plugins/gastown.js",
+			wantPaths:  []string{"README.md", ".opencode/plugins/gastown.js"},
+		},
+		{
+			name:      "unmerged",
+			line:      "UU .opencode/plugins/gastown.js",
+			wantCode:  "UU",
+			wantPath:  ".opencode/plugins/gastown.js",
+			wantPaths: []string{".opencode/plugins/gastown.js"},
+			unmerged:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parsePorcelainStatusEntry(tt.line)
+			if !ok {
+				t.Fatal("parsePorcelainStatusEntry returned ok=false")
+			}
+			if got.Code != tt.wantCode || got.SourcePath != tt.wantSource || got.Path != tt.wantPath || got.Unmerged != tt.unmerged {
+				t.Fatalf("parsePorcelainStatusEntry(%q) = %+v", tt.line, got)
+			}
+			if paths := got.paths(); strings.Join(paths, "\x00") != strings.Join(tt.wantPaths, "\x00") {
+				t.Fatalf("paths = %v, want %v", paths, tt.wantPaths)
+			}
+		})
+	}
+}
+
+func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.T) {
+	t.Run("rename to real path blocks", func(t *testing.T) {
+		dir := initTestRepo(t)
+		runGitTestCmd(t, dir, "mv", "README.md", "renamed.md")
+
+		status, err := NewGit(dir).CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if !status.HasUncommittedChanges {
+			t.Fatal("rename should mark worktree dirty")
+		}
+		want := []string{"README.md", "renamed.md"}
+		if got := status.NonRuntimePaths(); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("NonRuntimePaths = %v, want %v", got, want)
+		}
+		if status.CleanExcludingRuntime() {
+			t.Fatal("rename to real path must block runtime-excluding clean check")
+		}
+	})
+
+	t.Run("rename from real path to runtime path blocks", func(t *testing.T) {
+		dir := initTestRepo(t)
+		if err := os.MkdirAll(filepath.Join(dir, ".opencode", "plugins"), 0755); err != nil {
+			t.Fatalf("mkdir opencode plugins: %v", err)
+		}
+		runGitTestCmd(t, dir, "mv", "README.md", ".opencode/plugins/gastown.js")
+
+		status, err := NewGit(dir).CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if !status.HasUncommittedChanges {
+			t.Fatal("runtime rename should still mark raw worktree dirty")
+		}
+		if got := status.NonRuntimePaths(); len(got) != 1 || got[0] != "README.md" {
+			t.Fatalf("NonRuntimePaths = %v, want [README.md]", got)
+		}
+		if status.CleanExcludingRuntime() {
+			t.Fatal("real source renamed to runtime destination must block runtime-excluding clean check")
+		}
+	})
+
+	t.Run("rename from runtime path to runtime path is ignored by runtime filter", func(t *testing.T) {
+		dir := initTestRepo(t)
+		if err := os.MkdirAll(filepath.Join(dir, ".opencode", "plugins"), 0755); err != nil {
+			t.Fatalf("mkdir opencode plugins: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".opencode", "plugins", "old.js"), []byte("runtime\n"), 0644); err != nil {
+			t.Fatalf("write runtime source: %v", err)
+		}
+		runGitTestCmd(t, dir, "add", ".opencode/plugins/old.js")
+		runGitTestCmd(t, dir, "commit", "-m", "add tracked runtime source")
+		runGitTestCmd(t, dir, "mv", ".opencode/plugins/old.js", ".opencode/plugins/gastown.js")
+
+		status, err := NewGit(dir).CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if !status.HasUncommittedChanges {
+			t.Fatal("runtime rename should still mark raw worktree dirty")
+		}
+		if got := status.NonRuntimePaths(); len(got) != 0 {
+			t.Fatalf("NonRuntimePaths = %v, want none for runtime-only rename", got)
+		}
+		if !status.CleanExcludingRuntime() {
+			t.Fatal("runtime-only rename should be clean excluding runtime")
+		}
+	})
+
+	t.Run("unmerged runtime conflict blocks", func(t *testing.T) {
+		dir := initTestRepo(t)
+		runGitTestCmd(t, dir, "branch", "-M", "main")
+		if err := os.MkdirAll(filepath.Join(dir, ".opencode", "plugins"), 0755); err != nil {
+			t.Fatalf("mkdir opencode plugins: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".opencode", "plugins", "gastown.js"), []byte("base\n"), 0644); err != nil {
+			t.Fatalf("write base runtime conflict file: %v", err)
+		}
+		runGitTestCmd(t, dir, "add", ".opencode/plugins/gastown.js")
+		runGitTestCmd(t, dir, "commit", "-m", "add runtime conflict base")
+		runGitTestCmd(t, dir, "switch", "-c", "side")
+		if err := os.WriteFile(filepath.Join(dir, ".opencode", "plugins", "gastown.js"), []byte("side\n"), 0644); err != nil {
+			t.Fatalf("write side runtime conflict file: %v", err)
+		}
+		runGitTestCmd(t, dir, "commit", "-am", "side runtime change")
+		runGitTestCmd(t, dir, "switch", "main")
+		if err := os.WriteFile(filepath.Join(dir, ".opencode", "plugins", "gastown.js"), []byte("main\n"), 0644); err != nil {
+			t.Fatalf("write main runtime conflict file: %v", err)
+		}
+		runGitTestCmd(t, dir, "commit", "-am", "main runtime change")
+		runGitTestCmdWantFailure(t, dir, "merge", "side")
+
+		status, err := NewGit(dir).CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if got := status.NonRuntimePaths(); len(got) != 1 || got[0] != ".opencode/plugins/gastown.js" {
+			t.Fatalf("NonRuntimePaths = %v, want [.opencode/plugins/gastown.js]", got)
+		}
+		if status.CleanExcludingRuntime() {
+			t.Fatal("runtime unmerged conflict must block runtime-excluding clean check")
+		}
+	})
+
+	t.Run("unmerged conflict blocks", func(t *testing.T) {
+		dir := initTestRepo(t)
+		runGitTestCmd(t, dir, "branch", "-M", "main")
+		if err := os.WriteFile(filepath.Join(dir, "conflict.txt"), []byte("base\n"), 0644); err != nil {
+			t.Fatalf("write base conflict file: %v", err)
+		}
+		runGitTestCmd(t, dir, "add", "conflict.txt")
+		runGitTestCmd(t, dir, "commit", "-m", "add conflict base")
+		runGitTestCmd(t, dir, "switch", "-c", "side")
+		if err := os.WriteFile(filepath.Join(dir, "conflict.txt"), []byte("side\n"), 0644); err != nil {
+			t.Fatalf("write side conflict file: %v", err)
+		}
+		runGitTestCmd(t, dir, "commit", "-am", "side change")
+		runGitTestCmd(t, dir, "switch", "main")
+		if err := os.WriteFile(filepath.Join(dir, "conflict.txt"), []byte("main\n"), 0644); err != nil {
+			t.Fatalf("write main conflict file: %v", err)
+		}
+		runGitTestCmd(t, dir, "commit", "-am", "main change")
+		runGitTestCmdWantFailure(t, dir, "merge", "side")
+
+		status, err := NewGit(dir).CheckUncommittedWork()
+		if err != nil {
+			t.Fatalf("CheckUncommittedWork: %v", err)
+		}
+		if got := status.NonRuntimePaths(); len(got) != 1 || got[0] != "conflict.txt" {
+			t.Fatalf("NonRuntimePaths = %v, want [conflict.txt]", got)
+		}
+		if status.CleanExcludingRuntime() {
+			t.Fatal("unmerged conflict must block runtime-excluding clean check")
+		}
+	})
+}
+
+func runGitTestCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
+func runGitTestCmdWantFailure(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("git %v unexpectedly succeeded\n%s", args, out)
 	}
 }
 
@@ -2102,6 +2751,95 @@ func TestCheckBranchContamination(t *testing.T) {
 	}
 	if contam.Ahead != 5 {
 		t.Errorf("Ahead (from main) = %d, want 5", contam.Ahead)
+	}
+}
+
+func TestBranchContaminationEvaluate(t *testing.T) {
+	tests := []struct {
+		name         string
+		bc           BranchContamination
+		wantSeverity ContaminationSeverity
+		wantReasons  int
+	}{
+		{"clean", BranchContamination{Behind: 0, Ahead: 0}, SeverityClean, 0},
+		{"behind-warn-only", BranchContamination{Behind: ContaminationWarnBehind, Ahead: 0}, SeverityWarn, 1},
+		{"behind-just-under-warn", BranchContamination{Behind: ContaminationWarnBehind - 1, Ahead: 0}, SeverityClean, 0},
+		{"behind-block-boundary", BranchContamination{Behind: ContaminationBlockBehind, Ahead: 0}, SeverityBlock, 1},
+		{"behind-just-under-block", BranchContamination{Behind: ContaminationBlockBehind - 1, Ahead: 0}, SeverityWarn, 1},
+		{"ahead-warn-only", BranchContamination{Behind: 0, Ahead: ContaminationWarnAhead}, SeverityWarn, 1},
+		{"ahead-just-under-warn", BranchContamination{Behind: 0, Ahead: ContaminationWarnAhead - 1}, SeverityClean, 0},
+		{"ahead-block-boundary", BranchContamination{Behind: 0, Ahead: ContaminationBlockAhead}, SeverityBlock, 1},
+		{"ahead-just-under-block", BranchContamination{Behind: 0, Ahead: ContaminationBlockAhead - 1}, SeverityWarn, 1},
+		// Real incident shapes: PR #4238 (~553 behind / ~86 ahead), PR #4257 (~553 behind / ~98 ahead).
+		{"incident-4238-shape", BranchContamination{Behind: 553, Ahead: 86}, SeverityBlock, 2},
+		{"incident-4257-shape", BranchContamination{Behind: 553, Ahead: 98}, SeverityBlock, 2},
+		// Behind blocks while ahead is merely warn-level: the ahead-warn reason must
+		// still surface, not be silently dropped because severity was already block.
+		{"behind-block-ahead-warn-both-reported", BranchContamination{Behind: ContaminationBlockBehind, Ahead: ContaminationWarnAhead}, SeverityBlock, 2},
+		{"ahead-block-behind-warn-both-reported", BranchContamination{Behind: ContaminationWarnBehind, Ahead: ContaminationBlockAhead}, SeverityBlock, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			severity, reasons := tt.bc.Evaluate()
+			if severity != tt.wantSeverity {
+				t.Errorf("Evaluate() severity = %v, want %v", severity, tt.wantSeverity)
+			}
+			if len(reasons) != tt.wantReasons {
+				t.Errorf("Evaluate() reasons = %v (len %d), want len %d", reasons, len(reasons), tt.wantReasons)
+			}
+		})
+	}
+}
+
+// TestCheckBranchContaminationEvaluate_RealRepo closes the loop between the real
+// git rev-list plumbing (CheckBranchContamination) and the pure threshold math
+// (Evaluate), using an unrelated-ahead shape rather than TestCheckBranchContamination's
+// stale-behind shape.
+func TestCheckBranchContaminationEvaluate_RealRepo(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	run("branch", "-M", "main")
+	run("checkout", "-b", "replacement")
+
+	// Simulate an "unrelated ahead" replacement branch: many more commits than a
+	// small replacement/fixup should carry, with main untouched (0 behind).
+	for i := 0; i < ContaminationBlockAhead+5; i++ {
+		fname := filepath.Join(dir, fmt.Sprintf("unrelated_%d.txt", i))
+		if err := os.WriteFile(fname, []byte("unrelated change"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", ".")
+		run("commit", "-m", fmt.Sprintf("unrelated commit %d", i))
+	}
+
+	contam, err := g.CheckBranchContamination("main")
+	if err != nil {
+		t.Fatalf("CheckBranchContamination: %v", err)
+	}
+	if contam.Behind != 0 {
+		t.Errorf("Behind = %d, want 0", contam.Behind)
+	}
+	if contam.Ahead != ContaminationBlockAhead+5 {
+		t.Errorf("Ahead = %d, want %d", contam.Ahead, ContaminationBlockAhead+5)
+	}
+
+	severity, reasons := contam.Evaluate()
+	if severity != SeverityBlock {
+		t.Errorf("Evaluate() severity = %v, want SeverityBlock", severity)
+	}
+	if len(reasons) != 1 {
+		t.Errorf("Evaluate() reasons = %v, want exactly 1 (ahead-block only, behind is 0)", reasons)
 	}
 }
 
@@ -2179,6 +2917,96 @@ func initTestRepoWithSplitRemote(t *testing.T) (string, string, string, string) 
 	}
 
 	return localDir, upstream, fork, mainBranch
+}
+
+func TestForkBackedDefaultPushGuard_SplitPushURL(t *testing.T) {
+	localDir, _, _, mainBranch := initTestRepoWithSplitRemote(t)
+	g := NewGit(localDir)
+
+	if !g.ForkBackedRemote("origin") {
+		t.Fatal("split push URL should be detected as fork-backed")
+	}
+	if got := g.CleanDefaultBranchBaseRef("origin", mainBranch); got != "origin/"+mainBranch {
+		t.Fatalf("CleanDefaultBranchBaseRef split = %q, want origin/%s", got, mainBranch)
+	}
+
+	refspecs := []string{
+		mainBranch,
+		"refs/heads/" + mainBranch,
+		"feature:" + mainBranch,
+		"feature:refs/heads/" + mainBranch,
+		"HEAD:" + mainBranch,
+		"+feature:" + mainBranch,
+		":" + mainBranch,
+	}
+	for _, refspec := range refspecs {
+		if err := g.RefuseForkBackedDefaultPush("origin", refspec, mainBranch); err == nil {
+			t.Fatalf("RefuseForkBackedDefaultPush(%q) returned nil, want refusal", refspec)
+		}
+	}
+	if err := g.PushWithEnv("origin", "HEAD:"+mainBranch, false, []string{"GT_INTEGRATION_LAND=1"}); err == nil {
+		t.Fatal("PushWithEnv should not let GT_INTEGRATION_LAND bypass fork default-branch guard")
+	}
+}
+
+func TestForkBackedDefaultPushGuard_OriginForkWithUpstream(t *testing.T) {
+	localDir, upstream, fork, mainBranch := initTestRepoWithSplitRemote(t)
+	g := NewGit(localDir)
+	if err := g.ClearPushURL("origin"); err != nil {
+		t.Fatalf("ClearPushURL: %v", err)
+	}
+	if _, err := g.SetRemoteURL("origin", fork); err != nil {
+		t.Fatalf("SetRemoteURL origin fork: %v", err)
+	}
+	if err := g.AddUpstreamRemote(upstream); err != nil {
+		t.Fatalf("AddUpstreamRemote: %v", err)
+	}
+
+	if !g.ForkBackedRemote("origin") {
+		t.Fatal("origin fork plus distinct upstream should be detected as fork-backed")
+	}
+	if got := g.CleanDefaultBranchBaseRef("origin", mainBranch); got != "upstream/"+mainBranch {
+		t.Fatalf("CleanDefaultBranchBaseRef fork = %q, want upstream/%s", got, mainBranch)
+	}
+	if err := g.Push("origin", "feature:"+mainBranch, false); err == nil {
+		t.Fatal("Push should block feature-to-default refspec in fork/upstream topology")
+	}
+}
+
+func TestForkBackedDefaultPushGuard_AllowsNormalDefaultPush(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	if g.ForkBackedRemote("origin") {
+		t.Fatal("plain origin remote should not be fork-backed")
+	}
+	if err := g.RefuseForkBackedDefaultPush("origin", mainBranch, mainBranch); err != nil {
+		t.Fatalf("normal default push should be allowed: %v", err)
+	}
+}
+
+func TestForkBackedDefaultPushGuard_AllowsFeatureBranchPush(t *testing.T) {
+	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
+	g := NewGit(localDir)
+
+	if err := g.CreateBranch("polecat/fork-policy"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout("polecat/fork-policy"); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "policy.txt"), []byte("policy\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("policy.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("fork policy feature"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := g.Push("origin", "polecat/fork-policy:polecat/fork-policy", false); err != nil {
+		t.Fatalf("feature branch push should remain allowed: %v", err)
+	}
 }
 
 // TestPushRemoteBranchExists_SplitURL is the core regression test for GH#3224:
@@ -2323,6 +3151,276 @@ func TestListPushRemoteRefsWithHashesUsesPushURLHash(t *testing.T) {
 	}
 }
 
+func TestPushRemoteRefTargetStatusPreservesRebasedRemoteBranch(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/rebased-preserved"
+
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout branch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "rebased.txt"), []byte("rebased\n"), 0644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+	if err := g.Add("rebased.txt"); err != nil {
+		t.Fatalf("Add feature: %v", err)
+	}
+	if err := g.Commit("rebased work"); err != nil {
+		t.Fatalf("Commit feature: %v", err)
+	}
+	branchSHA, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev branch: %v", err)
+	}
+	runGit(t, localDir, "push", "origin", branch)
+
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "advance.txt"), []byte("target advanced\n"), 0644); err != nil {
+		t.Fatalf("write advance: %v", err)
+	}
+	if err := g.Add("advance.txt"); err != nil {
+		t.Fatalf("Add advance: %v", err)
+	}
+	if err := g.Commit("advance target"); err != nil {
+		t.Fatalf("Commit advance: %v", err)
+	}
+	runGit(t, localDir, "cherry-pick", strings.TrimSpace(branchSHA))
+	runGit(t, localDir, "push", "origin", mainBranch)
+	if err := g.Fetch("origin"); err != nil {
+		t.Fatalf("Fetch origin: %v", err)
+	}
+
+	ref := mustPushRemoteRef(t, g, branch)
+	ancestor, err := g.IsAncestor(ref.Hash, "origin/"+mainBranch)
+	if err != nil {
+		t.Fatalf("IsAncestor remote hash: %v", err)
+	}
+	if ancestor {
+		t.Fatal("test setup invalid: remote hash should not be an ancestor of target")
+	}
+
+	status, err := g.PushRemoteRefTargetStatus("origin", ref, "origin/"+mainBranch)
+	if err != nil {
+		t.Fatalf("PushRemoteRefTargetStatus: %v", err)
+	}
+	if !status.Preserved || status.UnpreservedPatchCount != 0 {
+		t.Fatalf("PushRemoteRefTargetStatus = %+v, want preserved", status)
+	}
+	if status.Evidence == "" {
+		t.Fatalf("PushRemoteRefTargetStatus evidence should be set: %+v", status)
+	}
+}
+
+func TestPushRemoteRefTargetStatusPreservesMultiCommitSquashRemoteBranch(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	if err := exec.Command("git", "-C", localDir, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
+		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
+	}
+	g := NewGit(localDir)
+	branch := "polecat/squash-remote-preserved"
+
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout branch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "squash.txt"), []byte("one\n"), 0644); err != nil {
+		t.Fatalf("write one: %v", err)
+	}
+	if err := g.Add("squash.txt"); err != nil {
+		t.Fatalf("Add one: %v", err)
+	}
+	if err := g.Commit("checkpoint one"); err != nil {
+		t.Fatalf("Commit one: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "squash.txt"), []byte("one\ntwo\n"), 0644); err != nil {
+		t.Fatalf("write two: %v", err)
+	}
+	if err := g.Add("squash.txt"); err != nil {
+		t.Fatalf("Add two: %v", err)
+	}
+	if err := g.Commit("checkpoint two"); err != nil {
+		t.Fatalf("Commit two: %v", err)
+	}
+	runGit(t, localDir, "push", "origin", branch)
+
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	runGit(t, localDir, "merge", "--squash", branch)
+	runGit(t, localDir, "commit", "-m", "squash polecat work")
+	if err := os.WriteFile(filepath.Join(localDir, "advance.txt"), []byte("target advanced\n"), 0644); err != nil {
+		t.Fatalf("write advance: %v", err)
+	}
+	if err := g.Add("advance.txt"); err != nil {
+		t.Fatalf("Add advance: %v", err)
+	}
+	if err := g.Commit("advance target"); err != nil {
+		t.Fatalf("Commit advance: %v", err)
+	}
+	runGit(t, localDir, "push", "origin", mainBranch)
+	if err := g.Fetch("origin"); err != nil {
+		t.Fatalf("Fetch origin: %v", err)
+	}
+
+	ref := mustPushRemoteRef(t, g, branch)
+	status, err := g.PushRemoteRefTargetStatus("origin", ref, "origin/"+mainBranch)
+	if err != nil {
+		t.Fatalf("PushRemoteRefTargetStatus: %v", err)
+	}
+	if !status.Preserved || status.UnpreservedPatchCount != 0 {
+		t.Fatalf("PushRemoteRefTargetStatus = %+v, want squash-preserved", status)
+	}
+	if status.Evidence != "merge_tree_noop" {
+		t.Fatalf("Evidence = %q, want merge_tree_noop", status.Evidence)
+	}
+}
+
+func TestPushRemoteRefTargetStatusKeepsUnmergedSplitPushRemoteBranch(t *testing.T) {
+	localDir, upstream, _, mainBranch := initTestRepoWithSplitRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/split-unmerged"
+
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch upstream branch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout upstream branch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "upstream-split.txt"), []byte("upstream\n"), 0644); err != nil {
+		t.Fatalf("write upstream: %v", err)
+	}
+	if err := g.Add("upstream-split.txt"); err != nil {
+		t.Fatalf("Add upstream: %v", err)
+	}
+	if err := g.Commit("upstream split work"); err != nil {
+		t.Fatalf("Commit upstream: %v", err)
+	}
+	runGit(t, localDir, "push", upstream, branch)
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	if err := g.Merge(branch); err != nil {
+		t.Fatalf("Merge upstream branch: %v", err)
+	}
+	runGit(t, localDir, "push", upstream, mainBranch)
+	if err := g.Fetch("origin"); err != nil {
+		t.Fatalf("Fetch origin: %v", err)
+	}
+
+	runGit(t, localDir, "checkout", "-B", branch, "origin/"+mainBranch)
+	if err := os.WriteFile(filepath.Join(localDir, "fork-split.txt"), []byte("fork-only\n"), 0644); err != nil {
+		t.Fatalf("write fork: %v", err)
+	}
+	if err := g.Add("fork-split.txt"); err != nil {
+		t.Fatalf("Add fork: %v", err)
+	}
+	if err := g.Commit("fork-only split work"); err != nil {
+		t.Fatalf("Commit fork: %v", err)
+	}
+	runGit(t, localDir, "push", "origin", branch)
+
+	ref := mustPushRemoteRef(t, g, branch)
+	status, err := g.PushRemoteRefTargetStatus("origin", ref, "origin/"+mainBranch)
+	if err != nil {
+		t.Fatalf("PushRemoteRefTargetStatus: %v", err)
+	}
+	if status.Preserved || status.UnpreservedPatchCount == 0 {
+		t.Fatalf("PushRemoteRefTargetStatus = %+v, want unpreserved split push branch", status)
+	}
+}
+
+func mustPushRemoteRef(t *testing.T, g *Git, branch string) RemoteRef {
+	t.Helper()
+	refs, err := g.ListPushRemoteRefsWithHashes("origin", "refs/heads/polecat/")
+	if err != nil {
+		t.Fatalf("ListPushRemoteRefsWithHashes: %v", err)
+	}
+	for _, ref := range refs {
+		if ref.Name == "refs/heads/"+branch {
+			return ref
+		}
+	}
+	t.Fatalf("remote ref %q not found in %#v", branch, refs)
+	return RemoteRef{}
+}
+
+func TestDeleteRemoteBranchIfAtRejectsChangedBranch(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	branch := "polecat/lease-test"
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "lease.txt"), []byte("old"), 0644); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	if err := g.Add("lease.txt"); err != nil {
+		t.Fatalf("Add old: %v", err)
+	}
+	if err := g.Commit("lease old"); err != nil {
+		t.Fatalf("Commit old: %v", err)
+	}
+	oldHash, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev old: %v", err)
+	}
+	if err := g.Push("origin", branch, false); err != nil {
+		t.Fatalf("Push old: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(localDir, "lease.txt"), []byte("new"), 0644); err != nil {
+		t.Fatalf("write new: %v", err)
+	}
+	if err := g.Add("lease.txt"); err != nil {
+		t.Fatalf("Add new: %v", err)
+	}
+	if err := g.Commit("lease new"); err != nil {
+		t.Fatalf("Commit new: %v", err)
+	}
+	newHash, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev new: %v", err)
+	}
+	if err := g.Push("origin", branch, false); err != nil {
+		t.Fatalf("Push new: %v", err)
+	}
+
+	if err := g.DeleteRemoteBranchIfAt("origin", branch, oldHash); err == nil {
+		t.Fatal("DeleteRemoteBranchIfAt should reject a branch that advanced")
+	}
+	exists, err := g.RemoteBranchExists("origin", branch)
+	if err != nil {
+		t.Fatalf("RemoteBranchExists after rejected delete: %v", err)
+	}
+	if !exists {
+		t.Fatal("branch should still exist after rejected delete")
+	}
+	if err := g.DeleteRemoteBranchIfAt("origin", branch, newHash); err != nil {
+		t.Fatalf("DeleteRemoteBranchIfAt current hash: %v", err)
+	}
+	exists, err = g.RemoteBranchExists("origin", branch)
+	if err != nil {
+		t.Fatalf("RemoteBranchExists after delete: %v", err)
+	}
+	if exists {
+		t.Fatal("branch should be deleted when expected hash matches")
+	}
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+}
+
 // TestPushRemoteBranchExists_NoPushURL verifies that PushRemoteBranchExists
 // falls back to RemoteBranchExists when no custom push URL is configured.
 func TestPushRemoteBranchExists_NoPushURL(t *testing.T) {
@@ -2399,6 +3497,112 @@ func TestVerifyPushedCommit(t *testing.T) {
 	}
 }
 
+func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
+	localDir, remoteDir, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	if err := os.WriteFile(filepath.Join(localDir, "shared.txt"), []byte("v1\n"), 0644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	if err := g.Add("shared.txt"); err != nil {
+		t.Fatalf("Add v1: %v", err)
+	}
+	if err := g.Commit("shared target v1"); err != nil {
+		t.Fatalf("Commit v1: %v", err)
+	}
+	v1, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev v1: %v", err)
+	}
+	if err := g.Push("origin", mainBranch, false); err != nil {
+		t.Fatalf("Push v1: %v", err)
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, v1); err != nil {
+		t.Fatalf("Verify exact tip: %v", err)
+	}
+
+	cloneDir := filepath.Join(t.TempDir(), "advancer")
+	if out, err := exec.Command("git", "clone", remoteDir, cloneDir).CombinedOutput(); err != nil {
+		t.Fatalf("clone advancer: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, "shared.txt"), []byte("v2\n"), 0644); err != nil {
+		t.Fatalf("write advancer v2: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "shared.txt"},
+		{"git", "commit", "-m", "shared target v2"},
+		{"git", "push", "origin", mainBranch},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, v1); err != nil {
+		t.Fatalf("Verify ancestor after concurrent push: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(localDir, "shared.txt"), []byte("local-only\n"), 0644); err != nil {
+		t.Fatalf("write local-only: %v", err)
+	}
+	if err := g.Add("shared.txt"); err != nil {
+		t.Fatalf("Add local-only: %v", err)
+	}
+	if err := g.Commit("local only"); err != nil {
+		t.Fatalf("Commit local-only: %v", err)
+	}
+	localOnly, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev local-only: %v", err)
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, localOnly); err == nil {
+		t.Fatal("Verify should fail for commit not reachable from push target")
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", "missing-branch", v1); err == nil {
+		t.Fatal("Verify should fail for missing branch")
+	}
+
+	for _, args := range [][]string{
+		{"git", "checkout", "--orphan", "replacement"},
+		{"git", "rm", "-rf", "."},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, "replacement.txt"), []byte("replacement\n"), 0644); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "replacement.txt"},
+		{"git", "commit", "-m", "replace remote history"},
+		{"git", "branch", "-M", mainBranch},
+		{"git", "push", "--force", "origin", mainBranch},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, v1); err == nil {
+		t.Fatal("Verify should fail when stale origin/main still has commit but push target does not")
+	}
+}
+
 func TestVerifyPushedCommitSplitURL(t *testing.T) {
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
@@ -2435,6 +3639,85 @@ func TestVerifyPushedCommitSplitURL(t *testing.T) {
 	}
 	if err := g.VerifyPushedCommit("origin", "polecat/verified-split", sha); err != nil {
 		t.Fatalf("VerifyPushedCommit should query push URL: %v", err)
+	}
+}
+
+func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
+	localDir, _, forkDir, _ := initTestRepoWithSplitRemote(t)
+	g := NewGit(localDir)
+	branch := "integration/verified-split"
+
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(localDir, "split-shared.txt"), []byte("v1\n"), 0644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	if err := g.Add("split-shared.txt"); err != nil {
+		t.Fatalf("Add v1: %v", err)
+	}
+	if err := g.Commit("split shared v1"); err != nil {
+		t.Fatalf("Commit v1: %v", err)
+	}
+	v1, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev v1: %v", err)
+	}
+	if err := g.Push("origin", branch, false); err != nil {
+		t.Fatalf("Push v1: %v", err)
+	}
+
+	cloneDir := filepath.Join(t.TempDir(), "fork-advancer")
+	if out, err := exec.Command("git", "clone", forkDir, cloneDir).CombinedOutput(); err != nil {
+		t.Fatalf("clone fork advancer: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	cmd := exec.Command("git", "checkout", branch)
+	cmd.Dir = cloneDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout fork branch: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, "split-shared.txt"), []byte("v2\n"), 0644); err != nil {
+		t.Fatalf("write fork v2: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "split-shared.txt"},
+		{"git", "commit", "-m", "split shared v2"},
+		{"git", "push", "origin", branch},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+
+	fetchTip, err := g.RemoteBranchTip("origin", branch)
+	if err != nil {
+		t.Fatalf("RemoteBranchTip: %v", err)
+	}
+	pushTip, err := g.PushRemoteBranchTip("origin", branch)
+	if err != nil {
+		t.Fatalf("PushRemoteBranchTip: %v", err)
+	}
+	if fetchTip == pushTip {
+		t.Fatalf("test setup expected split fetch/push tips to differ, got %s", fetchTip)
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", branch, v1); err != nil {
+		t.Fatalf("Verify should query push URL and accept ancestor: %v", err)
 	}
 }
 
@@ -2519,6 +3802,106 @@ func TestUnpushedCommitsPrefersExactRemoteBranchOverUpstream(t *testing.T) {
 	}
 	if !status.Clean() {
 		t.Fatalf("CheckUncommittedWork should be clean, got %s", status)
+	}
+}
+
+// gt-mv6f: the invariant this test protects is that REMOTE-TRACKING refs are
+// preferred over the bare local ref — "main" must stay last. The ordering between
+// two remotes was changed deliberately: the requested remote now precedes upstream.
+// Resolving a bare target to upstream/ first is wrong in a fork-based town, where
+// work merges to the fork and the parent never receives it, so merged commits
+// compared as unpreserved forever and polecats were pinned at NEEDS_MQ_SUBMIT.
+func TestComparisonRefCandidatesPreferRemoteTrackingRef(t *testing.T) {
+	got := comparisonRefCandidates("main", "origin")
+	want := []string{"origin/main", "upstream/main", "main"}
+	if len(got) != len(want) {
+		t.Fatalf("comparisonRefCandidates length = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("comparisonRefCandidates()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestBranchTargetStatusPreservesSquashMergedAdvancedTarget(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	if err := exec.Command("git", "-C", localDir, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
+		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
+	}
+	g := NewGit(localDir)
+	branch := "polecat/squash-preserved"
+
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("one\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("feature.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("checkpoint one"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("one\ntwo\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("feature.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("checkpoint two"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	runGit(t, localDir, "merge", "--squash", branch)
+	runGit(t, localDir, "commit", "-m", "squash polecat work")
+	if err := os.WriteFile(filepath.Join(localDir, "advance.txt"), []byte("target advanced\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("advance.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("advance target"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	runGit(t, localDir, "push", "origin", mainBranch)
+
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout branch: %v", err)
+	}
+	status, err := g.BranchTargetStatus(branch, "origin", []string{"origin/" + mainBranch})
+	if err != nil {
+		t.Fatalf("BranchTargetStatus: %v", err)
+	}
+	if !status.Preserved || status.UnpreservedPatchCount != 0 {
+		t.Fatalf("BranchTargetStatus = %+v, want squash-preserved target", status)
+	}
+	if status.Evidence != "merge_tree_noop" {
+		t.Fatalf("Evidence = %q, want merge_tree_noop", status.Evidence)
+	}
+
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("feature.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("extra local work"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	status, err = g.BranchTargetStatus(branch, "origin", []string{"origin/" + mainBranch})
+	if err != nil {
+		t.Fatalf("BranchTargetStatus after extra work: %v", err)
+	}
+	if status.Preserved || status.UnpreservedPatchCount == 0 {
+		t.Fatalf("BranchTargetStatus after extra work = %+v, want unpreserved work", status)
 	}
 }
 

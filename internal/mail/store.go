@@ -87,6 +87,9 @@ func (m *Mailbox) storeListFromDir() ([]*Message, error) {
 			if seen[si.ID] {
 				continue
 			}
+			if hasLabel(si.Labels, archivedLabel) {
+				continue
+			}
 			if si.Status == beadsdk.StatusOpen || string(si.Status) == "hooked" {
 				seen[si.ID] = true
 				messages = append(messages, sdkIssueToMessage(si))
@@ -109,8 +112,39 @@ func (m *Mailbox) storeGetFromDir(id string) (*Message, error) {
 		}
 		return nil, fmt.Errorf("store get message: %w", err)
 	}
+	bm := &BeadsMessage{Assignee: si.Assignee, Labels: si.Labels}
+	if !hasLabel(si.Labels, "gt:message") || !m.isInboxMessage(bm) {
+		return nil, ErrNotInboxMessage
+	}
 
 	return sdkIssueToMessage(si), nil
+}
+
+func (m *Mailbox) storeArchiveInDir(id string) error {
+	ctx, cancel := mailStoreCtx()
+	defer cancel()
+
+	err := m.store.AddLabel(ctx, id, archivedLabel, m.mutationActor())
+	telemetry.RecordMailMessage(context.Background(), "archive", telemetry.MailMessageInfo{
+		ID: id,
+		To: m.identity,
+	}, err)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return ErrMessageNotFound
+		}
+		return fmt.Errorf("store archive message: %w", err)
+	}
+	return nil
+}
+
+func hasLabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
 }
 
 // storeCloseInDir closes a message using the in-process store.
@@ -119,7 +153,7 @@ func (m *Mailbox) storeCloseInDir(id string) error {
 	defer cancel()
 
 	sessionID := runtime.SessionIDFromEnv()
-	err := m.store.CloseIssue(ctx, id, "", "", sessionID)
+	err := m.store.CloseIssue(ctx, id, "", m.mutationActor(), sessionID)
 	telemetry.RecordMailMessage(context.Background(), "read", telemetry.MailMessageInfo{
 		ID: id,
 		To: m.identity,
@@ -138,12 +172,57 @@ func (m *Mailbox) storeMarkReadOnly(id string) error {
 	ctx, cancel := mailStoreCtx()
 	defer cancel()
 
-	err := m.store.AddLabel(ctx, id, "read", "")
+	err := m.store.AddLabel(ctx, id, "read", m.mutationActor())
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return ErrMessageNotFound
 		}
 		return fmt.Errorf("store mark read: %w", err)
+	}
+	return nil
+}
+
+func (m *Mailbox) storeAcknowledgeDeliveryForPrimary(id string) error {
+	ctx, cancel := mailStoreCtx()
+	defer cancel()
+
+	si, err := m.store.GetIssue(ctx, id)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return ErrMessageNotFound
+		}
+		return fmt.Errorf("store get message for delivery ack: %w", err)
+	}
+	if AddressToIdentity(si.Assignee) != m.identity {
+		return nil
+	}
+	state, _, _ := ParseDeliveryLabels(si.Labels)
+	if state == "" {
+		return nil
+	}
+
+	toWrite := deliveryAckLabelsToWrite(m.identity, timeNow().UTC(), si.Labels)
+	for _, label := range toWrite {
+		if err := m.store.AddLabel(ctx, id, label, m.mutationActor()); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return ErrMessageNotFound
+			}
+			return fmt.Errorf("store delivery ack: %w", err)
+		}
+	}
+
+	labelsAfterAck := append(append([]string{}, si.Labels...), toWrite...)
+	if !deliveryPendingRemovalNeeded(labelsAfterAck) {
+		return nil
+	}
+	if err := m.store.RemoveLabel(ctx, id, DeliveryLabelPending, m.mutationActor()); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return ErrMessageNotFound
+		}
+		if strings.Contains(err.Error(), "does not have label") {
+			return nil
+		}
+		return fmt.Errorf("store delivery convergence: %w", err)
 	}
 	return nil
 }

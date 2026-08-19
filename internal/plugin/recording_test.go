@@ -1,8 +1,13 @@
 package plugin
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestPluginRunRecord(t *testing.T) {
@@ -21,6 +26,61 @@ func TestPluginRunRecord(t *testing.T) {
 	}
 	if record.Result != ResultSuccess {
 		t.Errorf("expected result 'success', got %q", record.Result)
+	}
+}
+
+func TestRecordRunCreatesAndClosesReceipt(t *testing.T) {
+	townRoot := t.TempDir()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-args.log")
+	bdPath := filepath.Join(binDir, "bd")
+	fakeBD := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n' \"$*\" >> \"$BD_ARGS_LOG\"\n" +
+		"case \"$1\" in\n" +
+		"  create) printf '{\\\"id\\\":\\\"gt-test-run\\\"}\\n' ;;\n" +
+		"  close) exit 0 ;;\n" +
+		"  *) exit 2 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(bdPath, []byte(fakeBD), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", logPath)
+
+	recorder := NewRecorder(townRoot)
+	id, err := recorder.RecordRun(PluginRunRecord{
+		PluginName:  "tool-updater",
+		RigName:     "gastown",
+		Result:      RunResult("warning"),
+		Title:       "tool-updater: failed=brew",
+		Body:        "brew failed",
+		ExtraLabels: []string{"source:test"},
+	})
+	if err != nil {
+		t.Fatalf("RecordRun failed: %v", err)
+	}
+	if id != "gt-test-run" {
+		t.Fatalf("RecordRun id = %q, want gt-test-run", id)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	log := string(data)
+	for _, want := range []string{
+		"create --ephemeral --json -t chore --title=tool-updater: failed=brew",
+		"-l type:plugin-run",
+		"-l plugin:tool-updater",
+		"-l result:warning",
+		"-l rig:gastown",
+		"-l source:test",
+		"--description=brew failed",
+		"close gt-test-run --reason plugin run recorded",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("fake bd log missing %q in:\n%s", want, log)
+		}
 	}
 }
 
@@ -87,6 +147,74 @@ func TestCooldownDurationParsing(t *testing.T) {
 				t.Errorf("cutoff drift: expected ~%v ago, got %v ago", d, elapsed)
 			}
 		})
+	}
+}
+
+// TestGetRunsSinceFindsClosedEphemeralReceipts reproduces gt-fyzz: plugin run
+// receipts are created ephemeral (they live in the wisps table, not the
+// issues table), so discovery must query with ephemeral=true AND both the
+// type:plugin-run and plugin:<name> label clauses. A query missing either
+// the ephemeral flag or one of the two label clauses returns nothing even
+// though the closed receipt exists.
+func TestGetRunsSinceFindsClosedEphemeralReceipts(t *testing.T) {
+	beads.ResetBdAllowStaleCacheForTest()
+
+	townRoot := t.TempDir()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-args.log")
+	bdPath := filepath.Join(binDir, "bd")
+	fakeBD := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n' \"$*\" >> \"$BD_ARGS_LOG\"\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in\n" +
+		"    query)\n" +
+		"      cat <<'JSON'\n" +
+		"[{\"id\":\"hq-wisp-k6ri\",\"title\":\"Plugin run: gitignore-reconcile\",\"status\":\"closed\",\"priority\":2,\"created_at\":\"2026-06-29T12:00:00Z\",\"labels\":[\"type:plugin-run\",\"plugin:gitignore-reconcile\",\"result:skipped\"],\"ephemeral\":true}]\n" +
+		"JSON\n" +
+		"      exit 0\n" +
+		"      ;;\n" +
+		"    version)\n" +
+		"      echo 'bd version 1.0.5'\n" +
+		"      exit 0\n" +
+		"      ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bdPath, []byte(fakeBD), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", logPath)
+
+	recorder := NewRecorder(townRoot)
+	runs, err := recorder.GetRunsSince("gitignore-reconcile", "")
+	if err != nil {
+		t.Fatalf("GetRunsSince failed: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("GetRunsSince returned %d runs, want 1", len(runs))
+	}
+	if runs[0].ID != "hq-wisp-k6ri" {
+		t.Errorf("run ID = %q, want hq-wisp-k6ri", runs[0].ID)
+	}
+	if runs[0].Result != ResultSkipped {
+		t.Errorf("run Result = %q, want skipped", runs[0].Result)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	log := string(data)
+	for _, want := range []string{
+		"ephemeral=true",
+		`label="type:plugin-run"`,
+		`label="plugin:gitignore-reconcile"`,
+		"--all",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("fake bd log missing %q in:\n%s", want, log)
+		}
 	}
 }
 

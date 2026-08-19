@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -91,16 +92,16 @@ func runRemember(cmd *cobra.Command, args []string) error {
 	// Sanitize key: lowercase, hyphens instead of spaces, strip dots
 	key = sanitizeKey(key)
 
-	fullKey := memoryKeyPrefix + memType + "." + key
+	memKey := memBeadKey(memType, key)
 
 	// Check if key already exists
-	existing, _ := bdKvGet(fullKey)
+	existing, _ := bdKvGet(memoryKeyPrefix + memKey)
 	verb := "Stored"
 	if existing != "" {
 		verb = "Updated"
 	}
 
-	if err := bdKvSet(fullKey, content); err != nil {
+	if err := bdRemember(memKey, content); err != nil {
 		return fmt.Errorf("storing memory: %w", err)
 	}
 
@@ -110,6 +111,13 @@ func runRemember(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("%s %s memory: %s\n", style.Success.Render("✓"), verb, style.Bold.Render(displayKey))
 	return nil
+}
+
+// memBeadKey builds the bd memory key for a typed memory. The bd remember/
+// forget/recall commands own the reserved "memory." kv namespace and prepend it
+// internally, so callers must pass the un-prefixed "<type>.<slug>" key.
+func memBeadKey(memType, key string) string {
+	return memType + "." + key
 }
 
 // parseMemoryKey extracts the type and short key from a full kv key.
@@ -191,9 +199,22 @@ func sanitizeKey(key string) string {
 	return key
 }
 
-// bdKvSet calls bd kv set <key> <value>.
-func bdKvSet(key, value string) error {
-	cmd := exec.Command("bd", "kv", "set", key, value)
+// bdRemember stores a memory via bd remember. bd owns the reserved "memory."
+// kv namespace and prepends it internally, so key is the un-prefixed
+// "<type>.<slug>". The "--" terminator lets content start with "-" without
+// being parsed as a flag; bd's own confirmation on stdout is discarded (stdout
+// left nil) so gt prints the single styled line.
+func bdRemember(key, content string) error {
+	cmd := exec.Command("bd", "remember", "--key", key, "--", content)
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// bdForget removes a memory via bd forget. key is the un-prefixed
+// "<type>.<slug>" (or bare legacy slug); bd resolves it within the reserved
+// "memory." namespace.
+func bdForget(key string) error {
+	cmd := exec.Command("bd", "forget", "--", key)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
@@ -208,14 +229,38 @@ func bdKvGet(key string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// bdKvClear calls bd kv clear <key>.
-func bdKvClear(key string) error {
-	cmd := exec.Command("bd", "kv", "clear", key)
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+// parseBdKvListJSON parses bd kv list --json output into displayable string values.
+func parseBdKvListJSON(data []byte) (map[string]string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parsing kv list: %w", err)
+	}
+
+	kvs := make(map[string]string, len(raw))
+	for k, v := range raw {
+		var s *string
+		if err := json.Unmarshal(v, &s); err == nil {
+			if s != nil {
+				kvs[k] = *s
+			}
+			continue
+		}
+
+		if !strings.HasPrefix(k, memoryKeyPrefix) {
+			continue
+		}
+
+		// Keep non-string memory values visible without promoting bd metadata.
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, v); err != nil {
+			continue
+		}
+		kvs[k] = compact.String()
+	}
+	return kvs, nil
 }
 
-// bdKvListJSON calls bd kv list --json and returns the parsed map.
+// bdKvListJSON calls bd kv list --json and returns the parsed string values.
 func bdKvListJSON() (map[string]string, error) {
 	cmd := exec.Command("bd", "kv", "list", "--json")
 	out, err := cmd.Output()
@@ -223,9 +268,5 @@ func bdKvListJSON() (map[string]string, error) {
 		return nil, err
 	}
 
-	var kvs map[string]string
-	if err := json.Unmarshal(out, &kvs); err != nil {
-		return nil, fmt.Errorf("parsing kv list: %w", err)
-	}
-	return kvs, nil
+	return parseBdKvListJSON(out)
 }

@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // TestCreateBatchConvoy_CreatesOneConvoyTrackingAllBeads verifies that
@@ -465,9 +466,9 @@ shift || true
 
 case "$cmd" in
   sql)
-    # bdDepListRawIDs up: SELECT issue_id FROM dependencies WHERE depends_on_id = '<beadID>' AND type = 'tracks'
+    # bdDepListRawIDs up: match beadID against typed dependency target columns.
     case "$*" in
-      *"depends_on_id = 'gt-bbb'"*)
+      *"depends_on_issue_id = 'gt-bbb'"*)
         echo '[{"issue_id":"hq-cv-existing"}]'
         ;;
       *)
@@ -693,9 +694,9 @@ func TestResolveRigFromBeadIDs_TownLevelPrefix_Errors(t *testing.T) {
 	}
 }
 
-// TestBatchSling_EmptyConvoyCleanupOnAllFailures verifies that when all beads
-// fail to sling, the empty convoy is closed with a cleanup reason.
-func TestBatchSling_EmptyConvoyCleanupOnAllFailures(t *testing.T) {
+// TestCloseConvoyPinsTownDatabaseUnderStaleEnv verifies convoy cleanup closes
+// hq-cv-* beads through the town database even when ambient bd env points away.
+func TestCloseConvoyPinsTownDatabaseUnderStaleEnv(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}
@@ -706,9 +707,15 @@ func TestBatchSling_EmptyConvoyCleanupOnAllFailures(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","name":"test"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
 	townBeads := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(townBeads, 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townBeads, "metadata.json"), []byte(`{"dolt_database":"hq","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`), 0644); err != nil {
+		t.Fatalf("write metadata: %v", err)
 	}
 
 	closeLogPath := filepath.Join(townRoot, "bd-close.log")
@@ -721,11 +728,11 @@ if [ "$cmd" = "--allow-stale" ]; then
   cmd="$1"
 fi
 shift || true
-case "$cmd" in
-  close)
-    echo "$cmd $*" >> "` + closeLogPath + `"
-    exit 0
-    ;;
+	case "$cmd" in
+	  close)
+	    printf '%s %s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$cmd" "$*" "$(pwd)" "${BEADS_DIR:-}" "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_DB:-}" "${BD_DB:-}" "${BEADS_DOLT_DATA_DIR:-}" "${GT_DOLT_DATA:-}" "${BD_DOLT_AUTO_COMMIT:-}" "${BD_READONLY:-}" >> "` + closeLogPath + `"
+	    exit 0
+	    ;;
 esac
 exit 0
 `
@@ -735,20 +742,26 @@ exit 0
 	}
 
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("BEADS_DIR", filepath.Join(townRoot, "wrong", ".beads"))
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "gastown")
+	t.Setenv("BEADS_DB", filepath.Join(townRoot, "wrong.db"))
+	t.Setenv("BD_DB", filepath.Join(townRoot, "wrong.bd"))
+	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(townRoot, "wrong-data"))
+	t.Setenv("GT_DOLT_DATA", filepath.Join(townRoot, "wrong-gt-data"))
+	t.Setenv("BD_READONLY", "true")
+	t.Setenv("BD_DOLT_AUTO_COMMIT", "off")
 
-	// Simulate the cleanup logic from runBatchSling:
-	// If successCount == 0 and batchConvoyID is set, close the convoy.
-	successCount := 0
-	batchConvoyID := "hq-cv-cleanup-test"
-
-	if successCount == 0 && batchConvoyID != "" {
-		// Mirror the exact exec.Command call from sling_batch.go:303
-		cmd := exec.Command("bd", "close", batchConvoyID, "-r", "all beads failed to sling")
-		cmd.Dir = townBeads
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("close convoy: %v", err)
-		}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
 	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	batchConvoyID := "hq-cv-cleanup-test"
+	closeConvoy(batchConvoyID, "all beads failed to sling")
 
 	// Verify close was called
 	closeBytes, err := os.ReadFile(closeLogPath)
@@ -761,6 +774,31 @@ exit 0
 	}
 	if !strings.Contains(closeContent, "all beads failed") {
 		t.Errorf("close log should contain failure reason:\n%s", closeContent)
+	}
+	fields := strings.Split(strings.TrimSpace(closeContent), "|")
+	if len(fields) != 10 {
+		t.Fatalf("close log fields = %v, want 10 fields in %q", fields, closeContent)
+	}
+	if fields[1] != townBeads {
+		t.Fatalf("close cwd = %q, want town beads dir %q", fields[1], townBeads)
+	}
+	if fields[2] != townBeads {
+		t.Fatalf("BEADS_DIR = %q, want %q", fields[2], townBeads)
+	}
+	if fields[3] != "hq" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want hq", fields[3])
+	}
+	if fields[4] != "" || fields[5] != "" || fields[6] != "" {
+		t.Fatalf("stale DB env should be stripped, got BEADS_DB=%q BD_DB=%q BEADS_DOLT_DATA_DIR=%q", fields[4], fields[5], fields[6])
+	}
+	if fields[7] != "" {
+		t.Fatalf("GT_DOLT_DATA should be stripped, got %q", fields[7])
+	}
+	if fields[8] != "on" {
+		t.Fatalf("BD_DOLT_AUTO_COMMIT = %q, want on", fields[8])
+	}
+	if fields[9] != "" {
+		t.Fatalf("BD_READONLY should be stripped, got %q", fields[9])
 	}
 }
 
@@ -890,7 +928,7 @@ exit 0
 	}
 	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
 
-	convoyID, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "")
+	convoyID, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "", git.WorkRefs{})
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
@@ -924,7 +962,7 @@ exit 0
 // TestCreateAutoConvoy_FlagLikeTitleReturnsError verifies that a title starting
 // with "--" is rejected.
 func TestCreateAutoConvoy_FlagLikeTitleReturnsError(t *testing.T) {
-	_, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "")
+	_, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "", git.WorkRefs{})
 	if err == nil {
 		t.Fatal("expected error for flag-like title, got nil")
 	}
@@ -951,7 +989,7 @@ exit 0
 		t.Fatalf("rewrite bd stub: %v", err)
 	}
 
-	_, err := createAutoConvoy("gt-aaa", "My task", true, "direct", "")
+	_, err := createAutoConvoy("gt-aaa", "My task", true, "direct", "", git.WorkRefs{})
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
@@ -962,6 +1000,54 @@ exit 0
 	}
 	if !strings.Contains(string(logBytes), "--labels=gt:convoy,gt:owned") {
 		t.Errorf("create should include convoy/owned labels:\n%q", string(logBytes))
+	}
+}
+
+// TestCreateAutoConvoy_WorkRefsInDescription verifies that non-empty work-ref
+// overrides passed to createAutoConvoy are persisted onto the convoy bead's
+// description as base_ref/publish_remote/publish_ref/pr_target_ref lines, so a
+// downstream consumer can read them back via beads.ParseConvoyFields.
+func TestCreateAutoConvoy_WorkRefsInDescription(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	bdScript := `#!/bin/sh
+printf 'CMD:' >> "LOGPATH"
+for arg in "$@"; do printf '%s\0' "$arg"; done >> "LOGPATH"
+printf '\n' >> "LOGPATH"
+exit 0
+`
+	townRoot, logPath := setupTownWithBdStub(t, "")
+	bdScript = strings.ReplaceAll(bdScript, "LOGPATH", logPath)
+	if err := os.WriteFile(filepath.Join(townRoot, "bin", "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("rewrite bd stub: %v", err)
+	}
+
+	_, err := createAutoConvoy("gt-aaa", "My task", false, "direct", "", git.WorkRefs{
+		BaseRef:       "upstream/main",
+		PublishRemote: "fork",
+		PublishRef:    "published-branch",
+		PRTargetRef:   "upstream/main",
+	})
+	if err != nil {
+		t.Fatalf("createAutoConvoy() error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		"base_ref: upstream/main",
+		"publish_remote: fork",
+		"publish_ref: published-branch",
+		"pr_target_ref: upstream/main",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("convoy description missing %q:\n%q", want, log)
+		}
 	}
 }
 
@@ -999,7 +1085,7 @@ exit 0
 		t.Fatalf("rewrite bd stub: %v", err)
 	}
 
-	convoyID, err := createAutoConvoy("gt-aaa", "My task", false, "", "")
+	convoyID, err := createAutoConvoy("gt-aaa", "My task", false, "", "", git.WorkRefs{})
 	if err != nil {
 		t.Fatalf("expected no error (dep fail is non-fatal), got: %v", err)
 	}

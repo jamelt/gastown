@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -100,6 +101,41 @@ func TestSanitizeKey(t *testing.T) {
 	}
 }
 
+func TestMemBeadKey(t *testing.T) {
+	// Regression for gt-tgy: the key handed to bd remember/forget must be the
+	// un-prefixed "<type>.<slug>". bd owns the reserved "memory." namespace and
+	// rejects any caller-supplied key starting with it, so memBeadKey must never
+	// emit that prefix.
+	tests := []struct {
+		name    string
+		memType string
+		key     string
+		want    string
+	}{
+		{name: "feedback", memType: "feedback", key: "dont-mock-db", want: "feedback.dont-mock-db"},
+		{name: "general", memType: "general", key: "some-insight", want: "general.some-insight"},
+		{name: "user", memType: "user", key: "senior-go-dev", want: "user.senior-go-dev"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := memBeadKey(tt.memType, tt.key)
+			if got != tt.want {
+				t.Errorf("memBeadKey(%q, %q) = %q, want %q", tt.memType, tt.key, got, tt.want)
+			}
+			if strings.HasPrefix(got, memoryKeyPrefix) {
+				t.Errorf("memBeadKey(%q, %q) = %q must not start with reserved prefix %q", tt.memType, tt.key, got, memoryKeyPrefix)
+			}
+			// Prepending the reserved prefix reproduces the kv key that bd stores
+			// under, so the read/existence paths stay addressable.
+			gotType, gotKey := parseMemoryKey(memoryKeyPrefix + got)
+			if gotType != tt.memType || gotKey != tt.key {
+				t.Errorf("round-trip parseMemoryKey(%q) = (%q, %q), want (%q, %q)", memoryKeyPrefix+got, gotType, gotKey, tt.memType, tt.key)
+			}
+		})
+	}
+}
+
 func TestParseMemoryKey(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -188,5 +224,57 @@ func TestMemTypeRank(t *testing.T) {
 	// unknown types should sort last
 	if memTypeRank("unknown") <= memTypeRank("general") {
 		t.Error("unknown type should rank after general")
+	}
+}
+
+func TestParseBdKvListJSON(t *testing.T) {
+	got, err := parseBdKvListJSON([]byte(`{
+		"memory.project.note":"keep me",
+		"memory.project.empty":"",
+		"memory.project.count":12,
+		"memory.project.enabled":true,
+		"memory.project.tags":["one"],
+		"memory.project.config":{"nested":"value"},
+		"schema_version":1,
+		"other":"keep string kvs",
+		"enabled":true,
+		"tags":["one"],
+		"config":{"nested":"value"},
+		"memory.project.null":null
+	}`))
+	if err != nil {
+		t.Fatalf("parseBdKvListJSON() error = %v", err)
+	}
+
+	want := map[string]string{
+		"memory.project.note":    "keep me",
+		"memory.project.empty":   "",
+		"memory.project.count":   "12",
+		"memory.project.enabled": "true",
+		"memory.project.tags":    `["one"]`,
+		"memory.project.config":  `{"nested":"value"}`,
+		"other":                  "keep string kvs",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parseBdKvListJSON() returned %d entries, want %d: %#v", len(got), len(want), got)
+	}
+	for k, wantValue := range want {
+		if got[k] != wantValue {
+			t.Errorf("parseBdKvListJSON()[%q] = %q, want %q", k, got[k], wantValue)
+		}
+	}
+	if _, ok := got["memory.project.null"]; ok {
+		t.Error("parseBdKvListJSON() kept null memory value")
+	}
+	for _, k := range []string{"schema_version", "enabled", "tags", "config"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("parseBdKvListJSON() kept non-memory non-string value for %q", k)
+		}
+	}
+}
+
+func TestParseBdKvListJSONMalformed(t *testing.T) {
+	if _, err := parseBdKvListJSON([]byte(`{"memory.project.note":`)); err == nil {
+		t.Fatal("parseBdKvListJSON() error = nil, want malformed JSON error")
 	}
 }

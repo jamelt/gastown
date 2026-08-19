@@ -12,8 +12,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -31,39 +31,20 @@ var issuePattern = regexp.MustCompile(`([a-z]+-[a-z0-9]+(?:\.[0-9]+)?)`)
 
 // parseBranchName extracts issue ID and worker from a branch name.
 // Supports formats:
+//   - polecat/<worker>/<issue>[+|@]<suffix>  → issue=<issue>, worker=<worker>
 //   - polecat/<worker>/<issue>  → issue=<issue>, worker=<worker>
-//   - polecat/<worker>-<timestamp>  → issue="", worker=<worker> (modern polecat branches)
+//   - polecat/<worker>-<suffix>  → issue="", worker=<worker>
 //   - <issue>                   → issue=<issue>, worker=""
 func parseBranchName(branch string) branchInfo {
 	info := branchInfo{Branch: branch}
 
-	// Try polecat/<worker>/<issue> or polecat/<worker>/<issue>@<timestamp> format
-	if strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
-		parts := strings.SplitN(branch, "/", 3)
-		if len(parts) == 3 {
-			info.Worker = parts[1]
-			// Strip @timestamp suffix if present (e.g., "gt-abc@mk123" -> "gt-abc")
-			issue := parts[2]
-			if atIdx := strings.Index(issue, "@"); atIdx > 0 {
-				issue = issue[:atIdx]
-			}
-			info.Issue = issue
-			return info
-		}
-		// Modern polecat branch format: polecat/<worker>-<timestamp>
-		// The second part is "worker-timestamp", not an issue ID.
-		// Don't try to extract an issue ID - gt done will use hook_bead fallback.
-		if len(parts) == 2 {
-			// Extract worker name from "worker-timestamp" format
-			workerPart := parts[1]
-			if dashIdx := strings.LastIndex(workerPart, "-"); dashIdx > 0 {
-				info.Worker = workerPart[:dashIdx]
-			} else {
-				info.Worker = workerPart
-			}
-			// Explicitly don't set info.Issue - let hook_bead fallback handle it
-			return info
-		}
+	if meta, ok := polecat.ParseBranchName(branch); ok {
+		info.Worker = meta.Polecat
+		info.Issue = meta.Issue
+		return info
+	}
+	if strings.HasPrefix(branch, "polecat/") {
+		return info
 	}
 
 	// Try to find an issue ID pattern in the branch name
@@ -135,10 +116,12 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
+	defaultBranch := rig.DefaultBranchForPath(filepath.Join(townRoot, rigName))
+
+	// Resolve where this work publishes to. With no per-bead override producer
+	// reachable at submit time, PublishRemote resolves to "origin" (see
+	// git.ResolveWorkRefs) — identical to the previously hardcoded remote.
+	workRefs := g.ResolveWorkRefs(defaultBranch, git.WorkRefs{})
 
 	if branch == defaultBranch || branch == "master" {
 		return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
@@ -158,8 +141,15 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot determine source issue from branch '%s'; use --issue to specify", branch)
 	}
 
-	// Initialize beads for looking up source issue
+	// Initialize current-rig beads for merge-request queue operations, then
+	// resolve the source through town-level routing for source-owned operations.
 	bd := beads.New(cwd)
+	sourceInfo, err := resolveSubmitSourceIssue(cwd, issueID)
+	if err != nil {
+		return fmt.Errorf("source issue validation failed: %w", err)
+	}
+	sourceBD := sourceInfo.BD
+	sourceIssue := sourceInfo.Issue
 
 	// Determine target branch
 	// Priority: explicit --epic > formula_vars base_branch > integration branch auto-detect > rig default.
@@ -167,19 +157,17 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	if mqSubmitEpic != "" {
 		// Explicit --epic flag: read stored branch name, fall back to template
 		rigPath := filepath.Join(townRoot, rigName)
-		target = resolveIntegrationBranchName(bd, rigPath, mqSubmitEpic)
+		target = resolveIntegrationBranchName(sourceBD, rigPath, mqSubmitEpic)
 	} else {
 		// Check for explicit --base-branch override in formula vars on the source issue.
 		// When gt sling dispatches with --base-branch, the value is persisted in
 		// the bead's formula_vars field. Without this check, MRs created via
 		// gt mq submit always target the rig's default branch (usually main),
 		// even when the polecat was working against a feature branch.
-		if sourceIssue, showErr := bd.Show(issueID); showErr == nil {
-			if af := beads.ParseAttachmentFields(sourceIssue); af != nil {
-				if bb := extractFormulaVar(af.FormulaVars, "base_branch"); bb != "" && bb != defaultBranch {
-					target = bb
-					fmt.Printf("  Target branch override: %s (from formula_vars)\n", target)
-				}
+		if af := beads.ParseAttachmentFields(sourceIssue); af != nil {
+			if bb := extractFormulaVar(af.FormulaVars, "base_branch"); bb != "" && bb != defaultBranch {
+				target = bb
+				fmt.Printf("  Target branch override: %s (from formula_vars)\n", target)
 			}
 		}
 
@@ -193,7 +181,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 				refineryEnabled = settings.MergeQueue.IsRefineryIntegrationEnabled()
 			}
 			if refineryEnabled {
-				autoTarget, err := beads.DetectIntegrationBranch(bd, g, issueID)
+				autoTarget, err := beads.DetectIntegrationBranch(sourceBD, g, issueID)
 				if err != nil {
 					// Non-fatal: log and continue with default branch as target
 					fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(note: %v)", err)))
@@ -206,20 +194,10 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 
 	// Get source issue for priority inheritance and dependency check
 	var priority int
-	var sourceIssue *beads.Issue
 	if mqSubmitPriority >= 0 {
 		priority = mqSubmitPriority
-	}
-	// Always try to fetch source issue (needed for both priority and dep check)
-	sourceIssue, err = bd.Show(issueID)
-	if err != nil {
-		if mqSubmitPriority < 0 {
-			priority = 2
-		}
 	} else {
-		if mqSubmitPriority < 0 {
-			priority = sourceIssue.Priority
-		}
+		priority = sourceIssue.Priority
 	}
 
 	// Enforce molecule step dependencies before allowing submit.
@@ -227,15 +205,16 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	// steps are complete. This prevents polecats from skipping steps like
 	// self-review, build-check, or state-update.
 	if !mqSubmitSkipDeps && !mqSubmitResubmit && sourceIssue != nil {
-		if err := checkMoleculeStepDeps(bd, sourceIssue); err != nil {
+		if err := checkMoleculeStepDeps(sourceBD, sourceIssue); err != nil {
 			return err
 		}
 	}
 
-	// GH#3032: Resolve HEAD commit SHA for MR dedup.
-	commitSHA, shaErr := g.Rev("HEAD")
+	// GH#3032/wa-skj: resolve the submitted branch tip for MR dedup and
+	// verification. With --branch this can differ from the checked-out HEAD.
+	commitSHA, shaErr := resolveMQSubmitCommitSHA(g, branch)
 	if shaErr != nil {
-		style.PrintWarning("could not resolve HEAD SHA: %v (falling back to branch-only dedup)", shaErr)
+		style.PrintWarning("could not resolve submitted branch SHA: %v (falling back to branch-only dedup)", shaErr)
 	}
 
 	// Build MR bead title and description
@@ -247,6 +226,13 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	}
 	if worker != "" {
 		description += fmt.Sprintf("\nworker: %s", worker)
+	}
+
+	// Verify before either an idempotent success or a new MR registration.
+	// Refinery's later branch check is local-ref based, so missing/stale pushes
+	// must fail here instead of producing a delayed refinery rejection.
+	if err := verifyMQSubmitPushedBranch(g, workRefs.PublishRemote, branch, commitSHA); err != nil {
+		return err
 	}
 
 	// Check if MR bead already exists for this branch+SHA (idempotency)
@@ -263,6 +249,9 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	if existingMR != nil {
+		if err := validateMergeRequestSource(existingMR, issueID, sourceIssue); err != nil {
+			return fmt.Errorf("existing merge request validation failed: %w", err)
+		}
 		mrIssue = existingMR
 		fmt.Printf("%s MR already exists (idempotent)\n", style.Bold.Render("✓"))
 	} else {
@@ -290,7 +279,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		// GH#2599: Back-link source issue to MR bead for discoverability.
 		if issueID != "" {
 			comment := fmt.Sprintf("MR created: %s", mrIssue.ID)
-			if _, err := bd.Run("comments", "add", issueID, comment); err != nil {
+			if err := sourceBD.AddComment(issueID, comment); err != nil {
 				style.PrintWarning("could not back-link source issue %s to MR %s: %v", issueID, mrIssue.ID, err)
 			}
 		}
@@ -311,18 +300,8 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 					}
 					fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), old.ID)
 
-					// Delete the old remote branch to auto-close the GitHub PR.
-					// Only polecat branches — non-polecat branches may belong to
-					// contributor forks; deleting them closes upstream PRs. (GH#2669)
-					oldFields := beads.ParseMRFields(old)
-					if oldFields != nil && strings.HasPrefix(oldFields.Branch, "polecat/") {
-						g := git.NewGit(cwd)
-						if err := g.DeleteRemoteBranch("origin", oldFields.Branch); err != nil {
-							style.PrintWarning("could not delete superseded branch %s: %v", oldFields.Branch, err)
-						} else {
-							fmt.Printf("  %s Deleted remote branch: %s\n", style.Dim.Render("○"), oldFields.Branch)
-						}
-					}
+					// Leave superseded remote branches intact. Branch deletion belongs to
+					// verified post-merge cleanup, not submit-time queue maintenance.
 				}
 			}
 		}
@@ -353,6 +332,28 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		// polecatCleanup may timeout while waiting, but MR was already created
 	}
 
+	return nil
+}
+
+func resolveMQSubmitCommitSHA(g *git.Git, branch string) (string, error) {
+	return g.Rev(fmt.Sprintf("refs/heads/%s^{commit}", branch))
+}
+
+func verifyMQSubmitPushedBranch(g *git.Git, publishRemote, branch, commitSHA string) error {
+	if commitSHA != "" {
+		if err := g.VerifyPushedCommit(publishRemote, branch, commitSHA); err != nil {
+			return fmt.Errorf("%w\n\nHint: run 'git push %s %s' first (or 'gt done'), then re-run 'gt mq submit'", err, publishRemote, branch)
+		}
+		return nil
+	}
+
+	exists, err := g.PushRemoteBranchExists(publishRemote, branch)
+	if err != nil {
+		return fmt.Errorf("verify branch on %s: %w\n\nHint: run 'git push %s %s' first (or 'gt done'), then re-run 'gt mq submit'", publishRemote, err, publishRemote, branch)
+	}
+	if !exists {
+		return fmt.Errorf("branch %q not found on %s\n\nHint: run 'git push %s %s' first (or 'gt done'), then re-run 'gt mq submit'", branch, publishRemote, publishRemote, branch)
+	}
 	return nil
 }
 

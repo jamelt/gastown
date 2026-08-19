@@ -23,6 +23,23 @@ func (e *ErrOnSuccessFailed) Unwrap() error { return e.Err }
 // resolves `gt-` prefixes (gt-el4 / gastownhall/gastown#3800).
 var ErrCrossRigPrefix = errors.New("cross-rig prefix dispatch refused")
 
+// ErrAlreadyDispatched is returned by Validate when the work bead is already
+// held by a polecat, i.e. a previous cycle dispatched it successfully but died
+// before OnSuccess could close the sling context.
+//
+// gt-l8p0: the dispatch loop is incremental per bead (Execute then OnSuccess),
+// but there is a crash window between them. A run interrupted in that window —
+// by a daemon restart, a kill, or a timeout — leaves the polecat created and
+// holding the work while its context stays open and re-queued. The next cycle
+// then spawns a SECOND polecat for the same bead, and the first is orphaned
+// holding a hook it can never release. Observed live: trader-2a3h had a polecat
+// created and work attached, context still open, and was re-dispatched.
+//
+// This is NOT a dispatch failure — the work IS dispatched. It must close the
+// context rather than accrue failure quota, or the bead circuit-breaks after
+// three interruptions and stops dispatching entirely.
+var ErrAlreadyDispatched = errors.New("work already dispatched to a polecat")
+
 // BeadIDPrefix returns the prefix of a bead ID — the substring before the
 // first '-'. Returns "" if the ID has no dash.
 //
@@ -111,7 +128,12 @@ func (c *DispatchCycle) Run() (DispatchReport, error) {
 	if err != nil {
 		return DispatchReport{}, err
 	}
+	return c.RunPlan(plan)
+}
 
+// RunPlan executes a precomputed dispatch plan. Used when callers need one
+// authoritative plan for rendering, validation, and dispatch.
+func (c *DispatchCycle) RunPlan(plan DispatchPlan) (DispatchReport, error) {
 	report := DispatchReport{
 		Skipped: plan.Skipped,
 		Reason:  plan.Reason,

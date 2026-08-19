@@ -33,7 +33,7 @@ This is infrastructure work. You:
 Orphan scanning requires multi-rig access and may need to interact with
 multiple Witnesses. Dogs have the cross-rig worktrees needed for this."""
 formula = "mol-orphan-scan"
-version = 2
+version = 3
 
 [squash]
 trigger = "on_complete"
@@ -211,6 +211,11 @@ needs = ["triage-orphans"]
 description = """
 Take action on each orphan based on triage.
 
+**0. Record the before-status.** Before acting, capture the orphan's current
+persisted status (from the scan steps) as `before_status`. This is what the
+report will show as the starting state — never a guess or a status implied
+by the triage category.
+
 **1. RESET orphans:**
 ```bash
 bd update <issue> --status=open --assignee=""
@@ -247,7 +252,29 @@ Recommended action: ..."
 rm .beads-wisp/<wisp-file>
 ```
 
-**Exit criteria:** All orphans handled."""
+**6. Verify every action against persisted state (MANDATORY, no exceptions).**
+For every issue/molecule you touched in steps 1-5 (BURN excepted, since the
+record no longer exists), immediately re-read it back from the source of
+truth — never trust the command's exit code or your own intent as proof:
+```bash
+bd show <issue>          # or: bd mol show <mol-id>
+```
+Record the field you acted on (usually `status`) as `after_status`, exactly
+as persisted — not the status you attempted to set.
+
+**If `after_status` does not match what the action was supposed to produce**
+(e.g. you ran RESET expecting `open` but the read-back still shows
+`in_progress` or shows `closed`), the action did NOT succeed as intended:
+- Do NOT record it as RESET/REASSIGN/RECOVER in the next step.
+- Re-classify it as ESCALATE and follow the ESCALATE procedure above,
+  quoting the exact `before_status`/`after_status` you observed.
+- This is a fail-closed rule: an unverified or contradicted transition is
+  always reported as escalated, never as the originally intended action.
+
+**Exit criteria:** All orphans handled, and every non-BURN orphan has a
+verified `before_status`/`after_status` pair pulled from a fresh read after
+the action (not from the action command itself or from memory of what was
+attempted)."""
 
 [[steps]]
 id = "report-findings"
@@ -255,6 +282,14 @@ title = "Generate and send orphan report"
 needs = ["execute-recovery"]
 description = """
 Create summary report of orphan scan and actions.
+
+**Source of truth: the verification reads from execute-recovery, not
+intent.** Every count and every line below MUST be derived from the
+`before_status`/`after_status` pairs you verified in the previous step —
+never from what you planned to do, what the action command claimed, or
+what the triage step guessed. If an orphan's action was re-classified to
+ESCALATE during verification because the persisted state didn't match,
+report it as escalated here too, not as its originally intended action.
 
 **1. Generate report:**
 ```markdown
@@ -268,7 +303,7 @@ Create summary report of orphan scan and actions.
 - Molecules: {{mol_count}}
 - Wisps: {{wisp_count}}
 
-### Actions Taken
+### Actions Taken (verified against persisted state)
 - Reset to open: {{reset_count}}
 - Reassigned: {{reassign_count}}
 - Recovered: {{recover_count}}
@@ -277,9 +312,15 @@ Create summary report of orphan scan and actions.
 
 ### Details
 {{#each orphan}}
-- {{type}} {{id}}: {{action}} - {{reason}}
+- {{type}} {{id}}: {{before_status}} -> {{after_status}} ({{action}}) - {{reason}}
 {{/each}}
 ```
+
+Every `{{id}}` above must be the exact issue/molecule/wisp ID (never a
+count or a summary phrase), and `{{before_status}}` / `{{after_status}}`
+must be the literal values read back from `bd show`/`bd mol show`, not a
+restatement of the action name (e.g. never report "open" for an item whose
+verified `{{after_status}}` was actually `closed`).
 
 **2. Send to Deacon (for logs):**
 ```bash
@@ -294,7 +335,8 @@ gt mail send mayor/ -s "Orphan scan: {{escalate_count}} escalations" \
   -m "{{escalations_section}}"
 ```
 
-**Exit criteria:** Reports sent."""
+**Exit criteria:** Reports sent, and every reported transition traces back
+to a verified `before_status`/`after_status` pair from execute-recovery."""
 
 [[steps]]
 id = "return-to-kennel"
@@ -314,16 +356,24 @@ Status: COMPLETE
 Ready for next assignment."
 ```
 
-**2. Return to kennel:**
-Dog returns to available state in the pool.
+**2. Return to kennel (MANDATORY — the mail above is a notification, not a
+state change):**
+```bash
+gt dog done
+```
+This atomically clears your work assignment and returns you to idle. It is
+idempotent — safe to run even if state is already idle. Sending the
+DOG_DONE mail alone does NOT change `gt dog status`; without this command
+you remain shown as "working" until a patrol force-clears you, which is
+the exact lifecycle regression this formula must not reproduce.
 
-**Exit criteria:** Deacon notified, dog ready for next work."""
+**Exit criteria:** Deacon notified AND `gt dog status` shows this dog idle
+with no work — verify with `gt dog status` before exiting if in doubt."""
 
 [vars]
 [vars.scope]
 description = "Scan scope: 'town' or specific rig name"
 required = true
-default = "town"
 
 [vars.action]
 description = "Recovery action taken for an orphan (computed during execution)"
@@ -331,6 +381,14 @@ default = ""
 
 [vars.action_summary]
 description = "Summary of all actions taken (computed during execution)"
+default = ""
+
+[vars.after_status]
+description = "Persisted status of an orphan re-read after the recovery action, per orphan (computed during execution)"
+default = ""
+
+[vars.before_status]
+description = "Persisted status of an orphan captured before the recovery action, per orphan (computed during execution)"
 default = ""
 
 [vars.burn_count]

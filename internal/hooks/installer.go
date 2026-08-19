@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/hookutil"
+	"github.com/steveyegge/gastown/internal/testguard"
 )
 
 //go:embed templates/*
@@ -52,6 +53,22 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile st
 
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
 
+	// Fail closed before a test binary can write real hook files into a
+	// non-isolated (i.e. live) settings/work directory. See gt-8ik.
+	if err := testguard.RequireIsolated("hooks.InstallForRole write "+targetPath, targetPath); err != nil {
+		return err
+	}
+
+	if provider == "claude" && role == "boot" && isSettingsFile(hooksFile) {
+		_, err := SyncManagedClaudeSettings(Target{
+			Path:     targetPath,
+			Key:      "boot",
+			Role:     "boot",
+			Provider: "claude",
+		}, false)
+		return err
+	}
+
 	if existing, err := os.ReadFile(targetPath); err == nil {
 		if !needsUpgrade(existing) {
 			return nil // File exists and is current — don't overwrite
@@ -69,7 +86,15 @@ func needsUpgrade(content []byte) bool {
 	// Stale pattern: export PATH=... && gt — replaced by {{GT_BIN}} in current templates.
 	// The PATH export breaks Gemini CLI's hook runner which expands $PATH into
 	// an enormous string. Also catches files missing GT_HOOK_SOURCE env vars.
-	return bytes.Contains(content, []byte(`export PATH=`))
+	if bytes.Contains(content, []byte(`export PATH=`)) {
+		return true
+	}
+	if bytes.Contains(content, []byte(`Gas Town OpenCode plugin`)) {
+		return bytes.Contains(content, []byte(`captureRun("gt prime")`)) ||
+			bytes.Contains(content, []byte("$`gt prime`")) ||
+			!bytes.Contains(content, []byte(`prime --hook`))
+	}
+	return false
 }
 
 // SyncResult describes what SyncForRole did.

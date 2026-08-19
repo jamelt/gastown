@@ -16,9 +16,10 @@ var (
 	mailType          string
 	mailReplyTo       string
 	mailNotify        bool
-	mailNoNotify      bool // Suppress auto-nudge notification to recipient
-	mailTo            string   // --to flag (alternative to positional arg)
-	mailFrom          string   // --from flag (override sender, for relay/bridge use)
+	mailNoNotify      bool   // Suppress auto-nudge notification to recipient
+	mailNoResponse    bool   // Mark the message as terminal/no response required
+	mailTo            string // --to flag (alternative to positional arg)
+	mailFrom          string // --from flag (override sender, for relay/bridge use)
 	mailSendSelf      bool
 	mailCC            []string // CC recipients
 	mailInboxJSON     bool
@@ -107,7 +108,7 @@ Addresses:
   <rig>/           - Broadcast to a rig
   list:<name>      - Send to a mailing list (fans out to all members)
 
-Mailing lists are defined in ~/gt/config/messaging.json and allow
+Mailing lists are defined in <town-root>/config/messaging.json and allow
 sending to multiple recipients at once. Each recipient gets their
 own copy of the message.
 
@@ -133,6 +134,7 @@ Examples:
   gt mail send greenplace/Toast -s "Task" -m "Fix bug" --type task --priority 1
   gt mail send greenplace/Toast -s "Urgent" -m "Help!" --urgent
   gt mail send mayor/ -s "Re: Status" -m "Done" --reply-to msg-abc123
+  gt mail send mayor/ -s "Receipt" -m "Recorded" --no-response
   gt mail send --self -s "Handoff" -m "Context for next session"
   gt mail send greenplace/Toast -s "Update" -m "Progress report" --cc overseer
   gt mail send list:oncall -s "Alert" -m "System down"
@@ -215,7 +217,7 @@ var mailArchiveCmd = &cobra.Command{
 	Short: "Archive messages",
 	Long: `Archive one or more messages.
 
-Removes the messages from your inbox by closing them in beads.
+Removes the messages from your inbox without closing their beads rows.
 
 Use --stale to archive messages sent before your current session started.
 
@@ -434,7 +436,7 @@ SYNTAX:
   gt mail announces              # List all announce channels
   gt mail announces <channel>    # Read messages from a channel
 
-Announce channels are bulletin boards defined in ~/gt/config/messaging.json.
+Announce channels are bulletin boards defined in <town-root>/config/messaging.json.
 Messages are broadcast to readers and persist until retention limit is reached.
 Unlike regular mail, announce messages are NOT removed when read.
 
@@ -469,12 +471,13 @@ func init() {
 	mailSendCmd.Flags().StringVar(&mailReplyTo, "reply-to", "", "Message ID this is replying to")
 	mailSendCmd.Flags().BoolVarP(&mailNotify, "notify", "n", false, "Bump priority to high (notification is automatic; use --no-notify to suppress)")
 	mailSendCmd.Flags().BoolVar(&mailNoNotify, "no-notify", false, "Suppress auto-nudge notification to recipient")
+	mailSendCmd.Flags().BoolVar(&mailNoResponse, "no-response", false, "Mark message as final; do not schedule a response reminder")
 	mailSendCmd.MarkFlagsMutuallyExclusive("notify", "no-notify")
 	mailSendCmd.Flags().BoolVar(&mailPinned, "pinned", false, "Pin message (for handoff context that persists)")
 	mailSendCmd.Flags().BoolVar(&mailWisp, "wisp", true, "Send as wisp (ephemeral, default)")
 	mailSendCmd.Flags().BoolVar(&mailPermanent, "permanent", false, "Send as permanent (not ephemeral, synced to remote)")
 	mailSendCmd.Flags().StringVar(&mailTo, "to", "", "Recipient address (alternative to positional argument)")
-	mailSendCmd.Flags().StringVar(&mailFrom, "from", "", "Override sender address (for relay/bridge use)")
+	mailSendCmd.Flags().StringVar(&mailFrom, "from", "", "Override sender address (restricted to convoy/<id>; relay/bridge use)")
 	mailSendCmd.Flags().BoolVar(&mailSendSelf, "self", false, "Send to self (auto-detect from cwd)")
 	mailSendCmd.Flags().StringArrayVar(&mailCC, "cc", nil, "CC recipients (can be used multiple times)")
 	_ = mailSendCmd.MarkFlagRequired("subject") // cobra flags: error only at runtime if missing

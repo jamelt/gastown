@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 var freshSetupIntegrationCounter atomic.Int32
@@ -95,7 +96,7 @@ func TestFreshInstallRigPolecatHookIntegration(t *testing.T) {
 	}
 
 	withWorkingDir(t, hqPath, func() {
-		convoyID, err := createAutoConvoy(issue.ID, issue.Title, false, "mr", "main")
+		convoyID, err := createAutoConvoy(issue.ID, issue.Title, false, "mr", "main", git.WorkRefs{})
 		if err != nil {
 			t.Fatalf("create auto convoy: %v", err)
 		}
@@ -118,8 +119,8 @@ type freshSetupIssue struct {
 
 func freshSetupIntegrationEnv(homeDir, doltPort string) []string {
 	clean := make([]string, 0, len(os.Environ())+3)
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "GT_") || strings.HasPrefix(entry, "BD_") || strings.HasPrefix(entry, "BEADS_DOLT_PORT=") {
+	for _, entry := range beads.StripBDTargetEnv(os.Environ()) {
+		if strings.HasPrefix(entry, "GT_") || strings.HasPrefix(entry, "BD_") {
 			continue
 		}
 		if strings.HasPrefix(entry, "HOME=") {
@@ -127,7 +128,7 @@ func freshSetupIntegrationEnv(homeDir, doltPort string) []string {
 		}
 		clean = append(clean, entry)
 	}
-	return append(clean, "HOME="+homeDir, "GT_DOLT_PORT="+doltPort, "BEADS_DOLT_PORT="+doltPort)
+	return append(clean, "HOME="+homeDir, "GT_DOLT_PORT="+doltPort, "BEADS_DOLT_PORT="+doltPort, "BEADS_DOLT_SERVER_PORT="+doltPort)
 }
 
 func configureGitIdentityForEnv(t *testing.T, env []string) {

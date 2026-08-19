@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -122,15 +123,11 @@ func TestPatrolFormulasHaveReportCycle(t *testing.T) {
 	}
 }
 
-// TestPatrolFormulasHaveWispGC verifies that all three patrol formulas
-// include `bd mol wisp gc` in their inbox-check step to clean up stale
-// wisps from abnormal exits in previous cycles.
-//
-// Without this, patrol agents that die/restart abnormally before reaching
-// the loop-or-exit squash step leave their wisps open indefinitely.
-//
-// Regression test for steveyegge/gastown#1712.
-func TestPatrolFormulasHaveWispGC(t *testing.T) {
+// TestPatrolFormulasUseAuditedClosedOnlyWispGC verifies that live patrols only
+// delete closed wisps and emit a machine-readable dry-run digest first.
+// Age-based cleanup is intentionally disabled until Beads can prove ownership
+// and preserve every kind of live operational record.
+func TestPatrolFormulasUseAuditedClosedOnlyWispGC(t *testing.T) {
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
 		"mol-deacon-patrol.formula.toml",
@@ -149,32 +146,180 @@ func TestPatrolFormulasHaveWispGC(t *testing.T) {
 				t.Fatalf("parsing %s: %v", name, err)
 			}
 
-			// Find the inbox-check step (first step in all patrol formulas)
-			var inboxDesc string
-			for _, step := range f.Steps {
-				if step.ID == "inbox-check" {
-					inboxDesc = step.Description
-					break
-				}
-			}
+			inboxDesc := stepDescription(f, "inbox-check")
 			if inboxDesc == "" {
 				t.Fatalf("%s: inbox-check step not found or has empty description", name)
 			}
 
-			if !strings.Contains(inboxDesc, "bd mol wisp gc") {
-				t.Errorf("%s inbox-check step missing \"bd mol wisp gc\"\n"+
-					"All patrol formulas must run wisp GC at the start of each cycle\n"+
-					"to clean up stale wisps from abnormal exits.\n"+
-					"See steveyegge/gastown#1712.",
-					name)
+			commands := wispGCCommands(inboxDesc)
+			want := []string{
+				"bd mol wisp gc --closed --dry-run --json",
+				"bd mol wisp gc --closed --force",
+			}
+			if len(commands) != len(want) {
+				t.Fatalf("%s: got GC commands %q, want audited closed-only pair %q", name, commands, want)
+			}
+			for i := range want {
+				if commands[i] != want[i] {
+					t.Errorf("%s: GC command %d = %q, want %q", name, i, commands[i], want[i])
+				}
 			}
 		})
 	}
 }
 
+// TestNoFormulaRunsForcedAgeBasedWispGC protects Witness, Refinery, Deacon,
+// manager-wake, completion-scan, and any future embedded patrol entry point.
+func TestNoFormulaRunsForcedAgeBasedWispGC(t *testing.T) {
+	paths, err := fs.Glob(formulasFS, "formulas/*.formula.toml")
+	if err != nil {
+		t.Fatalf("listing embedded formulas: %v", err)
+	}
+
+	for _, path := range paths {
+		content, err := formulasFS.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		// Normalize escaped newlines used by TOML basic strings so commands in
+		// both basic and multiline strings are inspected without requiring every
+		// specialized formula kind to parse as a standalone workflow.
+		source := strings.ReplaceAll(string(content), `\n`, "\n")
+		for _, command := range wispGCCommands(source) {
+			if strings.Contains(command, "--force") && strings.Contains(command, "--age") {
+				t.Errorf("%s contains destructive age-based wisp GC: %q", path, command)
+			}
+			if strings.Contains(command, "--force") && !strings.Contains(command, "--closed") {
+				t.Errorf("%s contains forced wisp GC without closed-only scope: %q", path, command)
+			}
+		}
+	}
+}
+
+// TestPatrolWispGCPreservesIncidentScaleLiveRecords models the 241-record
+// deletion class from gt-6jf. The legacy age-based command selects every old
+// live record; the current audited closed-only commands select none of them.
+func TestPatrolWispGCPreservesIncidentScaleLiveRecords(t *testing.T) {
+	fixture := newWispGCIncidentFixture()
+	if len(fixture.wisps) != 241 || len(fixture.dependencies) != 236 ||
+		len(fixture.labels) != 6 || len(fixture.events) != 253 {
+		t.Fatalf("bad incident fixture dimensions: wisps=%d dependencies=%d labels=%d events=%d",
+			len(fixture.wisps), len(fixture.dependencies), len(fixture.labels), len(fixture.events))
+	}
+
+	legacy := liveRecordsSelectedByGC(fixture.wisps, "bd mol wisp gc --age 1h --force")
+	if len(legacy) != 241 {
+		t.Fatalf("legacy age GC selected %d live records, want 241", len(legacy))
+	}
+	protectedClasses := map[string]bool{
+		"hooked": false, "in_progress": false, "blocked": false,
+		"dependency-waiting": false, "parent-live": false,
+		"recovery": false, "pending-MR": false,
+	}
+	for _, record := range fixture.wisps {
+		protectedClasses[record.class] = true
+	}
+	for class, present := range protectedClasses {
+		if !present {
+			t.Errorf("incident fixture does not cover protected class %q", class)
+		}
+	}
+
+	for _, name := range []string{
+		"mol-witness-patrol.formula.toml",
+		"mol-deacon-patrol.formula.toml",
+		"mol-refinery-patrol.formula.toml",
+	} {
+		content, err := formulasFS.ReadFile("formulas/" + name)
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		f, err := Parse(content)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+
+		for _, command := range wispGCCommands(stepDescription(f, "inbox-check")) {
+			if deleted := liveRecordsSelectedByGC(fixture.wisps, command); len(deleted) != 0 {
+				t.Errorf("%s command %q selects %d live records", name, command, len(deleted))
+			}
+		}
+	}
+}
+
+type wispGCIncidentFixture struct {
+	wisps        []wispGCRecord
+	dependencies [236]struct{}
+	labels       [6]struct{}
+	events       [253]struct{}
+}
+
+type wispGCRecord struct {
+	class              string
+	status             string
+	olderThanThreshold bool
+}
+
+func newWispGCIncidentFixture() wispGCIncidentFixture {
+	classes := []wispGCRecord{
+		{class: "hooked", status: "hooked"},
+		{class: "in_progress", status: "in_progress"},
+		{class: "blocked", status: "blocked"},
+		{class: "dependency-waiting", status: "open"},
+		{class: "parent-live", status: "open"},
+		{class: "recovery", status: "open"},
+		{class: "pending-MR", status: "open"},
+	}
+
+	fixture := wispGCIncidentFixture{wisps: make([]wispGCRecord, 0, 241)}
+	for i := 0; i < 241; i++ {
+		record := classes[i%len(classes)]
+		record.olderThanThreshold = true
+		fixture.wisps = append(fixture.wisps, record)
+	}
+	return fixture
+}
+
+func liveRecordsSelectedByGC(records []wispGCRecord, command string) []wispGCRecord {
+	selected := make([]wispGCRecord, 0)
+	for _, record := range records {
+		switch {
+		case strings.Contains(command, "--closed"):
+			if record.status == "closed" {
+				selected = append(selected, record)
+			}
+		case strings.Contains(command, "--age"):
+			if record.olderThanThreshold {
+				selected = append(selected, record)
+			}
+		}
+	}
+	return selected
+}
+
+func stepDescription(f *Formula, id string) string {
+	for _, step := range f.Steps {
+		if step.ID == id {
+			return step.Description
+		}
+	}
+	return ""
+}
+
+func wispGCCommands(description string) []string {
+	var commands []string
+	for _, line := range strings.Split(description, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "bd mol wisp gc") {
+			commands = append(commands, line)
+		}
+	}
+	return commands
+}
+
 // TestPatrolFormulasUseDynamicBeadResolution verifies that patrol formulas
-// resolve their agent bead ID dynamically at runtime via `bd list`, rather
-// than hardcoding a prefix like `gt-<rig>-refinery`.
+// resolve their agent bead ID dynamically at runtime via `gt agents resolve`,
+// rather than hardcoding a prefix like `gt-<rig>-refinery`.
 //
 // Hardcoded IDs break when AgentBeadIDWithPrefix collapses the rig component
 // (prefix == rig), producing e.g. "cp-refinery" instead of "gt-cp-refinery".
@@ -184,6 +329,10 @@ func TestPatrolFormulasUseDynamicBeadResolution(t *testing.T) {
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
 		"mol-refinery-patrol.formula.toml",
+	}
+	expectedResolver := map[string]string{
+		"mol-witness-patrol.formula.toml":  "YOUR_AGENT_BEAD=$(gt agents resolve --role witness --rig {{rig}})",
+		"mol-refinery-patrol.formula.toml": "YOUR_AGENT_BEAD=$(gt agents resolve --role refinery --rig {{rig}})",
 	}
 
 	for _, name := range patrolFormulas {
@@ -210,12 +359,23 @@ func TestPatrolFormulasUseDynamicBeadResolution(t *testing.T) {
 				t.Fatalf("%s: loop step not found or has empty description", name)
 			}
 
-			// Must use dynamic resolution via bd list
-			if !strings.Contains(loopDesc, "bd list --label=gt:agent") {
-				t.Errorf("%s loop step missing dynamic agent bead resolution (bd list --label=gt:agent).\n"+
+			// Must use dynamic resolution through the agent resolver. The older
+			// bd-list query only sees one table in one DB and misses wisp-backed
+			// or town-stranded agent beads.
+			if !strings.Contains(loopDesc, expectedResolver[name]) {
+				t.Errorf("%s loop step missing dynamic agent bead resolution via gt agents resolve.\n"+
 					"Agent bead IDs must be resolved at runtime, not hardcoded.\n"+
 					"See hq-9xs.",
 					name)
+			}
+			if !strings.Contains(loopDesc, `--agent-bead "$YOUR_AGENT_BEAD"`) {
+				t.Errorf("%s loop step must pass the resolved agent bead to await", name)
+			}
+			if !strings.Contains(loopDesc, `gt agents state "$YOUR_AGENT_BEAD" --set idle=0`) {
+				t.Errorf("%s loop step must reset state on the resolved agent bead", name)
+			}
+			if strings.Contains(loopDesc, "bd list --label=gt:agent") {
+				t.Errorf("%s loop step still uses legacy bd-list agent resolution", name)
 			}
 
 			// Must NOT hardcode gt-<rig> prefix pattern
@@ -224,6 +384,9 @@ func TestPatrolFormulasUseDynamicBeadResolution(t *testing.T) {
 					"This breaks when AgentBeadIDWithPrefix collapses the ID (prefix == rig).\n"+
 					"See hq-9xs.",
 					name)
+			}
+			if strings.Contains(loopDesc, "{{prefix}}-{{rig}}-witness") || strings.Contains(loopDesc, "{{prefix}}-{{rig}}-refinery") {
+				t.Errorf("%s loop step hardcodes prefix/rig agent bead instead of resolved ID", name)
 			}
 		})
 	}
@@ -278,6 +441,7 @@ func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
 	// There should be a mid-cycle heartbeat step
 	foundMid := false
 	foundPreAwait := false
+	foundMandatoryHandoff := false
 	for _, step := range f.Steps {
 		if step.ID == "heartbeat-mid" {
 			foundMid = true
@@ -289,6 +453,9 @@ func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
 			foundPreAwait = true
 			if !strings.Contains(step.Description, "gt deacon heartbeat") {
 				t.Error("loop-or-exit step must refresh heartbeat before await-signal")
+			}
+			if strings.Contains(step.Description, "gt handoff -s") && strings.Contains(step.Description, "mandatory") {
+				foundMandatoryHandoff = true
 			}
 			heartbeatPos := strings.Index(step.Description, "gt deacon heartbeat \"pre-await checkpoint\"")
 			awaitPos := strings.Index(step.Description, "gt mol step await-signal")
@@ -304,5 +471,41 @@ func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
 	}
 	if !foundPreAwait {
 		t.Error("deacon patrol formula must refresh heartbeat again before await-signal")
+	}
+	if !foundMandatoryHandoff {
+		t.Error("deacon patrol formula must require gt handoff after patrol report")
+	}
+}
+
+// TestCheckRecoverySweepReconcilesCleanupStatus verifies that the witness
+// patrol formula's check-recovery-sweep step passes --reconcile-cleanup on
+// its per-polecat check-recovery call.
+//
+// Without this flag, a polecat whose live verdict is SAFE_TO_NUKE is
+// diagnosed correctly every cycle but its stale persisted cleanup_status
+// bead field is never corrected, so `gt polecat list` and the scheduler's
+// capacity snapshot (which read that persisted field directly, not the live
+// verdict) keep reporting it as idle-recovery-needed forever, leaking
+// reusable capacity. See gt-2ggu.
+func TestCheckRecoverySweepReconcilesCleanupStatus(t *testing.T) {
+	content, err := formulasFS.ReadFile("formulas/mol-witness-patrol.formula.toml")
+	if err != nil {
+		t.Fatalf("reading witness patrol formula: %v", err)
+	}
+
+	f, err := Parse(content)
+	if err != nil {
+		t.Fatalf("parsing witness patrol formula: %v", err)
+	}
+
+	desc := stepDescription(f, "check-recovery-sweep")
+	if desc == "" {
+		t.Fatal("check-recovery-sweep step not found or has empty description")
+	}
+
+	if !strings.Contains(desc, "gt polecat check-recovery {{rig}}/<name> --json --reconcile-cleanup") {
+		t.Error("check-recovery-sweep step must pass --reconcile-cleanup on its " +
+			"check-recovery call, or SAFE_TO_NUKE polecats never have their stale " +
+			"cleanup_status corrected and never become reusable. See gt-2ggu.")
 	}
 }

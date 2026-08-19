@@ -16,6 +16,17 @@ import (
 const (
 	defaultDoltRemotesInterval = 15 * time.Minute
 	doltPushTimeout            = 60 * time.Second
+
+	// doltRemotesShutdownBudget bounds pushDoltRemotesWithDeadline's total
+	// running time when called from shutdown(). Each pushDatabase call can
+	// itself take up to 3*doltPushTimeout (add+commit+push), with no
+	// aggregate bound across databases -- a single slow or unreachable
+	// remote (or more than one configured database) could otherwise block
+	// shutdown() well past StopDaemon's gracefulShutdownTimeout, forcing a
+	// SIGKILL that lands mid-Dolt-write instead of mid-idle (gt-if5q).
+	// Best-effort and non-fatal: any databases skipped when the budget runs
+	// out are pushed on the next periodic dolt_remotes cycle instead.
+	doltRemotesShutdownBudget = 10 * time.Second
 )
 
 // doltRemotesInterval returns the configured push interval, or the default (15m).
@@ -29,8 +40,17 @@ func doltRemotesInterval(config *DaemonPatrolConfig) time.Duration {
 }
 
 // pushDoltRemotes commits and pushes each configured database to its remote.
-// Non-fatal: errors are logged but don't stop the patrol.
+// Non-fatal: errors are logged but don't stop the patrol. Unbounded, for the
+// periodic patrol call site where taking longer than usual isn't a problem.
 func (d *Daemon) pushDoltRemotes() {
+	d.pushDoltRemotesWithDeadline(time.Time{})
+}
+
+// pushDoltRemotesWithDeadline is pushDoltRemotes bounded by an overall wall
+// clock deadline; a zero deadline means unbounded. See shutdown(), which
+// passes doltRemotesShutdownBudget so a slow/unreachable remote can't block
+// graceful shutdown indefinitely.
+func (d *Daemon) pushDoltRemotesWithDeadline(deadline time.Time) {
 	if !d.isPatrolActive("dolt_remotes") {
 		return
 	}
@@ -83,7 +103,11 @@ func (d *Daemon) pushDoltRemotes() {
 	}
 
 	pushed := 0
-	for _, db := range databases {
+	for i, db := range databases {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			d.logger.Printf("dolt_remotes: shutdown budget exhausted, skipping remaining %d database(s) (will retry next cycle)", len(databases)-i)
+			break
+		}
 		pushRemote := remote
 		if pushRemote == "" {
 			// Auto-detect the remote name for this database
@@ -93,7 +117,7 @@ func (d *Daemon) pushDoltRemotes() {
 				continue
 			}
 		}
-		if err := d.pushDatabase(dataDir, db, pushRemote, branch); err != nil {
+		if err := d.pushDatabase(dataDir, db, pushRemote, branch, deadline); err != nil {
 			d.logger.Printf("dolt_remotes: %s: push failed: %v", db, err)
 		} else {
 			pushed++
@@ -103,8 +127,11 @@ func (d *Daemon) pushDoltRemotes() {
 	d.logger.Printf("dolt_remotes: pushed %d/%d database(s)", pushed, len(databases))
 }
 
-// pushDatabase commits pending changes and pushes a single database to its remote.
-func (d *Daemon) pushDatabase(dataDir, db, remote, branch string) error {
+// pushDatabase commits pending changes and pushes a single database to its
+// remote. deadline bounds each dolt sql subprocess's own timeout (zero means
+// unbounded, i.e. each call gets the full doltPushTimeout) -- see
+// pushDoltRemotesWithDeadline.
+func (d *Daemon) pushDatabase(dataDir, db, remote, branch string, deadline time.Time) error {
 	// Safety: refuse to push anything that looks like a test database.
 	// This is the last line of defense against pushing pollution to GitHub.
 	for _, prefix := range []string{"test", "beads_t", "beads_pt", "doctest_"} {
@@ -115,7 +142,7 @@ func (d *Daemon) pushDatabase(dataDir, db, remote, branch string) error {
 
 	// Step 1: Stage any unstaged changes (non-fatal)
 	addQuery := fmt.Sprintf("USE `%s`; CALL DOLT_ADD('-A')", db)
-	if err := d.runDoltSQL(dataDir, addQuery); err != nil {
+	if err := d.runDoltSQL(dataDir, addQuery, deadline); err != nil {
 		// Ignore - may have nothing to stage
 		d.logger.Printf("dolt_remotes: %s: add (non-fatal): %v", db, err)
 	}
@@ -123,19 +150,19 @@ func (d *Daemon) pushDatabase(dataDir, db, remote, branch string) error {
 	// Step 2: Commit staged changes only if dolt_status shows pending work.
 	// Skipping DOLT_COMMIT when nothing is staged avoids "nothing to commit"
 	// warnings in dolt.log, which were causing log bloat at ~3/sec (gt-zb8).
-	if d.hasStagedChanges(dataDir, db) {
+	if d.hasStagedChanges(dataDir, db, deadline) {
 		commitQuery := fmt.Sprintf(
 			"USE `%s`; CALL DOLT_COMMIT('-m', 'daemon: auto-commit pending changes', '--author', 'Gas Town Daemon <daemon@gastown.local>')",
 			db,
 		)
-		if err := d.runDoltSQL(dataDir, commitQuery); err != nil {
+		if err := d.runDoltSQL(dataDir, commitQuery, deadline); err != nil {
 			d.logger.Printf("dolt_remotes: %s: commit (non-fatal): %v", db, err)
 		}
 	}
 
 	// Step 3: Push to remote
 	pushQuery := fmt.Sprintf("USE `%s`; CALL DOLT_PUSH('%s', '%s')", db, remote, branch)
-	if err := d.runDoltSQL(dataDir, pushQuery); err != nil {
+	if err := d.runDoltSQL(dataDir, pushQuery, deadline); err != nil {
 		return fmt.Errorf("push failed: %w", err)
 	}
 
@@ -143,9 +170,23 @@ func (d *Daemon) pushDatabase(dataDir, db, remote, branch string) error {
 	return nil
 }
 
+// doltSQLTimeout returns the per-subprocess timeout: doltPushTimeout, capped
+// to whatever remains before deadline when one is set (non-zero). Guards
+// against a single slow/unreachable remote consuming a full fresh
+// doltPushTimeout per call regardless of an overall shutdown budget.
+func doltSQLTimeout(deadline time.Time) time.Duration {
+	if deadline.IsZero() {
+		return doltPushTimeout
+	}
+	if remaining := time.Until(deadline); remaining < doltPushTimeout {
+		return remaining
+	}
+	return doltPushTimeout
+}
+
 // runDoltSQL executes a SQL query against the Dolt data directory.
-func (d *Daemon) runDoltSQL(dataDir, query string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), doltPushTimeout)
+func (d *Daemon) runDoltSQL(dataDir, query string, deadline time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), doltSQLTimeout(deadline))
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "dolt", "sql", "-q", query)
@@ -169,8 +210,8 @@ func (d *Daemon) runDoltSQL(dataDir, query string) error {
 // hasStagedChanges returns true if the database has staged changes in dolt_status.
 // Uses dolt_status WHERE staged=1. Fails open (returns true) on query errors so
 // that a DOLT_COMMIT attempt is still made and the error is surfaced normally.
-func (d *Daemon) hasStagedChanges(dataDir, db string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), doltPushTimeout)
+func (d *Daemon) hasStagedChanges(dataDir, db string, deadline time.Time) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), doltSQLTimeout(deadline))
 	defer cancel()
 
 	query := fmt.Sprintf("USE `%s`; SELECT COUNT(*) FROM dolt_status WHERE staged = 1", db)

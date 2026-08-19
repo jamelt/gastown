@@ -99,22 +99,24 @@ func DiscoverDatabases(host string, port int) []string {
 
 // ScanResult holds the results of scanning a database for reaper candidates.
 type ScanResult struct {
-	Database        string    `json:"database"`
-	ReapCandidates  int       `json:"reap_candidates"`
-	PurgeCandidates int       `json:"purge_candidates"`
-	MailCandidates  int       `json:"mail_candidates"`
-	StaleCandidates int       `json:"stale_candidates"`
-	OpenWisps       int       `json:"open_wisps"`
-	Anomalies       []Anomaly `json:"anomalies,omitempty"`
+	Database               string    `json:"database"`
+	ReapCandidates         int       `json:"reap_candidates"`
+	MoleculeStepCandidates int       `json:"molecule_step_candidates,omitempty"`
+	PurgeCandidates        int       `json:"purge_candidates"`
+	MailCandidates         int       `json:"mail_candidates"`
+	StaleCandidates        int       `json:"stale_candidates"`
+	OpenWisps              int       `json:"open_wisps"`
+	Anomalies              []Anomaly `json:"anomalies,omitempty"`
 }
 
 // ReapResult holds the results of a reap operation.
 type ReapResult struct {
-	Database   string    `json:"database"`
-	Reaped     int       `json:"reaped"`
-	OpenRemain int       `json:"open_remain"`
-	DryRun     bool      `json:"dry_run,omitempty"`
-	Anomalies  []Anomaly `json:"anomalies,omitempty"`
+	Database            string    `json:"database"`
+	Reaped              int       `json:"reaped"`
+	MoleculeStepsClosed int       `json:"molecule_steps_closed,omitempty"`
+	OpenRemain          int       `json:"open_remain"`
+	DryRun              bool      `json:"dry_run,omitempty"`
+	Anomalies           []Anomaly `json:"anomalies,omitempty"`
 }
 
 // PurgeResult holds the results of a purge operation.
@@ -155,10 +157,42 @@ const (
 	DefaultQueryTimeout = 30 * time.Second
 	// DefaultBatchSize is the number of rows per batch DELETE operation.
 	DefaultBatchSize = 100
-	// DefaultAlertThreshold is the open-wisp count above which callers should
-	// surface a warning. Sized above the natural steady-state for the current
-	// dog/deacon emit rate (~23 wisps/h × 24h TTL ≈ 550). See hq-57jr8.
-	DefaultAlertThreshold = 800
+	// DefaultAlertThreshold is the actionable reap-candidate backlog
+	// (ReapCandidates, PER DATABASE) above which callers should flag a
+	// possible wisp-lifecycle problem. ReapCandidates is gated on age +
+	// orphaned/closed parent (see parentExcludeJoin) and stays low under
+	// healthy operation — typically ~15-25 per database. This threshold
+	// gives headroom against cycle-to-cycle jitter while still catching
+	// order-of-magnitude backlog spikes.
+	//
+	// Deliberately excludes MoleculeStepCandidates: a single large molecule
+	// finishing closes all of its child steps in one batch with no age
+	// filter (see Reap()), which is a legitimate bulk event, not a
+	// lifecycle problem, and would otherwise false-trip this check.
+	//
+	// This must NOT be compared against total open-wisp volume (OpenWisps):
+	// that number scales with healthy town activity (observed steady-state
+	// ~1966-3000+ open in a busy town) and is not itself a problem — two
+	// prior fixes (hq-57jr8, then #4451) raised a volume-based threshold
+	// (500->800->3000) and each was outgrown by normal activity, producing
+	// a recurring false-alarm escalation flood. See DefaultOpenWispSafetyThreshold
+	// for the separate, coarse volume check this supersedes for alerting
+	// purposes. See gt-reaper-alert-flood-root-cause.
+	DefaultAlertThreshold = 150
+
+	// DefaultOpenWispSafetyThreshold is a coarse, rarely-tripped safety net
+	// for unbounded open-wisp growth that DefaultAlertThreshold's backlog
+	// check cannot see: wisps stuck behind a parent that never closes are
+	// permanently excluded from ReapCandidates by design (parentExcludeJoin),
+	// so a leak on that path would grow OpenWisps forever without ever
+	// tripping the backlog check. Intentionally a raw-volume, low-sensitivity
+	// check, evaluated PER DATABASE — pair with escalation de-duplication
+	// (gt escalate --fingerprint) so a sustained trip creates one open
+	// escalation, not a flood of repeats. May need recalibration if a much
+	// busier town's healthy volume grows to approach it; that is an honest
+	// limit of a static threshold, not a reason to fold it back into
+	// DefaultAlertThreshold.
+	DefaultOpenWispSafetyThreshold = 3000
 )
 
 // ValidateDBName returns an error if the database name is unsafe.
@@ -167,6 +201,17 @@ func ValidateDBName(dbName string) error {
 		return fmt.Errorf("invalid database name: %q", dbName)
 	}
 	return nil
+}
+
+// ExceedsOpenWispSafetyThreshold reports whether a single database's open-wisp
+// count indicates a possible unbounded-growth leak (e.g. wisps stuck behind a
+// parent that never closes) rather than normal healthy volume. This is the
+// coarse, rarely-tripped safety net — see DefaultOpenWispSafetyThreshold.
+// Callers must evaluate this per database, not against a cross-database sum:
+// summing first makes the check scale with the number of monitored databases
+// rather than with any single database's health.
+func ExceedsOpenWispSafetyThreshold(openWisps int) bool {
+	return openWisps > DefaultOpenWispSafetyThreshold
 }
 
 // OpenDB opens a connection to the Dolt server for a given database.
@@ -189,9 +234,12 @@ func OpenDB(host string, port int, dbName string, readTimeout, writeTimeout time
 // The LEFT JOIN approach runs the subquery once and hash-joins: O(n+m).
 //
 // Semantics (unchanged from parentCheckWhere):
-//   - No parent-child dependency → eligible (orphan wisps)
+//   - No parent-child or tracks dependency → eligible (orphan wisps)
 //   - Parent status is 'closed' → eligible (parent already reaped)
 //   - Parent row missing (dangling ref) → eligible (parent already purged)
+//
+// A sling context tracks its source issue. Treating tracks as protective keeps
+// the context's dispatch history available while that source remains active.
 //
 // The inverse is simpler: exclude wisps that have an OPEN parent.
 //
@@ -203,12 +251,46 @@ func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
 	joinClause = `LEFT JOIN (
 		SELECT DISTINCT wd.issue_id
 		FROM wisp_dependencies wd
-		LEFT JOIN wisps pw ON pw.id = wd.depends_on_id LEFT JOIN issues pi ON pi.id = wd.depends_on_id
-		WHERE wd.type = 'parent-child'
-		AND (pw.status IN ('open', 'hooked', 'in_progress') OR pi.status IN ('open', 'in_progress'))
+		LEFT JOIN wisps pw ON pw.id = wd.depends_on_wisp_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
+		WHERE wd.type IN ('parent-child', 'tracks')
+		AND (pw.status IN ('open', 'hooked', 'in_progress') OR pi.status IN ('open', 'hooked', 'in_progress') OR wd.depends_on_external IS NOT NULL)
 	) open_parent ON open_parent.issue_id = w.id`
 	whereCondition = "open_parent.issue_id IS NULL"
 	return
+}
+
+const openWispStatusWhere = "w.status IN ('open', 'hooked', 'in_progress')"
+
+// closedMoleculeStepSubquery selects step-wisps whose parent molecule has already closed.
+// wisp_dependencies.issue_id is the child; depends_on_wisp_id is the parent molecule.
+const closedMoleculeStepSubquery = `
+	SELECT DISTINCT wd.issue_id
+	FROM wisp_dependencies wd
+	INNER JOIN wisps pm ON pm.id = wd.depends_on_wisp_id
+	WHERE wd.type = 'parent-child'
+	AND pm.issue_type = 'molecule'
+	AND pm.status = 'closed'
+	AND NOT EXISTS (
+		SELECT 1 FROM wisp_dependencies open_dep
+		LEFT JOIN wisps open_pw ON open_pw.id = open_dep.depends_on_wisp_id
+		LEFT JOIN issues open_pi ON open_pi.id = open_dep.depends_on_issue_id
+		WHERE open_dep.issue_id = wd.issue_id
+		AND open_dep.type = 'parent-child'
+		AND (open_pw.status IN ('open', 'hooked', 'in_progress') OR open_pi.status IN ('open', 'hooked', 'in_progress') OR open_dep.depends_on_external IS NOT NULL)
+	)`
+
+func closedMoleculeStepJoin(alias string) string {
+	return fmt.Sprintf("INNER JOIN (%s) %s ON %s.issue_id = w.id", closedMoleculeStepSubquery, alias, alias)
+}
+
+func closedMoleculeStepExcludeJoin(alias string) string {
+	return fmt.Sprintf("LEFT JOIN (%s) %s ON %s.issue_id = w.id", closedMoleculeStepSubquery, alias, alias)
+}
+
+type sqlRunner interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
 }
 
 // HasReaperSchema checks whether the database has the tables required for reaper
@@ -221,11 +303,46 @@ func HasReaperSchema(db *sql.DB) (bool, error) {
 
 	var count int
 	err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN ('wisps', 'issues') AND table_schema = DATABASE()").Scan(&count)
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN ('wisps', 'issues', 'wisp_dependencies') AND table_schema = DATABASE()").Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check reaper schema: %w", err)
 	}
-	return count >= 2, nil
+	if count < 3 {
+		return false, nil
+	}
+
+	hasWispDependencyColumns, err := hasColumns(ctx, db, "wisp_dependencies", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external")
+	if err != nil || !hasWispDependencyColumns {
+		return hasWispDependencyColumns, err
+	}
+	dependenciesExists, err := tableExists(ctx, db, "dependencies")
+	if err != nil || !dependenciesExists {
+		return !dependenciesExists, err
+	}
+	return hasColumns(ctx, db, "dependencies", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external")
+}
+
+func tableExists(ctx context.Context, db *sql.DB, table string) (bool, error) {
+	var count int
+	err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ? AND table_schema = DATABASE()", table).Scan(&count)
+	return count > 0, err
+}
+
+func hasColumns(ctx context.Context, db *sql.DB, table string, columns ...string) (bool, error) {
+	if len(columns) == 0 {
+		return true, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(columns)), ",")
+	args := make([]interface{}, 0, len(columns)+1)
+	args = append(args, table)
+	for _, column := range columns {
+		args = append(args, column)
+	}
+	var count int
+	query := fmt.Sprintf("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name IN (%s)", placeholders)
+	err := db.QueryRowContext(ctx, query, args...).Scan(&count)
+	return count == len(columns), err
 }
 
 // Scan counts reaper candidates in a database without modifying anything.
@@ -236,14 +353,24 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	result := &ScanResult{Database: dbName}
 	now := time.Now().UTC()
 	parentJoin, parentWhere := parentExcludeJoin(dbName)
+	moleculeStepJoin := closedMoleculeStepJoin("closed_molecule_step")
+	moleculeStepExcludeJoin := closedMoleculeStepExcludeJoin("closed_molecule_step")
+
+	moleculeStepQuery := fmt.Sprintf(
+		"SELECT COUNT(*) FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
+		moleculeStepJoin, openWispStatusWhere)
+	if err := db.QueryRowContext(ctx, moleculeStepQuery).Scan(&result.MoleculeStepCandidates); err != nil {
+		return nil, fmt.Errorf("count molecule step candidates: %w", err)
+	}
 
 	// Count reap candidates: open wisps past max_age with eligible parent status.
 	// Must match Reap() eligibility semantics exactly, including the exclusion of
 	// agent beads, otherwise scan can report candidates that reap will never close.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
+	// Closed-molecule steps are counted separately above and excluded here so counts stay disjoint.
 	reapQuery := fmt.Sprintf(
-		"SELECT COUNT(*) FROM wisps w %s WHERE w.status IN ('open', 'hooked', 'in_progress') AND w.created_at < ? AND w.issue_type != 'agent' AND %s",
-		parentJoin, parentWhere)
+		"SELECT COUNT(*) FROM wisps w %s %s WHERE %s AND w.created_at < ? AND w.issue_type != 'agent' AND %s AND closed_molecule_step.issue_id IS NULL",
+		parentJoin, moleculeStepExcludeJoin, openWispStatusWhere, parentWhere)
 	if err := db.QueryRowContext(ctx, reapQuery, now.Add(-maxAge)).Scan(&result.ReapCandidates); err != nil {
 		return nil, fmt.Errorf("count reap candidates: %w", err)
 	}
@@ -270,21 +397,24 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 
 	// Count stale issue candidates.
 	// Same caveat: issues/dependencies tables may live on a separate Dolt instance.
+	// Convoys excluded to mirror AutoClose (hq-jnap): convoy lifecycle is
+	// tracked-bead-status driven, never staleness driven.
 	staleQuery := `
 		SELECT COUNT(*) FROM issues i
 		WHERE i.status IN ('open', 'in_progress')
 		AND i.updated_at < ?
 		AND i.priority > 1
-		AND i.issue_type != 'epic'
+		AND i.issue_type NOT IN ('epic', 'convoy')
 		AND i.id NOT IN (
 			SELECT DISTINCT d.issue_id FROM dependencies d
-			INNER JOIN issues dep ON d.depends_on_id = dep.id
+			INNER JOIN issues dep ON d.depends_on_issue_id = dep.id
 			WHERE dep.status IN ('open', 'in_progress')
 		)
 		AND i.id NOT IN (
-			SELECT DISTINCT d.depends_on_id FROM dependencies d
+			SELECT DISTINCT d.depends_on_issue_id FROM dependencies d
 			INNER JOIN issues blocker ON d.issue_id = blocker.id
-			WHERE blocker.status IN ('open', 'in_progress')
+			WHERE d.depends_on_issue_id IS NOT NULL
+			AND blocker.status IN ('open', 'in_progress')
 		)`
 	if err := db.QueryRowContext(ctx, staleQuery, now.Add(-staleIssueAge)).Scan(&result.StaleCandidates); err != nil {
 		if !isTableNotFound(err) {
@@ -299,11 +429,21 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 		return nil, fmt.Errorf("count open wisps: %w", err)
 	}
 
+	// Anomaly detection: reap-candidate backlog spike. Excludes
+	// MoleculeStepCandidates deliberately — see DefaultAlertThreshold doc.
+	if result.ReapCandidates > DefaultAlertThreshold {
+		result.Anomalies = append(result.Anomalies, Anomaly{
+			Type:    "reap_candidate_spike",
+			Message: fmt.Sprintf("%d wisp(s) are past max-age and eligible for reap (threshold %d) — stale wisps may not be getting cleaned up", result.ReapCandidates, DefaultAlertThreshold),
+			Count:   result.ReapCandidates,
+		})
+	}
+
 	// Anomaly detection: dangling parent references.
 	danglingQuery := `
 		SELECT COUNT(*) FROM wisp_dependencies wd
-		LEFT JOIN wisps pw ON pw.id = wd.depends_on_id LEFT JOIN issues pi ON pi.id = wd.depends_on_id
-		WHERE wd.type = 'parent-child' AND pw.id IS NULL AND pi.id IS NULL`
+		LEFT JOIN wisps pw ON pw.id = wd.depends_on_wisp_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
+		WHERE wd.type = 'parent-child' AND wd.depends_on_external IS NULL AND (wd.depends_on_wisp_id IS NOT NULL OR wd.depends_on_issue_id IS NOT NULL) AND pw.id IS NULL AND pi.id IS NULL`
 	var danglingCount int
 	if err := db.QueryRowContext(ctx, danglingQuery).Scan(&danglingCount); err == nil && danglingCount > 0 {
 		result.Anomalies = append(result.Anomalies, Anomaly{
@@ -325,15 +465,25 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 
 	cutoff := time.Now().UTC().Add(-maxAge)
 	parentJoin, parentWhere := parentExcludeJoin(dbName)
+	moleculeStepJoin := closedMoleculeStepJoin("closed_molecule_step")
+	moleculeStepExcludeJoin := closedMoleculeStepExcludeJoin("closed_molecule_step")
 	// Exclude agent beads (issue_type='agent') from reaping — they have persistent
 	// identity and should not be closed by the wisp reaper regardless of age.
+	// Closed-molecule steps are closed immediately through a separate path, so stale
+	// max-age counts exclude them to keep dry-run and scan counts disjoint.
 	whereClause := fmt.Sprintf(
-		"w.status IN ('open', 'hooked', 'in_progress') AND w.created_at < ? AND w.issue_type != 'agent' AND %s", parentWhere)
+		"%s AND w.created_at < ? AND w.issue_type != 'agent' AND %s AND closed_molecule_step.issue_id IS NULL", openWispStatusWhere, parentWhere)
 
 	result := &ReapResult{Database: dbName, DryRun: dryRun}
 
 	if dryRun {
-		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM wisps w %s WHERE %s", parentJoin, whereClause)
+		moleculeStepCountQuery := fmt.Sprintf(
+			"SELECT COUNT(*) FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
+			moleculeStepJoin, openWispStatusWhere)
+		if err := db.QueryRowContext(ctx, moleculeStepCountQuery).Scan(&result.MoleculeStepsClosed); err != nil {
+			return nil, fmt.Errorf("dry-run molecule step count: %w", err)
+		}
+		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM wisps w %s %s WHERE %s", parentJoin, moleculeStepExcludeJoin, whereClause)
 		if err := db.QueryRowContext(ctx, countQuery, cutoff).Scan(&result.Reaped); err != nil {
 			return nil, fmt.Errorf("dry-run count: %w", err)
 		}
@@ -344,74 +494,58 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 		return result, nil
 	}
 
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pin connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
 		return nil, fmt.Errorf("disable autocommit: %w", err)
 	}
+	sqlCommitted := false
 	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+		if !sqlCommitted {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+		_, _ = conn.ExecContext(context.Background(), "SET @@autocommit = 1")
 	}()
+
+	moleculeStepIDQuery := fmt.Sprintf(
+		"SELECT w.id FROM wisps w %s WHERE %s AND w.issue_type != 'agent' LIMIT %d",
+		moleculeStepJoin, openWispStatusWhere, DefaultBatchSize)
+	moleculeStepsClosed, err := closeWispsInBatches(ctx, conn, moleculeStepIDQuery, nil, "closed molecule steps")
+	if err != nil {
+		return nil, err
+	}
+	result.MoleculeStepsClosed = moleculeStepsClosed
 
 	// Batch UPDATE: select IDs in chunks, update each chunk.
 	// This avoids holding a write lock on the entire table for minutes.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w %s WHERE %s LIMIT %d",
-		parentJoin, whereClause, DefaultBatchSize)
+		"SELECT w.id FROM wisps w %s %s WHERE %s LIMIT %d",
+		parentJoin, moleculeStepExcludeJoin, whereClause, DefaultBatchSize)
 
-	totalReaped := 0
-	for {
-		rows, err := db.QueryContext(ctx, idQuery, cutoff)
-		if err != nil {
-			return nil, fmt.Errorf("select reap batch: %w", err)
-		}
-
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("scan wisp id: %w", err)
-			}
-			ids = append(ids, id)
-		}
-		rows.Close()
-
-		if len(ids) == 0 {
-			break
-		}
-
-		placeholders := make([]string, len(ids))
-		args := make([]interface{}, len(ids))
-		for i, id := range ids {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		inClause := strings.Join(placeholders, ",")
-
-		updateQuery := fmt.Sprintf(
-			"UPDATE wisps SET status='closed', closed_at=NOW() WHERE id IN (%s)",
-			inClause)
-		sqlResult, err := db.ExecContext(ctx, updateQuery, args...)
-		if err != nil {
-			return nil, fmt.Errorf("close stale wisps batch: %w", err)
-		}
-
-		affected, _ := sqlResult.RowsAffected()
-		totalReaped += int(affected)
+	totalReaped, err := closeWispsInBatches(ctx, conn, idQuery, []interface{}{cutoff}, "stale wisps")
+	if err != nil {
+		return nil, err
 	}
 
 	result.Reaped = totalReaped
+	totalClosed := totalReaped + moleculeStepsClosed
 
-	if totalReaped > 0 {
+	if totalClosed > 0 {
 		// Flush the SQL transaction to the Dolt working set before DOLT_COMMIT.
 		// With autocommit=0, UPDATE changes are in the SQL transaction buffer,
 		// not the Dolt working set. DOLT_COMMIT operates on the working set,
 		// so without this COMMIT it sees "nothing to commit".
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 			return result, fmt.Errorf("sql commit: %w", err)
 		}
-		commitMsg := fmt.Sprintf("reaper: close %d stale wisps in %s", totalReaped, dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+		sqlCommitted = true
+		commitMsg := fmt.Sprintf("reaper: close %d wisps in %s", totalClosed, dbName)
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
 			// "nothing to commit" is expected when the reaper reverts dirty working
 			// set changes back to match HEAD. The wisps were set to "open" in the
 			// server's in-memory working set without being committed; closing them
@@ -423,11 +557,59 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	}
 
 	openQuery := "SELECT COUNT(*) FROM wisps WHERE status IN ('open', 'hooked', 'in_progress')"
-	if err := db.QueryRowContext(ctx, openQuery).Scan(&result.OpenRemain); err != nil {
+	if err := conn.QueryRowContext(ctx, openQuery).Scan(&result.OpenRemain); err != nil {
 		return result, fmt.Errorf("count open: %w", err)
 	}
 
 	return result, nil
+}
+
+func closeWispsInBatches(ctx context.Context, runner sqlRunner, idQuery string, queryArgs []interface{}, description string) (int, error) {
+	total := 0
+	for {
+		rows, err := runner.QueryContext(ctx, idQuery, queryArgs...)
+		if err != nil {
+			return total, fmt.Errorf("select %s batch: %w", description, err)
+		}
+
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return total, fmt.Errorf("scan %s id: %w", description, err)
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return total, fmt.Errorf("read %s ids: %w", description, err)
+		}
+		rows.Close()
+
+		if len(ids) == 0 {
+			return total, nil
+		}
+
+		placeholders := make([]string, len(ids))
+		args := make([]interface{}, len(ids))
+		for i, id := range ids {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		inClause := strings.Join(placeholders, ",")
+
+		updateQuery := fmt.Sprintf(
+			"UPDATE wisps SET status='closed', closed_at=NOW() WHERE id IN (%s) AND status IN ('open', 'hooked', 'in_progress') AND issue_type != 'agent'",
+			inClause)
+		sqlResult, err := runner.ExecContext(ctx, updateQuery, args...)
+		if err != nil {
+			return total, fmt.Errorf("close %s batch: %w", description, err)
+		}
+
+		affected, _ := sqlResult.RowsAffected()
+		total += int(affected)
+	}
 }
 
 // Purge deletes old closed wisps and mail from a database.
@@ -593,24 +775,31 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 	staleCutoff := time.Now().UTC().Add(-staleAge)
 	result := &AutoCloseResult{Database: dbName, DryRun: dryRun}
 
+	// Convoys are excluded from staleness auto-close (hq-jnap): their lifecycle
+	// is driven by tracked-bead status (`gt convoy check` / refinery post-merge),
+	// and the 'tracks' relation is non-blocking so the dependency exclusions
+	// below do NOT protect a convoy with open tracked issues. Stale-closing a
+	// convoy while its tracked beads are open orphans them from dispatch
+	// tracking and causes duplicate dispatches (hq-qouv/hq-shb1 incident).
 	whereClause := fmt.Sprintf(`
 		i.status IN ('open', 'in_progress')
 		AND i.updated_at < ?
 		AND i.priority > 1
-		AND i.issue_type != 'epic'
+		AND i.issue_type NOT IN ('epic', 'convoy')
 		AND i.id NOT IN (
 			SELECT DISTINCT l.issue_id FROM `+"`%s`"+`.labels l
 			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig')
 		)
 		AND i.id NOT IN (
 			SELECT DISTINCT d.issue_id FROM `+"`%s`"+`.dependencies d
-			INNER JOIN `+"`%s`"+`.issues dep ON d.depends_on_id = dep.id
+			INNER JOIN `+"`%s`"+`.issues dep ON d.depends_on_issue_id = dep.id
 			WHERE dep.status IN ('open', 'in_progress')
 		)
 		AND i.id NOT IN (
-			SELECT DISTINCT d.depends_on_id FROM `+"`%s`"+`.dependencies d
+			SELECT DISTINCT d.depends_on_issue_id FROM `+"`%s`"+`.dependencies d
 			INNER JOIN `+"`%s`"+`.issues blocker ON d.issue_id = blocker.id
-			WHERE blocker.status IN ('open', 'in_progress')
+			WHERE d.depends_on_issue_id IS NOT NULL
+			AND blocker.status IN ('open', 'in_progress')
 		)`, dbName, dbName, dbName, dbName, dbName)
 
 	// Two-step SELECT-then-UPDATE to avoid self-referencing subquery in UPDATE,
@@ -746,10 +935,24 @@ func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg 
 			}
 		}
 
-		// Clean up reverse dependency references to prevent dangling parent refs.
-		delReverse := fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_id IN %s", inClause)
-		if _, err := db.ExecContext(ctx, delReverse, args...); err != nil {
-			// Non-fatal.
+		// Clean up typed reverse dependency references to prevent dangling parent refs.
+		var reverseDeletes []string
+		switch primaryTable {
+		case "wisps":
+			reverseDeletes = []string{
+				fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_wisp_id IN %s", inClause),
+				fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_wisp_id IN %s", inClause),
+			}
+		case "issues":
+			reverseDeletes = []string{
+				fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_issue_id IN %s", inClause),
+				fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_issue_id IN %s", inClause),
+			}
+		}
+		for _, delReverse := range reverseDeletes {
+			if _, err := db.ExecContext(ctx, delReverse, args...); err != nil {
+				// Non-fatal.
+			}
 		}
 
 		delPrimary := fmt.Sprintf("DELETE FROM `%s` WHERE id IN %s", primaryTable, inClause) //nolint:gosec // G201: primaryTable is internal

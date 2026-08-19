@@ -8,9 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
-	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -180,6 +180,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 			os.Setenv(k, v)
 		}
 	}
+	config.ApplyConfiguredDoltEnv(townRoot)
 
 	allOK := true
 	var services []ServiceStatus
@@ -330,8 +331,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 		doltCfg := doltserver.DefaultConfig(townRoot)
 		portStr := fmt.Sprintf("%d", doltCfg.Port)
 		os.Setenv("GT_DOLT_PORT", portStr)
+		os.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
 		os.Setenv("BEADS_DOLT_PORT", portStr)
 		if doltCfg.Host != "" {
+			os.Setenv("GT_DOLT_HOST", doltCfg.Host)
 			os.Setenv("BEADS_DOLT_SERVER_HOST", doltCfg.Host)
 		}
 	}
@@ -650,7 +653,18 @@ func startRigAgentsWithPrefetch(rigNames []string, prefetchedRigs map[string]*ri
 		}
 	}
 
-	numTasks := len(prefetchedRigs) * 2 // witness + refinery per rig
+	eligibleRigs := make(map[string]*rig.Rig, len(prefetchedRigs))
+	for rigName, r := range prefetchedRigs {
+		if err := r.EnsureIdentities(); err != nil {
+			detail := fmt.Sprintf("identity preflight failed; managers not started: %v", err)
+			witnessResults[rigName] = agentStartResult{name: "Witness (" + rigName + ")", ok: false, detail: detail}
+			refineryResults[rigName] = agentStartResult{name: "Refinery (" + rigName + ")", ok: false, detail: detail}
+			continue
+		}
+		eligibleRigs[rigName] = r
+	}
+
+	numTasks := len(eligibleRigs) * 2 // witness + refinery per rig
 	if numTasks == 0 {
 		return
 	}
@@ -687,7 +701,7 @@ func startRigAgentsWithPrefetch(rigNames []string, prefetchedRigs map[string]*ri
 	}
 
 	// Enqueue all tasks
-	for rigName, r := range prefetchedRigs {
+	for rigName, r := range eligibleRigs {
 		tasks <- agentTask{rigName: rigName, rigObj: r, isWitness: true}
 		tasks <- agentTask{rigName: rigName, rigObj: r, isWitness: false}
 	}
@@ -755,8 +769,11 @@ func upStartRefinery(rigName string, r *rig.Rig) agentStartResult {
 
 	mgr := refinery.NewManager(r)
 	if err := mgr.Start(false, ""); err != nil {
-		if err == refinery.ErrAlreadyRunning {
+		if errors.Is(err, refinery.ErrAlreadyRunning) {
 			return agentStartResult{name: name, ok: true, detail: mgr.SessionName()}
+		}
+		if errors.Is(err, refinery.ErrForkRig) {
+			return agentStartResult{name: name, ok: true, detail: "skipped (fork-backed rig; use PR workflow)"}
 		}
 		return agentStartResult{name: name, ok: false, detail: err.Error()}
 	}
@@ -1065,4 +1082,3 @@ func recoverOrphanedBeads(townRoot string, rigs []string, prefetchedRigs map[str
 
 	return services
 }
-

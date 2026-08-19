@@ -1,0 +1,279 @@
+package polecat
+
+import "strings"
+
+const (
+	WorkstateVerdictWorking       = "WORKING"
+	WorkstateVerdictSafeToNuke    = "SAFE_TO_NUKE"
+	WorkstateVerdictPendingMR     = "PENDING_MR"
+	WorkstateVerdictNeedsRecovery = "NEEDS_RECOVERY"
+	WorkstateVerdictNeedsMQSubmit = "NEEDS_MQ_SUBMIT"
+)
+
+// WorkstateInput contains the lifecycle, git, and merge-queue facts needed to
+// classify a polecat consistently across list, recovery, witness, and capacity.
+type WorkstateInput struct {
+	State                          State
+	HookBead                       string
+	CleanupStatus                  CleanupStatus
+	IgnoreCleanupStatus            bool
+	PartialSpawnWithoutDurableHook bool
+	PushFailed                     bool
+	MRFailed                       bool
+	Branch                         string
+	GitDirty                       bool
+	GitDirtyReason                 string
+	StashCount                     int
+	UnpushedCommits                int
+	GitCheckFailed                 bool
+	GitCheckFailedReason           string
+	ActiveWorkBlocker              string
+	ActiveWorkCountsTowardCapacity bool
+	ActiveMR                       string
+	ActiveMRBlocker                string
+	MQCheckRequired                bool
+	HasSubmittableWork             bool
+	MQNotRequired                  bool
+	AssignedBeadTerminal           bool
+	MRSubmitted                    bool
+	MQLookupFailed                 bool
+}
+
+// WorkstateDisposition is the canonical polecat lifecycle decision. It is pure
+// policy: callers gather facts, this classifier decides how every subsystem
+// should present and count the polecat.
+type WorkstateDisposition struct {
+	Verdict              string   `json:"verdict"`
+	Reason               string   `json:"reason,omitempty"`
+	Reusable             bool     `json:"reusable"`
+	SafeToNuke           bool     `json:"safe_to_nuke"`
+	NeedsRecovery        bool     `json:"needs_recovery"`
+	NeedsMQSubmit        bool     `json:"needs_mq_submit"`
+	MQStatus             string   `json:"mq_status,omitempty"`
+	CountsTowardCapacity bool     `json:"counts_toward_capacity"`
+	ReuseStatus          string   `json:"reuse_status,omitempty"`
+	Blockers             []string `json:"blockers,omitempty"`
+}
+
+// DecideWorkstate returns the canonical disposition for a polecat.
+func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
+	if in.ActiveMRBlocker != "" && !in.PushFailed && !in.MRFailed && in.State == StateDone {
+		return WorkstateDisposition{
+			Verdict:     WorkstateVerdictPendingMR,
+			Reason:      "active-mr-open",
+			ReuseStatus: "idle-pr-open",
+			Blockers:    []string{in.ActiveMRBlocker},
+		}
+	}
+
+	// StateDone (agent_state=done, seen before a polecat's own idle transition
+	// lands) falls through to the real predicate checks below instead of
+	// bailing out here — otherwise a merged/clean polecat gets NEEDS_RECOVERY
+	// with no blockers, disagreeing with git-state for no reason (gt-check-recovery-bug).
+	//
+	// StateStuck falls through for the identical reason (hq-f2n8c). `gt done
+	// --status DEFERRED` and `--status ESCALATED` both map to agent_state=stuck,
+	// and DEFERRED is the sanctioned way to report "this work turned out
+	// unnecessary". Bailing out here classified every such polecat
+	// NEEDS_RECOVERY unconditionally — at any level of worktree cleanliness —
+	// because every predicate that could clear it is defined below this return.
+	// The slot could then only be freed by an external actor mutating
+	// agent_state, which is how a whole rig reaches reusable=0 and stops
+	// dispatching. Falling through classifies a stuck polecat on its merits;
+	// genuinely dirty ones are still held by the predicates below, which
+	// already encode the fail-closed behaviour.
+	if in.State != StateIdle && in.State != StateDone && in.State != StateStuck {
+		verdict := WorkstateVerdictNeedsRecovery
+		needsRecovery := true
+		if in.State == StateWorking {
+			verdict = WorkstateVerdictWorking
+			needsRecovery = false
+		}
+		d := WorkstateDisposition{
+			Verdict:              verdict,
+			Reason:               "not-idle",
+			NeedsRecovery:        needsRecovery,
+			CountsTowardCapacity: true,
+		}
+		if in.ActiveWorkBlocker != "" {
+			d.Blockers = append(d.Blockers, in.ActiveWorkBlocker)
+		} else if needsRecovery {
+			// Every NEEDS_RECOVERY verdict must name the predicate that produced
+			// it. Leaving Blockers empty here renders as an unnameable "unknown
+			// recovery predicate" refusal that cannot be escalated (gt-7j22).
+			d.Blockers = append(d.Blockers, "state="+string(in.State))
+		}
+		return d
+	}
+
+	d := WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke}
+	capacityBlocked := false
+	block := func(reason, blocker string, countsTowardCapacity bool) {
+		if d.Reason == "" {
+			d.Reason = reason
+		}
+		if blocker != "" {
+			d.Blockers = append(d.Blockers, blocker)
+		}
+		capacityBlocked = capacityBlocked || countsTowardCapacity
+	}
+
+	if in.HookBead != "" && !in.PartialSpawnWithoutDurableHook {
+		block("hook-still-set", "has work on hook ("+in.HookBead+")", true)
+	}
+	if in.PushFailed {
+		block("push-failed", "push_failed=true", true)
+	}
+	if in.MRFailed {
+		block("mr-failed", "mr_failed=true", true)
+	}
+	if in.ActiveWorkBlocker != "" {
+		block("active-work", in.ActiveWorkBlocker, in.ActiveWorkCountsTowardCapacity)
+	}
+	if !in.IgnoreCleanupStatus && !in.CleanupStatus.IsSafe() {
+		// "" (never recorded) and CleanupUnknown (recorded as undetermined) both
+		// mean the same thing: nobody ever computed this value. That is an
+		// absence of evidence, not evidence of risk — and it is unrecoverable on
+		// its own, because the only route to a real cleanup_status is a repair
+		// path that this very predicate refuses to run. A rig whose polecats all
+		// carry it reaches reusable=0 and stops dispatching, and every bead the
+		// scheduler then tries burns its respawn attempts and latches (hq-f2n8c;
+		// trader-z67n, trader-lxfo, trader-nlta).
+		//
+		// The real evidence is git, and the predicates below already read it:
+		// GitCheckFailed, GitDirty, StashCount and UnpushedCommits each block on
+		// their own and are individually fail-closed. When the git check
+		// succeeded we defer to them rather than veto on missing metadata —
+		// which also settles the standing disagreement where git-state reports
+		// CLEAN and check-recovery reports NEEDS_RECOVERY for the same polecat
+		// (hq-vv0q). When the git check did NOT succeed we have no evidence at
+		// all, so we keep blocking.
+		unknownCleanup := in.CleanupStatus == "" || in.CleanupStatus == CleanupUnknown
+		if !unknownCleanup || in.GitCheckFailed {
+			reason := "cleanup-" + string(in.CleanupStatus)
+			blocker := "cleanup_status=" + string(in.CleanupStatus)
+			countsTowardCapacity := true
+			if in.CleanupStatus == "" {
+				reason = "cleanup-unknown"
+				blocker = "cleanup_status=<missing>"
+				countsTowardCapacity = false
+			} else if in.CleanupStatus == CleanupUnknown {
+				reason = "cleanup-unknown"
+				countsTowardCapacity = false
+			}
+			block(reason, blocker, countsTowardCapacity)
+		}
+	}
+	if in.GitCheckFailed {
+		blocker := in.GitCheckFailedReason
+		if blocker == "" {
+			blocker = "git_state=unknown"
+		}
+		block("git-check-failed", blocker, true)
+	}
+	if in.GitDirty {
+		blocker := in.GitDirtyReason
+		if blocker == "" {
+			blocker = "git_state=has_uncommitted"
+		}
+		block("git-dirty", blocker, true)
+	}
+	if in.StashCount > 0 {
+		block("git-stash", "git_state=has_stash stash_count="+itoa(in.StashCount), true)
+	}
+	if in.UnpushedCommits > 0 {
+		block("git-unpushed", "git_state=has_unpushed unpushed_commits="+itoa(in.UnpushedCommits), true)
+	}
+	activeMRBlocks := in.ActiveMRBlocker != ""
+	if activeMRBlocks {
+		block("active-mr-open", in.ActiveMRBlocker, false)
+	}
+
+	if len(d.Blockers) > 0 {
+		if activeMRBlocks && len(d.Blockers) == 1 {
+			d.Verdict = WorkstateVerdictPendingMR
+			d.ReuseStatus = "idle-pr-open"
+			return d
+		}
+		d.Verdict = WorkstateVerdictNeedsRecovery
+		d.NeedsRecovery = true
+		d.CountsTowardCapacity = capacityBlocked
+		d.ReuseStatus = "idle-recovery-needed"
+		return d
+	}
+
+	if in.MQCheckRequired {
+		if in.MQLookupFailed {
+			d.Verdict = WorkstateVerdictNeedsRecovery
+			d.Reason = "mq-lookup-failed"
+			d.NeedsRecovery = true
+			d.MQStatus = "unknown"
+			d.CountsTowardCapacity = true
+			d.ReuseStatus = "idle-recovery-needed"
+			d.Blockers = append(d.Blockers, "mq_status=unknown")
+			return d
+		} else if !in.HasSubmittableWork || in.MQNotRequired {
+			d.MQStatus = "not_required"
+		} else if in.MRSubmitted {
+			d.MQStatus = "submitted"
+		} else {
+			d.Verdict = WorkstateVerdictNeedsMQSubmit
+			d.Reason = "mq-not-submitted"
+			d.NeedsRecovery = true
+			d.NeedsMQSubmit = true
+			d.MQStatus = "not_submitted"
+			d.CountsTowardCapacity = true
+			d.ReuseStatus = "idle-recovery-needed"
+			d.Blockers = append(d.Blockers, "mq_status=not_submitted")
+			return d
+		}
+	}
+
+	d.Reusable = true
+	d.SafeToNuke = true
+	d.Reason = "reusable"
+	if strings.HasPrefix(in.Branch, "polecat/") {
+		d.ReuseStatus = "idle-preserved"
+	} else {
+		d.ReuseStatus = "idle-clean"
+	}
+	return d
+}
+
+// CanIgnoreStaleCleanupStatus returns true when a dirty, missing, or unknown
+// persisted cleanup_status is superseded by direct predicates proving no work
+// is at risk. The status remains unsafe globally; callers must opt into this
+// reconciliation path only after gathering live git, hook, work, and
+// active-MR facts.
+//
+// A missing ("") or CleanupUnknown status is included alongside the known-dirty
+// statuses: it represents the same "cached value cannot be trusted, defer to
+// live evidence" case, and excluding it made --reconcile-cleanup a no-op in
+// exactly the case it exists to backfill, since a missing/unknown status was
+// simultaneously the value it needed to repair and the predicate refusing the
+// repair (gt-daff).
+func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
+	if !workTerminal || !hookSafe || !activeMRSafe || !gitSafe {
+		return false
+	}
+	switch status {
+	case CleanupUncommitted, CleanupStash, CleanupUnpushed, CleanupUnknown, "":
+		return true
+	default:
+		return false
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}

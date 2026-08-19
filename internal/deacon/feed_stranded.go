@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -183,6 +184,7 @@ func (s *ConvoyFeedState) RecordFeed() {
 func FindStrandedConvoys(townRoot string) ([]StrandedConvoy, error) {
 	cmd := exec.Command("gt", "convoy", "stranded", "--json")
 	cmd.Dir = townRoot
+	cmd.Env = deaconReadOnlyRoutingEnv(townRoot)
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
@@ -278,6 +280,23 @@ func FeedStranded(townRoot string, maxPerCycle int, cooldown time.Duration) *Fee
 			continue
 		}
 
+		// mol-convoy-feed's wisp creation hijacks the new issue's root title to
+		// its `title` var (beads cookFormula: presence of a `title` key in
+		// [vars] makes the issue title come from that var instead of the
+		// formula name). Without a value, the var's empty default becomes the
+		// title and beads rejects it. Fail clearly before consuming any
+		// rate-limit/cooldown budget rather than let dispatch fail deep in
+		// wisp creation.
+		if err := validateConvoyTitle(convoy); err != nil {
+			result.Errors++
+			result.Details = append(result.Details, FeedConvoyResult{
+				ConvoyID: convoy.ID,
+				Action:   "error",
+				Message:  err.Error(),
+			})
+			continue
+		}
+
 		// Rate limit: check per-cycle cap
 		if fedCount >= maxPerCycle {
 			result.Details = append(result.Details, FeedConvoyResult{
@@ -302,7 +321,7 @@ func FeedStranded(townRoot string, maxPerCycle int, cooldown time.Duration) *Fee
 		}
 
 		// Dispatch dog to feed the convoy
-		if err := dispatchFeedDog(townRoot, convoy.ID); err != nil {
+		if err := dispatchFeedDog(townRoot, convoy.ID, convoy.Title); err != nil {
 			result.Errors++
 			result.Details = append(result.Details, FeedConvoyResult{
 				ConvoyID: convoy.ID,
@@ -337,17 +356,41 @@ func FeedStranded(townRoot string, maxPerCycle int, cooldown time.Duration) *Fee
 func closeEmptyConvoy(townRoot, convoyID string) error {
 	cmd := exec.Command("gt", "convoy", "check", convoyID)
 	cmd.Dir = townRoot
+	cmd.Env = deaconMutationRoutingEnv(townRoot)
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
+// validateConvoyTitle returns an error if the convoy has no title. A real
+// convoy bead always has one (beads rejects empty titles at creation), so
+// this guards against the wisp-creation failure surfacing later, deep inside
+// gt sling, with a less actionable error.
+func validateConvoyTitle(convoy StrandedConvoy) error {
+	if convoy.Title == "" {
+		return fmt.Errorf("convoy %s has no title, cannot dispatch feed dog", convoy.ID)
+	}
+	return nil
+}
+
+// buildFeedDogArgs constructs the `gt sling` arguments for dispatching a feed
+// dog to a stranded convoy. mol-convoy-feed's wisp creation requires a title
+// var (see validateConvoyTitle); the convoy's own title is passed through
+// since it's the only title mol-convoy-feed has available when dispatched
+// standalone (not bonded to an existing bead).
+func buildFeedDogArgs(convoyID, title string) []string {
+	return []string{"sling", constants.MolConvoyFeed, "deacon/dogs",
+		"--var", fmt.Sprintf("convoy=%s", convoyID),
+		"--var", fmt.Sprintf("title=%s", title),
+	}
+}
+
 // dispatchFeedDog dispatches a dog to feed a stranded convoy via gt sling.
-func dispatchFeedDog(townRoot, convoyID string) error {
-	cmd := exec.Command("gt", "sling", constants.MolConvoyFeed, "deacon/dogs",
-		"--var", fmt.Sprintf("convoy=%s", convoyID))
+func dispatchFeedDog(townRoot, convoyID, title string) error {
+	cmd := exec.Command("gt", buildFeedDogArgs(convoyID, title)...)
 	cmd.Dir = townRoot
+	cmd.Env = deaconMutationRoutingEnv(townRoot)
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -382,9 +425,7 @@ func PruneFeedStrandedState(townRoot string) (int, error) {
 
 // getConvoyStatus returns the current status of a convoy bead.
 func getConvoyStatus(townRoot, convoyID string) string {
-	cmd := exec.Command("bd", "show", convoyID, "--json")
-	cmd.Dir = townRoot
-	util.SetDetachedProcessGroup(cmd)
+	cmd := beads.Command(townRoot, townBeadsDir(townRoot), beads.ReadOnlyRouting, "show", convoyID, "--json")
 
 	output, err := cmd.Output()
 	if err != nil {

@@ -23,6 +23,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/boot"
+	"github.com/steveyegge/gastown/internal/channelevents"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
@@ -40,6 +41,7 @@ import (
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/wisp"
 	"github.com/steveyegge/gastown/internal/witness"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -82,6 +84,13 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	syncFailures map[string]int
 
+	// quotaDogFailures tracks consecutive failures per quota_dog action
+	// (rotate, failover). Used to escalate logging from WARN to ERROR after
+	// repeated failures, so a permanently broken action (e.g. no accounts
+	// configured) doesn't stay silent in per-cycle "(non-fatal)" log noise.
+	// Only accessed from quota_dog's own goroutine - no sync needed.
+	quotaDogFailures map[string]int
+
 	// PATCH-006: Resolved binary paths to avoid PATH issues in subprocesses.
 	gtPath string
 	bdPath string
@@ -104,12 +113,27 @@ type Daemon struct {
 
 	// lastDoctorMolTime tracks when the last mol-dog-doctor molecule was poured.
 	// Option B throttling: only pour when anomaly detected AND cooldown elapsed.
-	// Only accessed from heartbeat loop goroutine - no sync needed.
+	// Owned solely by the dolt_health dog goroutine (via pourDoctorMolIfWarnings);
+	// the heartbeat's ensureDoltServerRunning no longer touches it (gt-4ecf), so
+	// no sync is needed.
 	lastDoctorMolTime time.Time
 
 	// lastMaintenanceRun tracks when scheduled maintenance last ran.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	lastMaintenanceRun time.Time
+
+	// binaryPath, startupBinaryModTime and startupBinarySize record this
+	// daemon's own on-disk executable and its identity at startup. The
+	// heartbeat compares the current on-disk identity against these to detect
+	// an in-place binary replacement (e.g. `make safe-install` from the
+	// rebuild-gt plugin, which installs a new binary without restarting the
+	// daemon) and self-heal by restarting. restartRequested latches once such a
+	// restart has been spawned so we never spawn a second one.
+	// Only accessed from heartbeat loop goroutine - no sync needed.
+	binaryPath           string
+	startupBinaryModTime time.Time
+	startupBinarySize    int64
+	restartRequested     bool
 
 	// mayorZombieCount tracks consecutive patrol cycles where the Mayor tmux
 	// session exists but the agent process is not detected. A count >= 3
@@ -122,17 +146,22 @@ type Daemon struct {
 	// per-rig context timeouts so one slow rig cannot block all others.
 	rigPool *RigWorkerPool
 
-	// knownRigsCache memoizes the result of reading mayor/rigs.json for the
-	// duration of a single heartbeat tick. ~10 call sites per tick otherwise
-	// re-read and re-parse the same file. Invalidated at the start of each
-	// heartbeat so rigs.json changes between ticks are picked up.
-	// Only accessed from heartbeat loop goroutine - no sync needed.
-	knownRigsCache      []string
-	knownRigsCacheValid bool
-
 	// legacySocketCleanupOnce ensures upgrade cleanup only runs once per daemon
 	// lifetime, before any patrol agent can be started on the current socket.
 	legacySocketCleanupOnce sync.Once
+
+	// dogWg tracks the isolated patrol-dog goroutines (see runDogLoop). shutdown()
+	// cancels d.ctx and drains this group before tearing down the shared resources
+	// the dogs touch (Dolt server, beads stores, telemetry), so an in-flight dog
+	// cycle cannot use a resource after it is freed. See gt-4ecf.
+	dogWg sync.WaitGroup
+
+	// lifecycleRequestCh triggers the isolated heartbeat goroutine (see
+	// runHeartbeatLoop) to run a lifecycle-request cycle immediately, instead of
+	// Run()'s signal branch calling ProcessLifecycleRequests directly. Buffered 1
+	// and sent to non-blockingly: a signal arriving while a cycle is already
+	// pending/running just coalesces into the next cycle. See gt-kj5j.
+	lifecycleRequestCh chan struct{}
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -151,6 +180,18 @@ const (
 	// doctorMolCooldown is the minimum interval between mol-dog-doctor molecules.
 	// Configurable via operational.daemon.doctor_mol_cooldown.
 	doctorMolCooldown = 5 * time.Minute
+
+	// gracefulShutdownTimeout bounds how long StopDaemon waits for the
+	// daemon's own graceful shutdown() to finish before force-killing it.
+	// shutdown() runs sequentially: the patrol-dog drain (bounded to
+	// dogShutdownDrainTimeout = 5s), then pushDoltRemotes (bounded to
+	// doltRemotesShutdownBudget = 10s), then DoltServerManager.stopLocked
+	// (up to its own 30s force-kill budget), then OTel provider shutdown (up
+	// to 5s) — a worst case of ~50s. A SIGKILL landing mid-journal-write in
+	// either the remotes push or Dolt's own stop can corrupt the database,
+	// requiring `dolt fsck` to recover, so this must clear that worst case
+	// with real margin rather than race it.
+	gracefulShutdownTimeout = 60 * time.Second
 )
 
 const beadsModulePath = "github.com/steveyegge/beads"
@@ -282,6 +323,7 @@ func New(config *Config) (*Daemon, error) {
 			logger.Printf("Set env %s=%s from daemon.json", k, v)
 		}
 	}
+	agentconfig.ApplyConfiguredDoltEnv(config.TownRoot)
 
 	// Load disabled_patrols from town settings (settings/config.json).
 	// This provides a simpler way to disable patrols than editing daemon.json.
@@ -299,17 +341,11 @@ func New(config *Config) (*Daemon, error) {
 	if patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.DoltServer != nil {
 		doltServer = NewDoltServerManager(config.TownRoot, patrolConfig.Patrols.DoltServer, logger.Printf)
 		if doltServer.IsEnabled() {
-			logger.Printf("Dolt server management enabled (port %d)", patrolConfig.Patrols.DoltServer.Port)
+			logger.Printf("Dolt server management enabled (port %d)", doltServer.config.Port)
 			// Propagate Dolt connection info to process env so AgentEnv() passes it to
 			// all spawned agent sessions. Without this, bd in agent sessions
 			// auto-starts rogue Dolt instances or connects to localhost. (GH#2412)
-			portStr := strconv.Itoa(patrolConfig.Patrols.DoltServer.Port)
-			os.Setenv("GT_DOLT_PORT", portStr)
-			os.Setenv("BEADS_DOLT_PORT", portStr)
-			if patrolConfig.Patrols.DoltServer.Host != "" {
-				os.Setenv("GT_DOLT_HOST", patrolConfig.Patrols.DoltServer.Host)
-				os.Setenv("BEADS_DOLT_SERVER_HOST", patrolConfig.Patrols.DoltServer.Host)
-			}
+			applyDoltServerConfigEnv(doltServer.config)
 		}
 	}
 
@@ -317,24 +353,24 @@ func New(config *Config) (*Daemon, error) {
 	// started independently of gt up), detect the port from dolt config.
 	// This ensures AgentEnv() always has the port for spawned sessions. (GH#2412)
 	if os.Getenv("GT_DOLT_PORT") == "" {
-		doltCfg := doltserver.DefaultConfig(config.TownRoot)
-		if doltCfg.Port > 0 {
-			portStr := strconv.Itoa(doltCfg.Port)
+		if port := agentconfig.ResolveConfiguredDoltPort(config.TownRoot); port > 0 {
+			portStr := strconv.Itoa(port)
 			os.Setenv("GT_DOLT_PORT", portStr)
+			os.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
 			os.Setenv("BEADS_DOLT_PORT", portStr)
-			logger.Printf("Set GT_DOLT_PORT=%s from Dolt config (fallback)", portStr)
+			logger.Printf("Set GT_DOLT_PORT=%s from resolved Dolt config (fallback)", portStr)
 		}
+	} else {
+		portStr := os.Getenv("GT_DOLT_PORT")
+		os.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
+		os.Setenv("BEADS_DOLT_PORT", portStr)
 	}
 
 	// Propagate Dolt host to process env so bd doesn't fall back to 127.0.0.1
-	// when the server runs on a remote machine (e.g., mini2 over Tailscale).
-	if os.Getenv("BEADS_DOLT_SERVER_HOST") == "" {
-		doltCfg := doltserver.DefaultConfig(config.TownRoot)
-		if doltCfg.Host != "" {
-			os.Setenv("BEADS_DOLT_SERVER_HOST", doltCfg.Host)
-			logger.Printf("Set BEADS_DOLT_SERVER_HOST=%s from Dolt config", doltCfg.Host)
-		}
-	}
+	// when the server runs on a remote machine. BEADS_DOLT_SERVER_HOST is a
+	// derived alias, not an authority, so stale inherited values are replaced or
+	// removed here.
+	applyConfiguredDoltHostEnv(config.TownRoot, logger.Printf)
 
 	// PATCH-006: Resolve binary paths at startup.
 	gtPath, err := exec.LookPath("gt")
@@ -404,6 +440,37 @@ func New(config *Config) (*Daemon, error) {
 	return d, nil
 }
 
+func applyDoltServerConfigEnv(config *DoltServerConfig) {
+	if config == nil {
+		return
+	}
+	if config.Port > 0 {
+		portStr := strconv.Itoa(config.Port)
+		os.Setenv("GT_DOLT_PORT", portStr)
+		os.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
+		os.Setenv("BEADS_DOLT_PORT", portStr)
+	}
+	if config.Host != "" {
+		os.Setenv("GT_DOLT_HOST", config.Host)
+		os.Setenv("BEADS_DOLT_SERVER_HOST", config.Host)
+	}
+}
+
+func applyConfiguredDoltHostEnv(townRoot string, logf func(format string, v ...interface{})) {
+	if host := agentconfig.ResolveConfiguredDoltHost(townRoot); host != "" {
+		os.Setenv("GT_DOLT_HOST", host)
+		os.Setenv("BEADS_DOLT_SERVER_HOST", host)
+		if logf != nil {
+			logf("Set BEADS_DOLT_SERVER_HOST=%s from resolved Dolt host", host)
+		}
+		return
+	}
+	if _, _, ok := agentconfig.ManagedDoltEndpoint(townRoot); ok {
+		os.Unsetenv("GT_DOLT_HOST")
+	}
+	os.Unsetenv("BEADS_DOLT_SERVER_HOST")
+}
+
 func (d *Daemon) cleanupLegacySocketSessions() {
 	d.legacySocketCleanupOnce.Do(func() {
 		defaultCleaned, baseCleaned := cleanupLegacySocketsForDaemon(d.config.TownRoot)
@@ -470,13 +537,36 @@ func (d *Daemon) Run() (err error) {
 
 	// Update state
 	state := &State{
-		Running:   true,
-		PID:       os.Getpid(),
-		StartedAt: time.Now(),
+		Running:      true,
+		PID:          os.Getpid(),
+		StartedAt:    time.Now(),
+		BinaryCommit: version.CurrentCommit(),
 	}
 	if err := SaveState(d.config.TownRoot, state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
+
+	// Log which binary is actually running, at the resolved filesystem path.
+	// Unlike state.json (overwritten on every restart), the log is append-only,
+	// so this is what answers "which build handled this incident" after the
+	// fact when a host has more than one gt binary on disk (gt-5nzu).
+	binaryPath, pathErr := os.Executable()
+	if pathErr != nil {
+		binaryPath = fmt.Sprintf("unknown (%v)", pathErr)
+	} else {
+		// Record the on-disk executable and its identity so the heartbeat can
+		// detect an in-place binary replacement and self-restart to adopt it.
+		d.binaryPath = binaryPath
+		if fi, statErr := os.Stat(binaryPath); statErr == nil {
+			d.startupBinaryModTime = fi.ModTime()
+			d.startupBinarySize = fi.Size()
+		}
+	}
+	commitDisplay := "dev build"
+	if state.BinaryCommit != "" {
+		commitDisplay = version.ShortCommit(state.BinaryCommit)
+	}
+	d.logger.Printf("Daemon binary: %s (commit %s)", binaryPath, commitDisplay)
 
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
@@ -484,8 +574,9 @@ func (d *Daemon) Run() (err error) {
 
 	// Fixed recovery-focused heartbeat (no activity-based backoff)
 	// Normal wake is handled by feed subscription (bd activity --follow)
-	timer := time.NewTimer(d.recoveryHeartbeatInterval())
-	defer timer.Stop()
+	d.lifecycleRequestCh = make(chan struct{}, 1)
+	schedulerWakeTicker := time.NewTicker(time.Second)
+	defer schedulerWakeTicker.Stop()
 
 	d.logger.Printf("Daemon running, recovery heartbeat interval %v", d.recoveryHeartbeatInterval())
 
@@ -555,140 +646,18 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 
-	// Start dedicated Dolt health check ticker if Dolt server is configured.
-	// This runs at a much higher frequency (default 30s) than the general
-	// heartbeat (3 min) so Dolt crashes are detected quickly.
-	var doltHealthTicker *time.Ticker
-	var doltHealthChan <-chan time.Time
-	if d.doltServer != nil && d.doltServer.IsEnabled() {
-		interval := d.doltServer.HealthCheckInterval()
-		doltHealthTicker = time.NewTicker(interval)
-		doltHealthChan = doltHealthTicker.C
-		defer doltHealthTicker.Stop()
-		d.logger.Printf("Dolt health check ticker started (interval %v)", interval)
-	}
-
-	// Start dedicated Dolt remotes push ticker if configured.
-	// This runs at a lower frequency (default 15 min) than the heartbeat (3 min)
-	// to periodically push databases to their git remotes.
-	var doltRemotesTicker *time.Ticker
-	var doltRemotesChan <-chan time.Time
-	if d.isPatrolActive("dolt_remotes") {
-		interval := doltRemotesInterval(d.patrolConfig)
-		doltRemotesTicker = time.NewTicker(interval)
-		doltRemotesChan = doltRemotesTicker.C
-		defer doltRemotesTicker.Stop()
-		d.logger.Printf("Dolt remotes push ticker started (interval %v)", interval)
-	}
-
-	// Start dedicated Dolt backup ticker if configured.
-	// Runs filesystem backup sync (dolt backup sync) for production databases.
-	var doltBackupTicker *time.Ticker
-	var doltBackupChan <-chan time.Time
-	if d.isPatrolActive("dolt_backup") {
-		interval := doltBackupInterval(d.patrolConfig)
-		doltBackupTicker = time.NewTicker(interval)
-		doltBackupChan = doltBackupTicker.C
-		defer doltBackupTicker.Stop()
-		d.logger.Printf("Dolt backup ticker started (interval %v)", interval)
-	}
-
-	// Start JSONL git backup ticker if configured.
-	// Exports issues to JSONL, scrubs ephemeral data, pushes to git repo.
-	var jsonlGitBackupTicker *time.Ticker
-	var jsonlGitBackupChan <-chan time.Time
-	if d.isPatrolActive("jsonl_git_backup") {
-		interval := jsonlGitBackupInterval(d.patrolConfig)
-		jsonlGitBackupTicker = time.NewTicker(interval)
-		jsonlGitBackupChan = jsonlGitBackupTicker.C
-		defer jsonlGitBackupTicker.Stop()
-		d.logger.Printf("JSONL git backup ticker started (interval %v)", interval)
-	}
-
-	// Start wisp reaper ticker if configured.
-	// Closes stale wisps (abandoned molecule steps, old patrol data) across all databases.
-	var wispReaperTicker *time.Ticker
-	var wispReaperChan <-chan time.Time
-	if d.isPatrolActive("wisp_reaper") {
-		interval := wispReaperInterval(d.patrolConfig)
-		wispReaperTicker = time.NewTicker(interval)
-		wispReaperChan = wispReaperTicker.C
-		defer wispReaperTicker.Stop()
-		d.logger.Printf("Wisp reaper ticker started (interval %v)", interval)
-	}
-
-	// Start doctor dog ticker if configured.
-	// Health monitor: TCP check, latency, DB count, gc, zombie detection, backup/disk checks.
-	var doctorDogTicker *time.Ticker
-	var doctorDogChan <-chan time.Time
-	if d.isPatrolActive("doctor_dog") {
-		interval := doctorDogInterval(d.patrolConfig)
-		doctorDogTicker = time.NewTicker(interval)
-		doctorDogChan = doctorDogTicker.C
-		defer doctorDogTicker.Stop()
-		d.logger.Printf("Doctor dog ticker started (interval %v)", interval)
-	}
-
-	// Start compactor dog ticker if configured.
-	// Flattens Dolt commit history to reclaim graph storage (daily).
-	var compactorDogTicker *time.Ticker
-	var compactorDogChan <-chan time.Time
-	if d.isPatrolActive("compactor_dog") {
-		interval := compactorDogInterval(d.patrolConfig)
-		compactorDogTicker = time.NewTicker(interval)
-		compactorDogChan = compactorDogTicker.C
-		defer compactorDogTicker.Stop()
-		d.logger.Printf("Compactor dog ticker started (interval %v)", interval)
-	}
-
-	// Start checkpoint dog ticker if configured.
-	// Auto-commits WIP changes in active polecat worktrees to prevent data loss.
-	var checkpointDogTicker *time.Ticker
-	var checkpointDogChan <-chan time.Time
-	if d.isPatrolActive("checkpoint_dog") {
-		interval := checkpointDogInterval(d.patrolConfig)
-		checkpointDogTicker = time.NewTicker(interval)
-		checkpointDogChan = checkpointDogTicker.C
-		defer checkpointDogTicker.Stop()
-		d.logger.Printf("Checkpoint dog ticker started (interval %v)", interval)
-	}
-
-	// Start scheduled maintenance ticker if configured.
-	// Checks periodically whether we're in the maintenance window and
-	// runs `gt maintain --force` when commit counts exceed threshold.
-	var scheduledMaintenanceTicker *time.Ticker
-	var scheduledMaintenanceChan <-chan time.Time
-	if d.isPatrolActive("scheduled_maintenance") {
-		interval := maintenanceCheckInterval(d.patrolConfig)
-		scheduledMaintenanceTicker = time.NewTicker(interval)
-		scheduledMaintenanceChan = scheduledMaintenanceTicker.C
-		defer scheduledMaintenanceTicker.Stop()
-		window := maintenanceWindow(d.patrolConfig)
-		d.logger.Printf("Scheduled maintenance ticker started (check interval %v, window %s)", interval, window)
-	}
-
-	// Start main-branch test runner ticker if configured.
-	// Periodically runs quality gates on each rig's main branch to catch regressions.
-	var mainBranchTestTicker *time.Ticker
-	var mainBranchTestChan <-chan time.Time
-	if d.isPatrolActive("main_branch_test") {
-		interval := mainBranchTestInterval(d.patrolConfig)
-		mainBranchTestTicker = time.NewTicker(interval)
-		mainBranchTestChan = mainBranchTestTicker.C
-		defer mainBranchTestTicker.Stop()
-		d.logger.Printf("Main branch test ticker started (interval %v)", interval)
-	}
-
-	// Start quota dog ticker if configured.
-	// Scans for rate-limited sessions and automatically rotates credentials.
-	var quotaDogTicker *time.Ticker
-	var quotaDogChan <-chan time.Time
-	if d.isPatrolActive("quota_dog") {
-		interval := quotaDogInterval(d.patrolConfig)
-		quotaDogTicker = time.NewTicker(interval)
-		quotaDogChan = quotaDogTicker.C
-		defer quotaDogTicker.Stop()
-		d.logger.Printf("Quota dog ticker started (interval %v)", interval)
+	// Launch each patrol dog on its own goroutine + ticker, isolated from the
+	// shared select loop below and from every other dog (gt-4ecf, extending
+	// gt-yycw's quota_dog isolation). A slow or hung dog can no longer starve
+	// its siblings. Each loop exits on d.ctx cancellation; d.shutdown() drains
+	// d.dogWg before freeing the Dolt server / beads stores / telemetry a dog
+	// may touch.
+	for _, dog := range d.patrolDogs() {
+		if !dog.enabled() {
+			continue
+		}
+		d.dogWg.Add(1)
+		go d.runDogLoop(d.ctx, dog.name, dog.interval, dog.fn)
 	}
 
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
@@ -699,6 +668,18 @@ func (d *Daemon) Run() (err error) {
 	d.heartbeat(state)
 	startupComplete = true
 
+	// Isolate the recovery heartbeat (and lifecycle-request processing, which the
+	// heartbeat also runs) onto its own dogWg-enrolled goroutine, same as every
+	// other patrol dog. Previously both ran inline on this select loop, so a
+	// hung/slow heartbeat cycle blocked the loop's ctx.Done() arm and delayed
+	// shutdown() indefinitely; now shutdown()'s existing bounded drainDogs covers
+	// it exactly like any other dog. See gt-kj5j.
+	d.dogWg.Add(1)
+	go d.runHeartbeatLoop(d.ctx, d.lifecycleRequestCh,
+		func() { d.runDogWithOverrunCheck("heartbeat", d.recoveryHeartbeatInterval(), func() { d.heartbeat(state) }) },
+		func() { d.processLifecycleRequests(); d.dispatchQueuedWorkIfPressureAllows() },
+	)
+
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -707,9 +688,14 @@ func (d *Daemon) Run() (err error) {
 
 		case sig := <-sigChan:
 			if isLifecycleSignal(sig) {
-				// Lifecycle signal: immediate lifecycle processing (from gt handoff)
+				// Lifecycle signal: trigger immediate lifecycle processing on the
+				// isolated heartbeat goroutine (from gt handoff). Non-blocking send:
+				// a signal arriving mid-cycle coalesces into the next cycle.
 				d.logger.Println("Received lifecycle signal, processing lifecycle requests immediately")
-				d.processLifecycleRequests()
+				select {
+				case d.lifecycleRequestCh <- struct{}{}:
+				default:
+				}
 			} else if isReloadRestartSignal(sig) {
 				// Reload restart tracker from disk (from 'gt daemon clear-backoff')
 				d.logger.Println("Received reload-restart signal, reloading restart tracker from disk")
@@ -720,91 +706,16 @@ func (d *Daemon) Run() (err error) {
 				}
 			} else {
 				d.logger.Printf("Received signal %v, shutting down", sig)
+				// Cancel d.ctx so every ctx-derived consumer (e.g. the
+				// isolated quota_dog loop, and exec.CommandContext calls
+				// parented to d.ctx) unwinds promptly on this shutdown path
+				// too, not just via Stop(). See gt-yycw.
+				d.cancel()
 				return d.shutdown(state)
 			}
 
-		case <-doltHealthChan:
-			// Dedicated Dolt health check — fast crash detection independent
-			// of the 3-minute general heartbeat.
-			if !d.isShutdownInProgress() {
-				d.ensureDoltServerRunning()
-			}
-
-		case <-doltRemotesChan:
-			// Periodic Dolt remote push — pushes databases to their configured
-			// git remotes on a 15-minute cadence (independent of heartbeat).
-			if !d.isShutdownInProgress() {
-				d.pushDoltRemotes()
-			}
-
-		case <-doltBackupChan:
-			// Periodic Dolt filesystem backup — syncs production databases to
-			// local backup directory on a 15-minute cadence.
-			if !d.isShutdownInProgress() {
-				d.syncDoltBackups()
-			}
-
-		case <-jsonlGitBackupChan:
-			// Periodic JSONL git backup — exports issues, scrubs ephemeral data,
-			// commits and pushes to git repo.
-			if !d.isShutdownInProgress() {
-				d.syncJsonlGitBackup()
-			}
-
-		case <-wispReaperChan:
-			// Periodic wisp reaper — closes stale wisps (abandoned molecule steps,
-			// old patrol data) to prevent unbounded table growth (Clown Show audit).
-			if !d.isShutdownInProgress() {
-				d.reapWisps()
-			}
-
-		case <-doctorDogChan:
-			// Doctor dog — comprehensive Dolt health monitor: connectivity, latency,
-			// gc, zombie detection, backup staleness, and disk usage checks.
-			if !d.isShutdownInProgress() {
-				d.runDoctorDog()
-			}
-
-		case <-compactorDogChan:
-			// Compactor dog — flattens Dolt commit history on production databases.
-			// Reclaims commit graph storage, then runs gc to reclaim chunks.
-			if !d.isShutdownInProgress() {
-				d.runCompactorDog()
-			}
-
-		case <-checkpointDogChan:
-			// Checkpoint dog — auto-commits WIP changes in active polecat
-			// worktrees to prevent data loss from session crashes.
-			if !d.isShutdownInProgress() {
-				d.runCheckpointDog()
-			}
-
-		case <-scheduledMaintenanceChan:
-			// Scheduled maintenance — checks if we're in the maintenance window
-			// and runs `gt maintain --force` when commit counts exceed threshold.
-			if !d.isShutdownInProgress() {
-				d.runScheduledMaintenance()
-			}
-
-		case <-mainBranchTestChan:
-			// Main branch test runner — periodically runs quality gates on each
-			// rig's main branch to catch regressions from merges or direct pushes.
-			if !d.isShutdownInProgress() {
-				d.runMainBranchTests()
-			}
-
-		case <-quotaDogChan:
-			// Quota dog — scans for rate-limited sessions and automatically
-			// rotates credentials to available accounts via keychain swap.
-			if !d.isShutdownInProgress() {
-				d.runQuotaDog()
-			}
-
-		case <-timer.C:
-			d.heartbeat(state)
-
-			// Fixed recovery interval (no activity-based backoff)
-			timer.Reset(d.recoveryHeartbeatInterval())
+		case <-schedulerWakeTicker.C:
+			d.processSchedulerWake()
 		}
 	}
 }
@@ -815,6 +726,169 @@ func (d *Daemon) Run() (err error) {
 // Default: 3 minutes — fast enough to detect stuck agents promptly.
 func (d *Daemon) recoveryHeartbeatInterval() time.Duration {
 	return d.loadOperationalConfig().GetDaemonConfig().RecoveryHeartbeatIntervalD()
+}
+
+// defaultDogOverrunFactor is how many multiples of a dog's configured
+// interval its cycle duration may reach before runDogWithOverrunCheck logs
+// and records an overrun.
+const defaultDogOverrunFactor = 2.0
+
+// dogOverrunFactor returns the configured overrun factor, or the default (2.0).
+func dogOverrunFactor(config *DaemonPatrolConfig) float64 {
+	if config != nil && config.OverrunFactor > 0 {
+		return config.OverrunFactor
+	}
+	return defaultDogOverrunFactor
+}
+
+// runDogWithOverrunCheck runs a dog's synchronous cycle and logs (plus
+// records the gastown.daemon.dog_overrun.total metric) if it takes longer
+// than interval * dogOverrunFactor to complete. This is observability only —
+// it does not change fn's blocking behavior or the caller's concurrency
+// model, so it's safe to wrap every dog (including ones still sharing the
+// select loop in Run()) without any new synchronization risk. See gt-yycw.
+func (d *Daemon) runDogWithOverrunCheck(name string, interval time.Duration, fn func()) {
+	start := time.Now()
+	fn()
+	factor := dogOverrunFactor(d.patrolConfig)
+	threshold := time.Duration(float64(interval) * factor)
+	if interval <= 0 || threshold <= 0 {
+		return
+	}
+	if elapsed := time.Since(start); elapsed > threshold {
+		d.logger.Printf("%s: OVERRUN: cycle took %v, exceeding %.1fx configured interval %v (threshold %v)", name, elapsed, factor, interval, threshold)
+		d.metrics.recordDogOverrun(d.ctx, name)
+	}
+}
+
+// patrolDog describes one isolated patrol dog: its metric/log name, an
+// activation predicate evaluated once at launch, an interval source, and the
+// cycle to run each tick.
+type patrolDog struct {
+	name     string
+	enabled  func() bool
+	interval func() time.Duration
+	fn       func()
+}
+
+// patrolDogs is the table of patrol dogs that each run on their own goroutine
+// loop (runDogLoop). It collapses the previously hand-rolled per-dog
+// ticker+select-case pairs into one table + one loop, so every dog stays
+// isolated from its siblings with a single implementation. quota_dog and
+// feeder_dog fold in here too — feeder_dog thereby gains the overrun wrapper
+// its bespoke case previously lacked. Each row carries its own predicate and
+// interval source because they differ: dolt_health activates on the Dolt server
+// being enabled (not a patrol-config entry) and takes its interval from the
+// server's health-check cadence, while the rest gate on isPatrolActive. See
+// gt-4ecf / gt-yycw.
+func (d *Daemon) patrolDogs() []patrolDog {
+	patrol := func(name string) func() bool {
+		return func() bool { return d.isPatrolActive(name) }
+	}
+	return []patrolDog{
+		{
+			name:     "dolt_health",
+			enabled:  func() bool { return d.doltServer != nil && d.doltServer.IsEnabled() },
+			interval: func() time.Duration { return d.doltServer.HealthCheckInterval() },
+			fn:       func() { d.ensureDoltServerRunning(); d.pourDoctorMolIfWarnings(d.ctx) },
+		},
+		{name: "dolt_remotes", enabled: patrol("dolt_remotes"), interval: func() time.Duration { return doltRemotesInterval(d.patrolConfig) }, fn: d.pushDoltRemotes},
+		{name: "dolt_backup", enabled: patrol("dolt_backup"), interval: func() time.Duration { return doltBackupInterval(d.patrolConfig) }, fn: d.syncDoltBackups},
+		{name: "jsonl_git_backup", enabled: patrol("jsonl_git_backup"), interval: func() time.Duration { return jsonlGitBackupInterval(d.patrolConfig) }, fn: d.syncJsonlGitBackup},
+		{name: "wisp_reaper", enabled: patrol("wisp_reaper"), interval: func() time.Duration { return wispReaperInterval(d.patrolConfig) }, fn: d.reapWisps},
+		{name: "doctor_dog", enabled: patrol("doctor_dog"), interval: func() time.Duration { return doctorDogInterval(d.patrolConfig) }, fn: d.runDoctorDog},
+		{name: "compactor_dog", enabled: patrol("compactor_dog"), interval: func() time.Duration { return compactorDogInterval(d.patrolConfig) }, fn: d.runCompactorDog},
+		{name: "checkpoint_dog", enabled: patrol("checkpoint_dog"), interval: func() time.Duration { return checkpointDogInterval(d.patrolConfig) }, fn: d.runCheckpointDog},
+		{name: "scheduled_maintenance", enabled: patrol("scheduled_maintenance"), interval: func() time.Duration { return maintenanceCheckInterval(d.patrolConfig) }, fn: d.runScheduledMaintenance},
+		{name: "main_branch_test", enabled: patrol("main_branch_test"), interval: func() time.Duration { return mainBranchTestInterval(d.patrolConfig) }, fn: d.runMainBranchTests},
+		{name: "feeder_dog", enabled: patrol("feeder_dog"), interval: func() time.Duration { return feederDogInterval(d.patrolConfig) }, fn: d.runFeederDog},
+		{name: "quota_dog", enabled: patrol("quota_dog"), interval: func() time.Duration { return quotaDogInterval(d.patrolConfig) }, fn: d.runQuotaDog},
+	}
+}
+
+// runDogLoop runs one patrol dog on its own ticker until ctx is canceled,
+// isolated from every other dog and from the shared select loop in Run(). It
+// replaces the per-dog ticker+select-case pairs (and quota_dog's former
+// runQuotaDogLoop). The ticker is built once from the initial interval — the
+// dogs never reset their tickers — while the overrun threshold is re-read each
+// tick, matching the previous select-case behavior. The launcher must
+// d.dogWg.Add(1) before `go`-launching this; the loop drains d.dogWg on exit so
+// shutdown() can wait out an in-flight cycle before tearing down the Dolt
+// server / beads stores a dog may touch. See gt-4ecf.
+func (d *Daemon) runDogLoop(ctx context.Context, name string, interval func() time.Duration, fn func()) {
+	defer d.dogWg.Done()
+	iv := interval()
+	ticker := time.NewTicker(iv)
+	defer ticker.Stop()
+	d.logger.Printf("%s ticker started (interval %v, isolated loop)", name, iv)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Stop starting NEW cycles the instant shutdown cancels ctx.
+			// isShutdownInProgress() only detects the external `gt down` lock,
+			// not internal Stop()->cancel(), so ctx.Err() is what keeps a fresh
+			// cycle (e.g. dolt_health's EnsureRunning) from racing shutdown()'s
+			// teardown; the bounded drain then only waits on in-flight cycles.
+			if ctx.Err() != nil {
+				return
+			}
+			if d.isShutdownInProgress() {
+				continue
+			}
+			d.runDogWithOverrunCheck(name, interval(), fn)
+		}
+	}
+}
+
+// runHeartbeatLoop runs the recovery heartbeat and lifecycle-request
+// processing on their own dogWg-enrolled goroutine, isolated from Run()'s
+// shared select loop exactly like every other patrol dog (runDogLoop). Both
+// cycles previously ran inline on that loop, so a hung/slow heartbeat blocked
+// the loop's ctx.Done() arm and delayed shutdown() indefinitely; now
+// shutdown()'s existing bounded drainDogs (dogShutdownDrainTimeout) covers
+// this goroutine the same as any other dog.
+//
+// Unlike patrolDogs()/runDogLoop, the heartbeat's interval is re-read and the
+// timer re-armed after every cycle (not a fixed ticker) to preserve its
+// existing config-hot-reload behavior. lifecycleCh carries immediate
+// lifecycle-request triggers from Run()'s signal branch, which used to call
+// ProcessLifecycleRequests directly from Run()'s own goroutine — dual-entering
+// it alongside the heartbeat's own internal call. Routing both through this
+// single goroutine converges them onto one execution stream, so the
+// syncFailures/deacon-boot-mayor state they share stays serialized without a
+// new lock. See gt-kj5j.
+//
+// heartbeatFn and lifecycleFn are injected so this loop is testable without a
+// fully wired Daemon; production code passes the real heartbeat cycle and
+// ProcessLifecycleRequests+dispatch pair.
+func (d *Daemon) runHeartbeatLoop(ctx context.Context, lifecycleCh <-chan struct{}, heartbeatFn, lifecycleFn func()) {
+	defer d.dogWg.Done()
+
+	timer := time.NewTimer(d.recoveryHeartbeatInterval())
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-lifecycleCh:
+			// Same ctx.Err() race guard as runDogLoop's ticker case: select can
+			// have both this and ctx.Done() ready at once.
+			if ctx.Err() != nil {
+				return
+			}
+			lifecycleFn()
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
+			heartbeatFn()
+			timer.Reset(d.recoveryHeartbeatInterval())
+		}
+	}
 }
 
 // heartbeat performs one heartbeat cycle.
@@ -844,12 +918,6 @@ func (d *Daemon) heartbeat(state *State) {
 
 	d.metrics.recordHeartbeat(d.ctx)
 	d.logger.Println("Heartbeat starting (recovery-focused)")
-
-	// Invalidate the per-tick rigs cache so this heartbeat re-reads from disk.
-	// Within a tick the cache coalesces the ~10 getKnownRigs() call sites into
-	// a single read; invalidating here ensures we pick up rigs.json changes
-	// between ticks.
-	d.invalidateKnownRigsCache()
 
 	// 0a. Reload prefix registry so new/changed rigs get correct session names.
 	// Without this, rigs added after daemon startup get the "gt" default prefix,
@@ -965,13 +1033,7 @@ func (d *Daemon) heartbeat(state *State) {
 	d.pruneStaleBranches()
 
 	// 14. Dispatch scheduled work (capacity-controlled polecat dispatch).
-	// Shells out to `gt scheduler run` to avoid circular import between daemon and cmd.
-	// Pressure-gated: polecats are the primary resource consumers.
-	if p := d.checkPressure("polecat"); !p.OK {
-		d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
-	} else {
-		d.dispatchQueuedWork()
-	}
+	d.dispatchQueuedWorkIfPressureAllows()
 
 	// 15. Rotate oversized Dolt logs (copytruncate for child process fds).
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.
@@ -983,6 +1045,12 @@ func (d *Daemon) heartbeat(state *State) {
 	if err := SaveState(d.config.TownRoot, state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
+
+	// 16. Self-heal a stale daemon binary: if a rebuilt gt has been installed on
+	// disk underneath us (e.g. by the rebuild-gt plugin's `make safe-install`,
+	// which deliberately does not restart the daemon), restart to adopt it. No-op
+	// unless the on-disk binary actually changed, so this is cheap every tick.
+	d.maybeSelfRestartStaleBinary(state)
 
 	d.logger.Printf("Heartbeat complete (#%d)", state.HeartbeatCount)
 }
@@ -1001,9 +1069,12 @@ func (d *Daemon) rotateOversizedLogs() {
 }
 
 // ensureDoltServerRunning ensures the Dolt SQL server is running if configured.
-// This provides the backend for beads database access in server mode.
-// Option B throttling: pours a mol-dog-doctor molecule only when health check
-// warnings are detected, with a 5-minute cooldown to avoid wisp spam.
+// This provides the backend for beads database access in server mode. It is
+// called both by the recovery heartbeat (to guarantee Dolt is up before its
+// beads operations) and by the isolated dolt_health dog; EnsureRunning and the
+// OTel gauge update are both concurrency-safe, so both callers are fine. The
+// mol-dog-doctor throttle lives in pourDoctorMolIfWarnings (dolt_health only) so
+// d.lastDoctorMolTime stays single-owner. See gt-4ecf.
 func (d *Daemon) ensureDoltServerRunning() {
 	if d.doltServer == nil || !d.doltServer.IsEnabled() {
 		return
@@ -1011,14 +1082,6 @@ func (d *Daemon) ensureDoltServerRunning() {
 
 	if err := d.doltServer.EnsureRunning(); err != nil {
 		d.logger.Printf("Error ensuring Dolt server is running: %v", err)
-	}
-
-	// Option B throttling: pour mol-dog-doctor only on anomaly with cooldown.
-	if warnings := d.doltServer.LastWarnings(); len(warnings) > 0 {
-		if time.Since(d.lastDoctorMolTime) >= doctorMolCooldown {
-			d.lastDoctorMolTime = time.Now()
-			go d.pourDoctorMolecule(warnings)
-		}
 	}
 
 	// Update OTel gauges with the latest Dolt health snapshot.
@@ -1031,6 +1094,30 @@ func (d *Daemon) ensureDoltServerRunning() {
 			h.DiskUsageBytes,
 			h.Healthy,
 		)
+	}
+}
+
+// pourDoctorMolIfWarnings pours a mol-dog-doctor molecule when the Dolt server
+// reported health-check warnings, throttled by doctorMolCooldown. The dolt_health
+// dog is its sole caller, so it owns d.lastDoctorMolTime and needs no lock even
+// though the heartbeat also calls ensureDoltServerRunning (which no longer touches
+// that field). It reads LastWarnings under the server's own lock; a concurrent
+// heartbeat EnsureRunning may refresh those warnings first, which is harmless (the
+// pour reflects the most recent check of the same server). Skips work once ctx is
+// canceled so a shutting-down daemon does not spawn a molecule that outlives it.
+// See gt-4ecf.
+func (d *Daemon) pourDoctorMolIfWarnings(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	if d.doltServer == nil || !d.doltServer.IsEnabled() {
+		return
+	}
+	if warnings := d.doltServer.LastWarnings(); len(warnings) > 0 {
+		if time.Since(d.lastDoctorMolTime) >= doctorMolCooldown {
+			d.lastDoctorMolTime = time.Now()
+			go d.pourDoctorMolecule(warnings)
+		}
 	}
 }
 
@@ -1797,12 +1884,26 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 		}
 		return
 	}
+	if stop, err := refinery.ActiveSafetyStop(d.config.TownRoot, rigName); err != nil {
+		d.logger.Printf("Skipping refinery auto-start for %s: cannot verify safety stop: %v", rigName, err)
+		return
+	} else if stop != nil {
+		d.logger.Printf("Skipping refinery auto-start for %s: %s", rigName, stop.Reason())
+		name := session.RefinerySessionName(session.PrefixFor(rigName))
+		if exists, _ := d.tmux.HasSession(name); exists {
+			d.logger.Printf("Killing leftover refinery %s (%s)", name, stop.Reason())
+			if err := d.tmux.KillSessionWithProcesses(name); err != nil {
+				d.logger.Printf("Error killing leftover refinery %s: %v", name, err)
+			}
+		}
+		return
+	}
 
 	// Event gate: don't spawn a new Claude session when there's nothing to process.
 	// If a refinery session is already running, Start() returns ErrAlreadyRunning (cheap).
 	// But spawning a NEW session with an empty queue burns API credits for nothing.
 	// The refinery formula uses await-event internally, so it will wake when events appear.
-	if !d.hasPendingEvents("refinery") {
+	if !d.hasPendingEvents(channelevents.RefineryChannel(rigName)) {
 		// Check if session already exists before skipping — let running sessions continue
 		r := &rig.Rig{
 			Name: rigName,
@@ -1831,9 +1932,17 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 	// See: daemon.log "is hung (no activity for 30m0s), killing for restart"
 
 	if err := mgr.Start(false, ""); err != nil {
-		if err == refinery.ErrAlreadyRunning {
+		if errors.Is(err, refinery.ErrAlreadyRunning) {
 			// Already running - this is the expected case when fix is working
 			d.logger.Printf("Refinery for %s already running, skipping spawn", rigName)
+			return
+		}
+		if errors.Is(err, refinery.ErrSafetyStopped) {
+			d.logger.Printf("Skipping refinery auto-start for %s: %v", rigName, err)
+			return
+		}
+		if errors.Is(err, refinery.ErrForkRig) {
+			d.logger.Printf("Skipping refinery auto-start for %s: %v", rigName, err)
 			return
 		}
 		d.logger.Printf("Error starting refinery for %s: %v", rigName, err)
@@ -2065,25 +2174,14 @@ func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
 	return stores, nil
 }
 
-// getKnownRigs returns list of registered rig names.
-// Results are memoized per heartbeat tick to coalesce the ~10 per-tick callers
-// into a single mayor/rigs.json read. The cache is invalidated at the start of
-// each heartbeat.
+// getKnownRigs returns the list of registered rig names, read fresh from
+// mayor/rigs.json on each call. It was previously memoized per heartbeat tick
+// to coalesce the ~10 per-tick callers into one read, but that cache assumed a
+// single owning goroutine; now that the patrol dogs run on their own goroutines
+// (gt-4ecf) they call this concurrently, so the cache is gone and each caller
+// reads directly (rigs.json is tiny, and fresh reads pick up changes sooner).
 func (d *Daemon) getKnownRigs() []string {
-	if d.knownRigsCacheValid {
-		return d.knownRigsCache
-	}
-	rigs := d.readKnownRigsFromDisk()
-	d.knownRigsCache = rigs
-	d.knownRigsCacheValid = true
-	return rigs
-}
-
-// invalidateKnownRigsCache clears the per-tick cache so the next
-// getKnownRigs() call re-reads mayor/rigs.json from disk.
-func (d *Daemon) invalidateKnownRigsCache() {
-	d.knownRigsCache = nil
-	d.knownRigsCacheValid = false
+	return d.readKnownRigsFromDisk()
 }
 
 // readKnownRigsFromDisk reads and parses mayor/rigs.json.
@@ -2144,11 +2242,6 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 // (daemon cannot import cmd).
 func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	cfg := wisp.NewConfig(d.config.TownRoot, rigName)
-
-	// Warn if wisp config is missing - parked/docked state may have been lost
-	if _, err := os.Stat(cfg.ConfigPath()); os.IsNotExist(err) {
-		d.logger.Printf("Warning: no wisp config for %s - parked state may have been lost", rigName)
-	}
 
 	// Check wisp layer first (local/ephemeral overrides)
 	status := cfg.GetString("status")
@@ -2220,6 +2313,20 @@ func (d *Daemon) processLifecycleRequests() {
 func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return kept for future use
 	d.logger.Println("Daemon shutting down")
 
+	// Drain the isolated patrol-dog goroutines FIRST, before tearing down any
+	// shared resource they touch (Dolt server, beads stores, telemetry). Both
+	// entry paths into shutdown() already cancel d.ctx; cancel again here
+	// (idempotent) so a dog blocked between ticks unwinds, then wait — bounded —
+	// for any in-flight cycle. It must precede doltServer.Stop() so a dog's
+	// EnsureRunning either completes before Stop() (serialized by the server's
+	// own mutex) or is skipped by runDogLoop's ctx.Err() gate, never restarting
+	// an orphan Dolt after Stop(). The wait is bounded (not open-ended) because
+	// some dogs run uninterruptible multi-minute work that ignores ctx; letting
+	// the drain outlast the graceful-shutdown budget would invite the
+	// SIGKILL-mid-Dolt-write corruption that budget exists to prevent. See gt-4ecf.
+	d.cancel()
+	d.drainDogs(dogShutdownDrainTimeout)
+
 	// Stop feed curator
 	if d.curator != nil {
 		d.curator.Stop()
@@ -2239,8 +2346,11 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		d.logger.Println("KRC pruner stopped")
 	}
 
-	// Push Dolt remotes before stopping the server (if patrol is enabled)
-	d.pushDoltRemotes()
+	// Push Dolt remotes before stopping the server (if patrol is enabled).
+	// Bounded so a slow/unreachable remote can't block StopDaemon's
+	// graceful-shutdown window indefinitely (gt-if5q); remaining databases
+	// are just picked up on the next periodic dolt_remotes cycle.
+	d.pushDoltRemotesWithDeadline(time.Now().Add(doltRemotesShutdownBudget))
 
 	// Stop Dolt server if we're managing it
 	if d.doltServer != nil && d.doltServer.IsEnabled() && !d.doltServer.IsExternal() {
@@ -2272,6 +2382,30 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 // Stop signals the daemon to stop.
 func (d *Daemon) Stop() {
 	d.cancel()
+}
+
+// dogShutdownDrainTimeout bounds how long shutdown() waits for in-flight
+// patrol-dog cycles to finish before proceeding to tear down shared resources.
+// Kept small and well inside gracefulShutdownTimeout (see its comment) so a slow
+// dog cannot push graceful shutdown into a force-kill. The only orphan-Dolt risk
+// (dolt_health's EnsureRunning) is a fast cycle that finishes well within this
+// window; slow maintenance dogs (e.g. compactor) are intentionally abandoned on
+// timeout rather than blocking shutdown.
+const dogShutdownDrainTimeout = 5 * time.Second
+
+// drainDogs waits up to timeout for the isolated patrol-dog goroutines (d.dogWg)
+// to exit. Callers must cancel d.ctx first so the loops are actually unwinding.
+func (d *Daemon) drainDogs(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		d.dogWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		d.logger.Printf("Warning: patrol dogs did not drain within %v; proceeding with shutdown", timeout)
+	}
 }
 
 // isShutdownInProgress checks if a shutdown is currently in progress.
@@ -2432,12 +2566,18 @@ func StopDaemon(townRoot string) error {
 		return fmt.Errorf("sending termination signal: %w", err)
 	}
 
-	// Wait a bit for graceful shutdown
-	time.Sleep(constants.ShutdownNotifyDelay)
-
-	// Check if still running
+	// Wait for graceful shutdown to actually finish, not just a fixed delay.
+	// shutdown() can take up to ~45s in the worst case (bounded remotes push,
+	// Dolt's own stop budget, and OTel flush) — SIGKILLing before it
+	// completes can corrupt the Dolt database or leave beads stores/state
+	// uncleaned. Poll for exit up to gracefulShutdownTimeout; only
+	// force-kill if still alive after that.
+	deadline := time.Now().Add(gracefulShutdownTimeout)
+	for time.Now().Before(deadline) && isProcessAlive(process) {
+		time.Sleep(constants.ShutdownNotifyDelay)
+	}
 	if isProcessAlive(process) {
-		// Still running, force kill
+		// Still running after the grace period, force kill.
 		_ = sendKillSignal(process)
 	}
 
@@ -2753,7 +2893,7 @@ func (d *Daemon) isBeadClosed(beadID string) bool {
 	cmd := exec.Command(d.bdPath, "show", beadID, "--json") //nolint:gosec // G204: args are constructed internally
 	setSysProcAttr(cmd)
 	cmd.Dir = d.config.TownRoot
-	cmd.Env = bdReadOnlyEnv()
+	cmd.Env = bdReadOnlyRoutingEnv(d.config.TownRoot)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -2780,13 +2920,14 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 	rigDir := beads.GetRigDirForName(d.config.TownRoot, rigName)
 
 	for _, status := range []string{"hooked", "in_progress", "open"} {
-		args := []string{"list", "--assignee=" + assignee, "--status=" + status, "--json"}
-		if rigDir != "" {
-			args = append(args, "--repo="+rigDir)
-		}
+		args := beads.InjectFlatForListJSON([]string{"list", "--assignee=" + assignee, "--status=" + status, "--json"})
 		cmd := exec.Command(d.bdPath, args...) //nolint:gosec // G204: args are constructed internally
 		cmd.Dir = d.config.TownRoot
-		cmd.Env = bdReadOnlyEnv()
+		if rigDir != "" {
+			cmd.Env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
+		} else {
+			cmd.Env = bdReadOnlyRoutingEnv(d.config.TownRoot)
+		}
 		output, err := cmd.Output()
 		if err != nil {
 			continue
@@ -2903,7 +3044,7 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 			// Use 3x threshold (not 2x) to avoid killing polecats during transient
 			// infrastructure degradation when the agent process is alive but not
 			// detectable (e.g. long thinking sessions, slow process inspection).
-			if staleDuration >= timeout*3 || !d.tmux.IsAgentRunning(sessionName) && staleDuration >= timeout*2 {
+			if staleDuration >= timeout*3 || !d.tmux.IsAgentAlive(sessionName) && staleDuration >= timeout*2 {
 				d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-bead-lookup-failed")
 			}
 			return
@@ -2931,7 +3072,7 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		// No hooked work + stale heartbeat — but check if the agent process
 		// is still actively running before reaping. A failed gt sling rollback
 		// can clear the hook while the agent is still working (GH#3342).
-		if d.tmux.IsAgentRunning(sessionName) {
+		if d.tmux.IsAgentAlive(sessionName) {
 			return
 		}
 		d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-no-hook")
@@ -3022,7 +3163,33 @@ func (d *Daemon) pruneStaleBranches() {
 	pruneInDir(d.config.TownRoot, "town-root")
 }
 
-// dispatchQueuedWork shells out to `gt scheduler run` to dispatch scheduled beads.
+// dispatchQueuedWorkIfPressureAllows runs one bounded scheduler cycle when the
+// daemon has sufficient capacity to launch polecats.
+func (d *Daemon) dispatchQueuedWorkIfPressureAllows() {
+	if p := d.checkPressure("polecat"); !p.OK {
+		d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
+		return
+	}
+	_, _ = d.dispatchQueuedWork()
+}
+
+func (d *Daemon) processSchedulerWake() {
+	claim, ok := claimSchedulerWake(d.config.TownRoot)
+	if !ok {
+		return
+	}
+	defer clearSchedulerWake(claim)
+	if p := d.checkPressure("polecat"); !p.OK {
+		RequestSchedulerWake(d.config.TownRoot)
+		return
+	}
+	dispatched, err := d.dispatchQueuedWork()
+	if err == nil && dispatched > 0 {
+		RequestSchedulerWake(d.config.TownRoot)
+	}
+}
+
+// dispatchQueuedWork shells out to the daemon's resolved gt executable to dispatch scheduled beads.
 // This avoids circular import between the daemon and cmd packages.
 // Uses a 5m timeout to allow multi-bead dispatch with formula cooking and hook retries.
 //
@@ -3031,19 +3198,37 @@ func (d *Daemon) pruneStaleBranches() {
 // is released on process death, and dispatchSingleBead's label swap retry logic
 // prevents double-dispatch on the next cycle. The batch_size config (default: 1)
 // limits how many beads are in-flight per heartbeat, reducing the timeout window.
-func (d *Daemon) dispatchQueuedWork() {
+func (d *Daemon) dispatchQueuedWork() (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run")
+	cmd := exec.CommandContext(ctx, d.gtPath, "scheduler", "run")
 	setSysProcAttr(cmd)
 	cmd.Dir = d.config.TownRoot
-	cmd.Env = append(os.Environ(), "GT_DAEMON=1", "BD_DOLT_AUTO_COMMIT=off")
+	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		d.logger.Printf("Scheduler dispatch timed out after 5m")
+		return 0, ctx.Err()
 	} else if err != nil {
 		d.logger.Printf("Scheduler dispatch failed: %v (output: %s)", err, string(out))
+		return 0, err
 	} else if len(out) > 0 {
 		d.logger.Printf("Scheduler dispatch: %s", string(out))
 	}
+	return parseSchedulerDispatchCount(string(out)), nil
+}
+
+func parseSchedulerDispatchCount(output string) int {
+	var dispatched int
+	index := strings.LastIndex(output, "Dispatched ")
+	if index >= 0 {
+		_, err := fmt.Sscanf(output[index:], "Dispatched %d,", &dispatched)
+		if err == nil {
+			return dispatched
+		}
+	}
+	if _, err := fmt.Sscanf(output, "Dispatched %d,", &dispatched); err == nil {
+		return dispatched
+	}
+	return 0
 }

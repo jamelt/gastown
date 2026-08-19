@@ -2,7 +2,8 @@
 # docker build -t gastown:latest -f Dockerfile .
 FROM docker/sandbox-templates:claude-code
 
-ARG GO_VERSION=1.25.8
+ARG GO_VERSION=1.26.2
+ARG DOLT_VERSION=2.0.7
 
 USER root
 
@@ -10,6 +11,7 @@ USER root
 RUN apt-get update && apt-get install -y \
     build-essential \
     git \
+    libicu-dev \
     sqlite3 \
     tmux \
     curl \
@@ -28,7 +30,7 @@ ENV PATH="/app/gastown:/usr/local/go/bin:/home/agent/go/bin:${PATH}"
 
 # Install beads (bd) and dolt
 RUN curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
-RUN curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash
+RUN curl -fsSL https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/install.sh | bash
 
 # Set up directories
 RUN mkdir -p /app /gt /gt/.dolt-data && chown -R agent:agent /app /gt

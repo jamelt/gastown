@@ -14,6 +14,8 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	gtgit "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -42,7 +44,7 @@ func (d *Daemon) ProcessLifecycleRequests() {
 	// Get mail for deacon identity (using gt mail, not bd mail)
 	cmd := exec.Command(d.gtPath, "mail", "inbox", "--identity", "deacon/", "--json")
 	cmd.Dir = d.config.TownRoot
-	cmd.Env = bdReadOnlyEnv()
+	cmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
@@ -353,6 +355,14 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 			return fmt.Errorf("cannot restart session: %s", reason)
 		}
 	}
+	if parsed.RoleType == constants.RoleRefinery {
+		if stop, err := refinery.ActiveSafetyStop(d.config.TownRoot, parsed.RigName); err != nil {
+			return fmt.Errorf("checking refinery safety stop: %w", err)
+		} else if stop != nil {
+			d.logger.Printf("Skipping session restart for %s: %s", identity, stop.Reason())
+			return refinery.NewSafetyStoppedError(stop)
+		}
+	}
 
 	// Determine working directory
 	workDir := d.getWorkDir(roleConfig, parsed)
@@ -624,6 +634,11 @@ const syncFailureEscalationThreshold = 3
 // This ensures agents with persistent clones (like refinery) start with current code.
 // Handles dirty working trees by auto-stashing before pull and restoring after.
 func (d *Daemon) syncWorkspace(workDir string) {
+	if err := gtgit.EnsureSafeMutationWorkDir(workDir); err != nil {
+		d.logger.Printf("Error: refusing daemon git sync in unsafe workdir %s: %v", workDir, err)
+		return
+	}
+
 	// Determine default branch from rig config
 	// workDir is like <townRoot>/<rigName>/<role>/rig or <townRoot>/<rigName>/crew/<name>
 	defaultBranch := "main" // fallback
@@ -820,7 +835,7 @@ func (d *Daemon) getAgentBeadState(agentBeadID string) (string, error) {
 func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 	cmd := exec.Command(d.bdPath, "show", agentBeadID, "--json")
 	cmd.Dir = d.config.TownRoot
-	cmd.Env = append(bdReadOnlyEnv(), "BEADS_DIR="+filepath.Join(d.config.TownRoot, ".beads"))
+	cmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
@@ -881,7 +896,7 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 func (d *Daemon) getAgentHookBead(agentBeadID string) string {
 	cmd := exec.Command(d.bdPath, "show", agentBeadID, "--json")
 	cmd.Dir = d.config.TownRoot
-	cmd.Env = bdReadOnlyEnv()
+	cmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
@@ -973,7 +988,7 @@ func (d *Daemon) listAgentBeadsJSON(dest interface{}) error {
 	// Query issues table (backward compat during migration)
 	cmd := exec.Command(d.bdPath, "list", "--label=gt:agent", "--json", "--flat") //nolint:gosec // G204: bd is a trusted internal tool
 	cmd.Dir = d.config.TownRoot
-	cmd.Env = bdReadOnlyEnv()
+	cmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
 	util.SetDetachedProcessGroup(cmd)
 
 	issuesOutput, issuesErr := cmd.Output()
@@ -981,7 +996,7 @@ func (d *Daemon) listAgentBeadsJSON(dest interface{}) error {
 	// Query wisps table (primary source after agent bead migration)
 	wispCmd := exec.Command(d.bdPath, "mol", "wisp", "list", "--json") //nolint:gosec // G204: bd is a trusted internal tool
 	wispCmd.Dir = d.config.TownRoot
-	wispCmd.Env = bdReadOnlyEnv()
+	wispCmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
 	util.SetDetachedProcessGroup(wispCmd)
 
 	wispOutput, _ := wispCmd.Output() // Best-effort: wisps table may not exist

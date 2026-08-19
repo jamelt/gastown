@@ -21,34 +21,67 @@ When an agent runs `bd cook mol-polecat-work`, which version do they get?
 4. **Mol Mall ready** - Architecture supports remote formula installation
 5. **Federation ready** - Formulas are shareable across towns via HOP (Highway Operations Protocol)
 
-## Three-Tier Resolution
+## As-Implemented: Four-Entry Search Path (beads)
+
+Formula resolution does not happen in `gt` — `gt formula show` and friends
+shell out to `bd`, and `bd` resolves formulas via `DefaultSearchPaths()` in
+the `github.com/steveyegge/beads` module (`internal/formula/parser.go`), not
+in this repo. That function builds an ordered, de-duplicated list of
+directories, most specific first:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     FORMULA RESOLUTION ORDER                     │
-│                    (most specific wins)                          │
+│         ACTUAL beads DefaultSearchPaths() ORDER                  │
+│              (first match wins, most specific first)             │
 └─────────────────────────────────────────────────────────────────┘
 
-TIER 1: PROJECT (rig-level)
-  Location: <project>/.beads/formulas/
-  Source:   Committed to project repo
-  Use case: Project-specific workflows (deploy, test, release)
-  Example:  ~/gt/gastown/.beads/formulas/mol-gastown-release.formula.toml
+1. RESOLVED BEADS DIR (project-level)
+   Location: <beads.FindBeadsDir()>/formulas
+   Source:   The active beads project's own .beads dir (may be a shared/
+             main-repo dir for worktrees, via BEADS_DIR or directory walk).
+   Only present if a beads project resolves from cwd.
 
-TIER 2: TOWN (user-level)
-  Location: ~/gt/.beads/formulas/
-  Source:   Mol Mall installs, user customizations
-  Use case: Cross-project workflows, personal preferences
-  Example:  ~/gt/.beads/formulas/mol-polecat-work.formula.toml (customized)
+2. CHECKOUT-LOCAL (repo-level)
+   Location: <git repo root, else cwd>/.beads/formulas
+   Source:   Committed to the checkout, independent of where the beads
+             database itself resolves. Lets a repo ship formulas under
+             .beads/formulas without every maintainer copying them to
+             ~/.beads.
 
-TIER 3: SYSTEM (embedded)
-  Location: Compiled into gt binary
-  Source:   internal/formula/formulas/ at build time
-  Use case: Defaults, blessed patterns, fallback
-  Example:  mol-polecat-work.formula.toml (factory default)
+3. USER-LEVEL (legacy)
+   Location: $HOME/.beads/formulas
+   Source:   A legacy ~/gt-era convention. Always added to the search list
+             even when the directory does not exist — on hosts where it was
+             never created (the common case), this is a dead entry that
+             still prints in diagnostics.
+
+4. ORCHESTRATOR / TOWN (shared, via GT_ROOT)
+   Location: $GT_ROOT/.beads/formulas
+   Source:   The shared/town-level formula layer (Mol Mall installs, cross-
+             rig customizations).
+   Added to the search list ONLY when the GT_ROOT environment variable is
+   set. Every gt-managed agent session exports GT_ROOT, so this tier is
+   reliably present in production — but any ad hoc shell without it silently
+   loses the entire shared tier, and the resulting "not found in search
+   paths" error does not say a tier was skipped or why. See gt-7x6s and
+   gt-l6sc.
 ```
 
-### Resolution Algorithm
+De-duplication happens across all four entries (identical paths collapse to
+one), and only paths that exist are ultimately searched for the requested
+formula file — but all configured paths, existing or not, are what gets
+printed on a resolution failure today.
+
+### Aspirational Model (Not Yet Implemented)
+
+The rest of this document (Resolution Algorithm below, Mol Mall support,
+tier-aware `bd formula list`/`--resolve` output, `gt formula install`, HOP
+federation) describes a target three-tier design — PROJECT / TOWN / SYSTEM —
+that the above four-entry beads implementation is meant to eventually
+collapse into. Today there is no explicit "town" concept in the resolver:
+the town tier is just "wherever GT_ROOT points," and the legacy `$HOME`
+entry sits between project and town rather than being folded away. Treat the
+pseudocode and tier names below as design targets, not current behavior.
 
 ```go
 func ResolveFormula(name string, cwd string) (Formula, Tier, error) {

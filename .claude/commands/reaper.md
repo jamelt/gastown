@@ -20,7 +20,7 @@ If `--dry-run` is passed, report counts without making changes.
 | purge_age | 72h | Closed wisps older than this are purged (deleted) |
 | stale_issue_age | 168h | Issues stale longer than this are auto-closed |
 | mail_delete_age | 72h | Closed mail older than this is purged |
-| alert_threshold | 500 | Open wisp count that triggers escalation |
+| alert_threshold | 150 | Reap-candidate backlog count, per database, that triggers escalation (NOT open wisp volume) |
 | dolt_port | 3307 | Dolt server port |
 
 ## Execution Steps
@@ -56,13 +56,20 @@ gt reaper scan --db=<name> --port=3307 \
   --json
 ```
 
-Inspect the JSON output:
+Inspect the JSON output (per database):
 - `reap_candidates`: wisps eligible for closing
 - `purge_candidates`: closed wisps eligible for deletion
 - `open_wisps`: total open wisp count
 - `anomalies`: array of detected problems
 
-If `open_wisps` exceeds 500 across all databases, note for escalation.
+Flag any `reap_candidate_spike` anomaly (that database's `reap_candidates`
+exceeded alert_threshold — stale wisps are backing up) for escalation.
+Do NOT escalate on `open_wisps`/total volume alone — that number scales
+with healthy town activity (a busy town legitimately runs thousands of open
+wisps) and is not itself a problem; two prior fixes tried a volume-based
+threshold (500->800->3000) and each was outgrown, causing a recurring
+false-alarm flood. Only flag volume if a single database looks like genuine
+unbounded/runaway growth — use judgment, not a hard number.
 If no candidates found across all databases, report "nothing to reap" and stop.
 
 ### Step 4: Reap stale wisps
@@ -114,7 +121,10 @@ Print a summary in this format:
 **Anomalies**: <list or "none">
 ```
 
-If anomalies were found:
+If anomalies were found, escalate once per (database, anomaly type) with a
+stable fingerprint so a recurring condition collapses into one open
+escalation instead of flooding a new bead + Mayor mail every run:
 ```bash
-gt escalate "Reaper anomalies detected" -s MEDIUM -m "<anomaly details>"
+gt escalate "Reaper: <anomaly-type> in <database>" -s MEDIUM -m "<anomaly details>" \
+  --fingerprint "reaper:<database>:<anomaly-type>"
 ```

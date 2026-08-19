@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -162,11 +163,26 @@ func NewDoltServerManager(townRoot string, config *DoltServerConfig, logger func
 	if config == nil {
 		config = DefaultDoltServerConfig(townRoot)
 	}
+	config = normalizeDoltServerConfig(townRoot, config)
 	return &DoltServerManager{
 		config:   config,
 		townRoot: townRoot,
 		logger:   logger,
 	}
+}
+
+func normalizeDoltServerConfig(townRoot string, config *DoltServerConfig) *DoltServerConfig {
+	if config == nil {
+		return nil
+	}
+	normalized := *config
+	if host, port, ok := agentconfig.ManagedDoltEndpoint(townRoot); ok {
+		normalized.Host = host
+		if port > 0 {
+			normalized.Port = port
+		}
+	}
+	return &normalized
 }
 
 // SetRecoveryCallback registers fn to be called (in a goroutine) whenever Dolt
@@ -836,6 +852,31 @@ func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string) error {
 	if cfg.Host != "" {
 		hostLine = fmt.Sprintf("\n  host: %s", cfg.Host)
 	}
+	eventSchedulerLine := "  event_scheduler: \"OFF\"\n"
+	if scheduler, ok := os.LookupEnv("GT_DOLT_EVENT_SCHEDULER"); ok {
+		if strings.EqualFold(scheduler, "omit") {
+			eventSchedulerLine = ""
+		} else if strings.TrimSpace(scheduler) != "" {
+			eventSchedulerLine = fmt.Sprintf("  event_scheduler: %q\n", strings.ToUpper(strings.TrimSpace(scheduler)))
+		}
+	}
+	systemVariablesBlock := "\nsystem_variables:\n  dolt_stats_enabled: 0\n"
+	if stats, ok := os.LookupEnv("GT_DOLT_STATS_ENABLED"); ok {
+		if strings.EqualFold(stats, "omit") {
+			systemVariablesBlock = ""
+		} else if strings.TrimSpace(stats) != "" {
+			systemVariablesBlock = fmt.Sprintf("\nsystem_variables:\n  dolt_stats_enabled: %s\n", strings.TrimSpace(stats))
+		}
+	}
+	// Non-blocking storage GC bounds the sql-server's RSS (hq-excy9g); on by
+	// default. GT_DOLT_AUTO_GC=off (or false/0/disabled) disables it at the next
+	// Dolt restart without a source revert+rebuild — the runtime escape hatch.
+	autoGcBlock := "  auto_gc_behavior:\n    enable: true\n    archive_level: 1\n"
+	if v, ok := os.LookupEnv("GT_DOLT_AUTO_GC"); ok {
+		if vv := strings.ToLower(strings.TrimSpace(v)); vv == "off" || vv == "false" || vv == "0" || vv == "disabled" {
+			autoGcBlock = "  auto_gc_behavior:\n    enable: false\n    archive_level: 0\n"
+		}
+	}
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by Gas Town daemon
 # Do not edit manually; overwritten on each daemon-managed server start.
 
@@ -851,13 +892,13 @@ data_dir: %q
 
 behavior:
   dolt_transaction_commit: false
-  auto_gc_behavior:
-    enable: false
-    archive_level: 0
-`,
+%s%s%s`,
 		cfg.Port,
 		hostLine,
 		cfg.DataDir,
+		eventSchedulerLine,
+		autoGcBlock,
+		systemVariablesBlock,
 	)
 	return os.WriteFile(configPath, []byte(content), 0600)
 }
@@ -903,12 +944,6 @@ func (m *DoltServerManager) startLocked() error {
 		m.logger("Warning: failed to write Dolt config.yaml: %v", err)
 	}
 
-	// Build command arguments
-	args := []string{
-		"sql-server",
-		"--config", configPath,
-	}
-
 	// Open log file
 	logFile, err := os.OpenFile(m.config.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
@@ -916,8 +951,7 @@ func (m *DoltServerManager) startLocked() error {
 	}
 
 	// Start dolt sql-server as background process
-	cmd := exec.Command(doltPath, args...)
-	cmd.Dir = m.config.DataDir
+	cmd := doltserver.NewSQLServerCommand(doltPath, m.config.DataDir, configPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 

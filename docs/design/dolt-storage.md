@@ -72,6 +72,22 @@ gt dolt list           # List all databases
 If the server isn't running, `bd` fails fast with a clear message
 pointing to `gt dolt start`.
 
+## Gas Town Scope vs `bd --global`
+
+Gas Town's town-level beads are the `hq` database. Access them by running
+direct `bd` commands from the town root (`~/gt`) or with `bd -C ~/gt ...`.
+Direct `bd` commands from rig worktrees use that rig's `.beads` redirect and
+database, so do not assume an `hq-*` ID will retarget the command.
+
+Do not use `bd --global` for Gas Town town beads. In Beads, `--global`
+means the standalone shared-server database named `beads_global`; it does
+not mean Gas Town's `hq` database, and `BEADS_DOLT_DATABASE=hq` does not
+retarget `--global`.
+
+For Gas Town Dolt health, use `gt dolt status`. `bd dolt status` reports
+the Beads client/runtime view and can say no Beads-managed server is running
+even when the Gas Town Dolt server on port 3307 is healthy.
+
 ## Write Concurrency: All-on-Main
 
 All agents — polecats, crew, witness, refinery, deacon — write directly
@@ -223,9 +239,9 @@ but insufficient. DELETE + rebase + gc is the full pipeline.
 
 **Critical update** (Tim Sehn, 2026-02-28): All compaction operations —
 `DOLT_RESET --soft`, `DOLT_REBASE()`, `dolt_gc()` — are **safe on a
-running server**. No downtime or maintenance window is needed. Auto-GC
-has been ON by default since Dolt 1.75.0. Flatten is trivially cheap
-(pointer moves, not data writes). Can run daily or more frequently.
+running server**. Routine compaction does not need downtime. Auto-GC has
+been ON by default since Dolt 1.75.0. Flatten is trivially cheap (pointer
+moves, not data writes). Can run daily or more frequently.
 
 Reference: https://www.dolthub.com/blog/2026-01-28-everybody-rebase/
 
@@ -377,6 +393,19 @@ first, gc second.
 **Automatic GC is ON by default** since Dolt 1.75.0 (October 2025). It
 triggers when the journal file (`.dolt/noms/vvvv...`) reaches 50MB. No
 manual gc or server stop is required — the server handles it.
+
+Gas Town managed Dolt configs should keep `auto_gc_behavior` enabled with
+`archive_level: 1` so the sql-server does not retain every old chunk index
+and grow RSS indefinitely. The config is regenerated only when the managed
+Dolt server starts; a deployed change takes effect on the next Dolt restart.
+Set `GT_DOLT_AUTO_GC=off` before that restart to emit `enable: false` and
+`archive_level: 0` as an operational rollback switch.
+
+If auto-GC was disabled long enough for a database to bloat, schedule one
+explicit `dolt gc --full --archive-level=1` in a maintenance window to reset
+the storage/RSS baseline. That one-time reclaim is an operator action, not a
+hidden daemon task; after it completes, auto-GC handles ongoing chunk
+reclamation.
 
 ```sql
 -- Manual gc (safe on a running server, no need to stop)

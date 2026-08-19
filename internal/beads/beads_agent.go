@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gofrs/flock"
+	beadsdk "github.com/steveyegge/beads"
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -50,12 +52,13 @@ type AgentFields struct {
 	// Completion metadata fields (gt-x7t9).
 	// Written by gt done, read by witness survey-workers to discover
 	// completion state from beads instead of POLECAT_DONE mail.
-	ExitType       string // COMPLETED, ESCALATED, DEFERRED, PHASE_COMPLETE (see witness.ExitType*)
-	MRID           string // MR bead ID (if MR was created)
-	Branch         string // Polecat working branch name
-	MRFailed       bool   // True when MR creation was attempted but failed
-	PushFailed     bool   // True when branch push to origin failed (gas-556)
-	CompletionTime string // RFC3339 timestamp of when gt done was called
+	ExitType        string // COMPLETED, ESCALATED, DEFERRED, PHASE_COMPLETE (see witness.ExitType*)
+	MRID            string // MR bead ID (if MR was created)
+	Branch          string // Polecat working branch name
+	LastSourceIssue string // Last source/work bead ID, preserved after hook_bead is cleared
+	MRFailed        bool   // True when MR creation was attempted but failed
+	PushFailed      bool   // True when branch push to origin failed (gas-556)
+	CompletionTime  string // RFC3339 timestamp of when gt done was called
 }
 
 // Notification level constants
@@ -124,6 +127,9 @@ func FormatAgentDescription(title string, fields *AgentFields) string {
 	if fields.Branch != "" {
 		lines = append(lines, fmt.Sprintf("branch: %s", fields.Branch))
 	}
+	if fields.LastSourceIssue != "" {
+		lines = append(lines, fmt.Sprintf("last_source_issue: %s", fields.LastSourceIssue))
+	}
 	if fields.MRFailed {
 		lines = append(lines, "mr_failed: true")
 	}
@@ -182,6 +188,8 @@ func ParseAgentFields(description string) *AgentFields {
 			fields.MRID = value
 		case "branch":
 			fields.Branch = value
+		case "last_source_issue":
+			fields.LastSourceIssue = value
 		case "mr_failed":
 			fields.MRFailed = value == "true"
 		case "push_failed":
@@ -212,13 +220,15 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	target := b.agentBeadTarget()
 	targetDir := target.getResolvedBeadsDir()
 
-	// Ensure target database has custom types configured.
-	// This is cached (sentinel file + in-memory) so repeated calls are fast.
-	// On fresh rigs, this may fail if the database can't be initialized.
-	// Don't bail out — try the bd create calls anyway (GH#1769).
-	_ = EnsureCustomTypes(targetDir)
-
 	description := FormatAgentDescription(title, fields)
+	if issue, err := target.createAgentBeadViaStore(context.Background(), id, title, description); err == nil {
+		return issue, nil
+	}
+
+	// Ensure target database has custom types configured before falling back to
+	// the bd CLI. The store path above avoids stale external bd schema during
+	// fresh install; this remains for older stores or non-server configurations.
+	_ = EnsureCustomTypes(targetDir)
 
 	buildArgs := func() []string {
 		a := []string{"create", "--json",
@@ -256,6 +266,33 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	// Note: hook_bead slot no longer set - bd slot removed in v0.62 (hq-l6mm5)
 
 	return &issue, nil
+}
+
+func (b *Beads) createAgentBeadViaStore(ctx context.Context, id, title, description string) (*Issue, error) {
+	store, cleanup, err := b.OpenStore(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	now := time.Now().UTC()
+	actor := b.getActor()
+	issue := &beadsdk.Issue{
+		ID:          id,
+		Title:       title,
+		Description: description,
+		Status:      beadsdk.StatusOpen,
+		Priority:    2,
+		IssueType:   beadsdk.TypeTask,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		CreatedBy:   actor,
+		Labels:      []string{"gt:agent"},
+	}
+	if err := store.CreateIssue(ctx, issue, actor); err != nil {
+		return nil, err
+	}
+	return sdkIssueToIssue(issue), nil
 }
 
 // CreateOrReopenAgentBead creates an agent bead or reopens an existing one.
@@ -320,7 +357,7 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 	updateOpts := UpdateOptions{
 		Title:       &title,
 		Description: &description,
-		SetLabels:   []string{"gt:agent"},
+		SetLabels:   labelsForAgentBeadReuse(existing.Labels),
 	}
 	if err := target.Update(id, updateOpts); err != nil {
 		return nil, fmt.Errorf("updating agent bead: %w", err)
@@ -331,6 +368,19 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 
 	// Return the updated bead
 	return target.Show(id)
+}
+
+func labelsForAgentBeadReuse(existing []string) []string {
+	labels := []string{"gt:agent"}
+	seen := map[string]bool{"gt:agent": true}
+	for _, label := range existing {
+		if !strings.HasPrefix(label, "safety_stop:") || seen[label] {
+			continue
+		}
+		labels = append(labels, label)
+		seen[label] = true
+	}
+	return labels
 }
 
 // ResetAgentBeadForReuse clears all mutable fields on an agent bead without closing it.
@@ -363,12 +413,15 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 	fields.HookBead = ""      // Clear hook_bead
 	fields.ActiveMR = ""      // Clear active_mr
 	fields.CleanupStatus = "" // Clear cleanup_status
+	fields.Mode = ""          // Clear Ralph-mode threshold marker
 	fields.AgentState = string(AgentStateNuked)
 	// Clear completion metadata (gt-x7t9)
 	fields.ExitType = ""
 	fields.MRID = ""
 	fields.Branch = ""
+	fields.LastSourceIssue = ""
 	fields.MRFailed = false
+	fields.PushFailed = false
 	fields.CompletionTime = ""
 
 	// Update description with cleared fields
@@ -411,12 +464,13 @@ type AgentFieldUpdates struct {
 	Mode              *string
 	HookBead          *string // Clear hook_bead on completion (gt-qbh)
 	// Completion metadata fields (gt-x7t9)
-	ExitType       *string
-	MRID           *string
-	Branch         *string
-	MRFailed       *bool
-	PushFailed     *bool // True when branch push to origin failed (gas-556)
-	CompletionTime *string
+	ExitType        *string
+	MRID            *string
+	Branch          *string
+	LastSourceIssue *string
+	MRFailed        *bool
+	PushFailed      *bool // True when branch push to origin failed (gas-556)
+	CompletionTime  *string
 }
 
 // UpdateAgentDescriptionFields atomically updates one or more agent description
@@ -480,6 +534,9 @@ func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdate
 	if updates.Branch != nil {
 		fields.Branch = *updates.Branch
 	}
+	if updates.LastSourceIssue != nil {
+		fields.LastSourceIssue = *updates.LastSourceIssue
+	}
 	if updates.MRFailed != nil {
 		fields.MRFailed = *updates.MRFailed
 	}
@@ -506,6 +563,144 @@ func (b *Beads) UpdateAgentCleanupStatus(id string, cleanupStatus string) error 
 // Pass empty string to clear the field (e.g., after merge completes).
 func (b *Beads) UpdateAgentActiveMR(id string, activeMR string) error {
 	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{ActiveMR: &activeMR})
+}
+
+// ClearAgentActiveMRIfMatches clears active_mr only when it still references
+// expectedMR. It returns true when a clear was written.
+func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.ClearAgentActiveMRIfMatches(id, expectedMR)
+	}
+
+	id = strings.TrimSpace(id)
+	expectedMR = strings.TrimSpace(expectedMR)
+	if id == "" || expectedMR == "" {
+		return false, nil
+	}
+
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	issue, err := b.Show(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !IsAgentBead(issue) {
+		return false, fmt.Errorf("%s is not an agent bead", id)
+	}
+
+	fields := ParseAgentFields(issue.Description)
+	if strings.TrimSpace(fields.ActiveMR) != expectedMR {
+		return false, nil
+	}
+
+	fields.ActiveMR = ""
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ClearAgentActiveMRAndMarkCleanupUnknownIfMatches clears active_mr and marks
+// cleanup_status "unknown" in one atomic update, but only when active_mr
+// still references expectedMR. This lets a merge-close invalidate a stale
+// cleanup_status claim the moment the MR closes, without racing a polecat
+// that has already been redispatched to new work: if active_mr no longer
+// matches, the agent has moved on and its own fresh self-reported
+// cleanup_status is left untouched. Returns true when the update was written.
+func (b *Beads) ClearAgentActiveMRAndMarkCleanupUnknownIfMatches(id string, expectedMR string) (bool, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.ClearAgentActiveMRAndMarkCleanupUnknownIfMatches(id, expectedMR)
+	}
+
+	id = strings.TrimSpace(id)
+	expectedMR = strings.TrimSpace(expectedMR)
+	if id == "" || expectedMR == "" {
+		return false, nil
+	}
+
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	issue, err := b.Show(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !IsAgentBead(issue) {
+		return false, fmt.Errorf("%s is not an agent bead", id)
+	}
+
+	fields := ParseAgentFields(issue.Description)
+	if strings.TrimSpace(fields.ActiveMR) != expectedMR {
+		return false, nil
+	}
+
+	fields.ActiveMR = ""
+	fields.CleanupStatus = "unknown"
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// UpdateAgentCleanupStatusIfMatches sets cleanup_status to newStatus, but
+// only when the bead's current cleanup_status still equals expectedCurrent
+// at write time. This lets a caller invalidate a snapshot it read earlier
+// without clobbering a fresher write that landed in between (e.g. a polecat's
+// own gt done self-report racing a witness zombie-restart's invalidation of
+// the same bead). Returns true when the update was written.
+func (b *Beads) UpdateAgentCleanupStatusIfMatches(id string, expectedCurrent string, newStatus string) (bool, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.UpdateAgentCleanupStatusIfMatches(id, expectedCurrent, newStatus)
+	}
+
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, nil
+	}
+
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	issue, err := b.Show(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !IsAgentBead(issue) {
+		return false, fmt.Errorf("%s is not an agent bead", id)
+	}
+
+	fields := ParseAgentFields(issue.Description)
+	if strings.TrimSpace(fields.CleanupStatus) != strings.TrimSpace(expectedCurrent) {
+		return false, nil
+	}
+
+	fields.CleanupStatus = newStatus
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UpdateAgentNotificationLevel updates the notification_level field in an agent bead.
@@ -535,12 +730,13 @@ func (b *Beads) UpdateAgentCompletion(id string, meta *CompletionMetadata) error
 	mrFailed := meta.MRFailed
 	pushFailed := meta.PushFailed
 	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{
-		ExitType:       &meta.ExitType,
-		MRID:           &meta.MRID,
-		Branch:         &meta.Branch,
-		MRFailed:       &mrFailed,
-		PushFailed:     &pushFailed,
-		CompletionTime: &meta.CompletionTime,
+		ExitType:        &meta.ExitType,
+		MRID:            &meta.MRID,
+		Branch:          &meta.Branch,
+		LastSourceIssue: &meta.HookBead,
+		MRFailed:        &mrFailed,
+		PushFailed:      &pushFailed,
+		CompletionTime:  &meta.CompletionTime,
 	})
 }
 
@@ -550,12 +746,13 @@ func (b *Beads) ClearAgentCompletion(id string) error {
 	empty := ""
 	notFailed := false
 	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{
-		ExitType:       &empty,
-		MRID:           &empty,
-		Branch:         &empty,
-		MRFailed:       &notFailed,
-		PushFailed:     &notFailed,
-		CompletionTime: &empty,
+		ExitType:        &empty,
+		MRID:            &empty,
+		Branch:          &empty,
+		LastSourceIssue: &empty,
+		MRFailed:        &notFailed,
+		PushFailed:      &notFailed,
+		CompletionTime:  &empty,
 	})
 }
 
@@ -577,6 +774,13 @@ func (b *Beads) GetAgentNotificationLevel(id string) (string, error) {
 
 // GetAgentBead retrieves an agent bead by ID.
 // Returns nil if not found.
+//
+// Falls back to the wisps table when the ID isn't in the issues table, so
+// single-ID lookups see the same wisp-only agent beads that ListAgentBeads
+// already finds (e.g. right after MigrateAgentBeadsToWisps moves a live
+// agent bead issues->wisps). The wisps listing is cached per-Beads-instance
+// so repeated not-found lookups (e.g. DetectStalePolecats calling this
+// per-polecat) pay for the full list at most once.
 func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 	if target := b.agentBeadTarget(); target != b {
 		return target.GetAgentBead(id)
@@ -585,7 +789,16 @@ func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 	issue, err := b.Show(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, nil, nil
+			b.wispAgentBeadsOnce.Do(func() {
+				b.wispAgentBeads, _ = b.ListAgentBeadsFromWisps()
+			})
+			wispIssue, ok := b.wispAgentBeads[id]
+			if !ok {
+				return nil, nil, nil
+			}
+			fields := ParseAgentFields(wispIssue.Description)
+			fields.AgentState = ResolveAgentState(wispIssue.Description, wispIssue.AgentState)
+			return wispIssue, fields, nil
 		}
 		return nil, nil, err
 	}

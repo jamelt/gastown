@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +15,36 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 )
+
+// beadIDLine matches a bead ID printed on its own line by `bd create`.
+// We scan `bd create` output (which may include startup warnings such as the
+// "beads.role not configured (GH#2950)" notice) for the last line that is
+// just a bead ID, instead of trusting that stdout contained only the ID.
+//
+// IDs look like `hq-1a2b`, `co-rln`, `h25-mrd`, `my-rig-abc`: a rig prefix,
+// dash, then a short alphanumeric token.
+var beadIDLine = regexp.MustCompile(`(?m)^\s*([a-z][a-z0-9-]*-[a-z0-9]+)\s*$`)
+
+// extractBeadID returns the last line of `output` that is a bare bead ID.
+// Returns an error if no bead-ID-shaped line is found.
+//
+// This guards against `bd` emitting startup warnings before the ID — see
+// gastown issue: "Fix compact_report.go beadID capture (corrupts on stdout
+// warnings)". Without this, a noisy stdout poisons `beadID`, the subsequent
+// `bd close <beadID>` silently fails, the audit bead stays open, and the
+// daily-digest idempotency check (filtered by status=closed) never matches —
+// producing one duplicate digest mail per patrol cycle.
+func extractBeadID(output string) (string, error) {
+	matches := beadIDLine.FindAllStringSubmatch(output, -1)
+	if len(matches) == 0 {
+		preview := strings.TrimSpace(output)
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		return "", fmt.Errorf("no bead ID found in bd output: %q", preview)
+	}
+	return matches[len(matches)-1][1], nil
+}
 
 var (
 	compactReportDryRun  bool
@@ -37,6 +68,8 @@ var wispCategoryMap = map[string]string{
 
 // categoryOrder is the display order for categories in reports.
 var categoryOrder = []string{"Heartbeats", "Patrols", "Errors", "Untyped"}
+
+const zeroPatrolReportingGap = "0 eligible patrol wisps in the report query/window (patrol health not assessed)"
 
 // categoryStats tracks per-category compaction statistics.
 type categoryStats struct {
@@ -140,7 +173,7 @@ func runDailyDigest() error {
 		return fmt.Errorf("getting working dir: %w", err)
 	}
 	bd := beads.New(workDir)
-	activeWisps, err := listWisps(bd)
+	activeWisps, err := listReportWisps(bd)
 	if err != nil {
 		return fmt.Errorf("listing active wisps: %w", err)
 	}
@@ -168,8 +201,8 @@ func runDailyDigest() error {
 
 	// Create permanent event bead for audit trail
 	beadID, err := createCompactReportBead(report, markdown)
-	if err != nil && compactReportVerbose {
-		fmt.Fprintf(os.Stderr, "warning: failed to create report bead: %v\n", err)
+	if err != nil {
+		return fmt.Errorf("recording compact report audit bead: %w", err)
 	}
 
 	// Send mail to deacon/, cc mayor/
@@ -183,6 +216,29 @@ func runDailyDigest() error {
 	}
 
 	return nil
+}
+
+// listReportWisps includes infrastructure wisps that the default bd list view
+// hides. This is intentionally separate from listWisps, whose result drives
+// mutating compaction decisions and must retain its existing scope.
+func listReportWisps(bd *beads.Beads) ([]*compactIssue, error) {
+	out, err := bd.Run("list", "--include-infra", "--json", "--all", "-n", "0")
+	if err != nil {
+		return nil, err
+	}
+
+	var allIssues []*compactIssue
+	if err := json.Unmarshal(extractJSONArray(out), &allIssues); err != nil {
+		return nil, fmt.Errorf("parsing report issue list: %w", err)
+	}
+
+	var wisps []*compactIssue
+	for _, issue := range allIssues {
+		if issue.Ephemeral {
+			wisps = append(wisps, issue)
+		}
+	}
+	return wisps, nil
 }
 
 // buildReport aggregates compaction results by category.
@@ -245,9 +301,9 @@ func detectAnomalies(report *compactReport) []string {
 				stats.Deleted/300)) // ~300/day is baseline for a rig
 		}
 
-		// Zero patrols is suspicious (witness may be down)
+		// A zero query result is a reporting observation, not agent-health proof.
 		if cat == "Patrols" && stats.Active == 0 && stats.Deleted == 0 && stats.Promoted == 0 {
-			anomalies = append(anomalies, "0 patrol wisps (patrol agents may be down)")
+			anomalies = append(anomalies, zeroPatrolReportingGap)
 		}
 
 		// High promotion rate (> 50% of non-skipped suggests miscategorized wisps)
@@ -350,11 +406,18 @@ func createCompactReportBead(report *compactReport, markdown string) (string, er
 		return "", fmt.Errorf("creating report bead: %w\nOutput: %s", err, string(output))
 	}
 
-	beadID := strings.TrimSpace(string(output))
+	beadID, err := extractBeadID(string(output))
+	if err != nil {
+		return "", fmt.Errorf("parsing report bead id: %w", err)
+	}
 
-	// Auto-close (audit record, not work)
+	// Auto-close (audit record, not work). Surface failures: if close fails,
+	// the bead stays open and findExistingCompactReport (filter status=closed)
+	// will never match, causing the digest to re-fire every patrol cycle.
 	closeCmd := exec.Command("bd", "close", beadID, "--reason=daily compaction report")
-	_ = closeCmd.Run()
+	if out, err := closeCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("auto-closing report bead %s: %w\nOutput: %s", beadID, err, string(out))
+	}
 
 	return beadID, nil
 }
@@ -407,7 +470,9 @@ func runWeeklyRollup() error {
 			rollup.Totals[cat].Active = stats.Active // Use latest active count
 		}
 		rollup.Promotions += len(report.Promotions)
-		rollup.Anomalies = append(rollup.Anomalies, report.Anomalies...)
+		for _, anomaly := range report.Anomalies {
+			rollup.Anomalies = append(rollup.Anomalies, normalizeCompactionAnomaly(anomaly))
+		}
 	}
 
 	if compactReportJSON {
@@ -427,8 +492,8 @@ func runWeeklyRollup() error {
 
 	// Create audit event bead for the weekly rollup (for future idempotency checks)
 	beadID, beadErr := createWeeklyRollupBead(rollup, markdown)
-	if beadErr != nil && compactReportVerbose {
-		fmt.Fprintf(os.Stderr, "warning: failed to create weekly rollup bead: %v\n", beadErr)
+	if beadErr != nil {
+		return fmt.Errorf("recording weekly rollup audit bead: %w", beadErr)
 	}
 
 	// Send to mayor/
@@ -456,6 +521,7 @@ func runWeeklyRollup() error {
 func queryCompactionReports(startDate, endDate string) ([]*compactReport, error) {
 	listCmd := exec.Command("bd", "list",
 		"--type=event",
+		"--status=all",
 		"--json",
 		"--limit=0",
 	)
@@ -465,15 +531,19 @@ func queryCompactionReports(startDate, endDate string) ([]*compactReport, error)
 	}
 
 	var events []struct {
-		ID           string `json:"id"`
-		Title        string `json:"title"`
-		EventPayload string `json:"event_payload"`
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Payload   string `json:"payload"`
+		CreatedAt string `json:"created_at"`
 	}
 	if err := json.Unmarshal(extractJSONArray(listOutput), &events); err != nil {
 		return nil, fmt.Errorf("parsing event list: %w", err)
 	}
 
 	var reports []*compactReport
+	reportIndexByDate := make(map[string]int)
+	reportCreatedAtByDate := make(map[string]string)
+	matchingEvents := 0
 	for _, evt := range events {
 		if !strings.HasPrefix(evt.Title, "Compaction Report ") {
 			continue
@@ -483,16 +553,31 @@ func queryCompactionReports(startDate, endDate string) ([]*compactReport, error)
 		if evtDate < startDate || evtDate > endDate {
 			continue
 		}
+		matchingEvents++
 
 		// Parse the event payload back into a compactReport
-		if evt.EventPayload == "" {
+		if evt.Payload == "" {
 			continue
 		}
 		var report compactReport
-		if err := json.Unmarshal([]byte(evt.EventPayload), &report); err != nil {
+		if err := json.Unmarshal([]byte(evt.Payload), &report); err != nil {
 			continue
 		}
+		if idx, exists := reportIndexByDate[report.Date]; exists {
+			// A failed historical idempotency check can leave duplicate daily
+			// audit beads. Count each calendar day once and keep the newest copy.
+			if evt.CreatedAt > reportCreatedAtByDate[report.Date] {
+				reports[idx] = &report
+				reportCreatedAtByDate[report.Date] = evt.CreatedAt
+			}
+			continue
+		}
+		reportIndexByDate[report.Date] = len(reports)
+		reportCreatedAtByDate[report.Date] = evt.CreatedAt
 		reports = append(reports, &report)
+	}
+	if matchingEvents > 0 && len(reports) == 0 {
+		return nil, fmt.Errorf("found %d matching compaction report event(s), but no usable payload", matchingEvents)
 	}
 
 	// Sort by date
@@ -503,12 +588,23 @@ func queryCompactionReports(startDate, endDate string) ([]*compactReport, error)
 	return reports, nil
 }
 
+func normalizeCompactionAnomaly(anomaly string) string {
+	if anomaly == "0 patrol wisps (patrol agents may be down)" {
+		return zeroPatrolReportingGap
+	}
+	return anomaly
+}
+
 // formatWeeklyRollup renders the markdown weekly rollup.
 func formatWeeklyRollup(rollup *weeklyRollup) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("## Weekly Wisp Compaction: %s to %s\n\n", rollup.WeekStart, rollup.WeekEnd))
 	sb.WriteString(fmt.Sprintf("**Days reported:** %d\n\n", rollup.Days))
+	if rollup.Days == 0 {
+		sb.WriteString("### Coverage\n")
+		sb.WriteString("- No eligible daily compaction reports were found in this date range; patrol health was not assessed.\n\n")
+	}
 
 	// Totals table
 	sb.WriteString("### Totals\n")
@@ -654,11 +750,17 @@ func createWeeklyRollupBead(rollup *weeklyRollup, markdown string) (string, erro
 		return "", fmt.Errorf("creating weekly rollup bead: %w\nOutput: %s", err, string(output))
 	}
 
-	beadID := strings.TrimSpace(string(output))
+	beadID, err := extractBeadID(string(output))
+	if err != nil {
+		return "", fmt.Errorf("parsing weekly rollup bead id: %w", err)
+	}
 
-	// Auto-close (audit record, not work)
+	// Auto-close (audit record, not work). Surface failures so mail is not sent
+	// without a matching audit record for future idempotency checks.
 	closeCmd := exec.Command("bd", "close", beadID, "--reason=weekly compaction rollup")
-	_ = closeCmd.Run()
+	if out, err := closeCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("auto-closing rollup bead %s: %w\nOutput: %s", beadID, err, string(out))
+	}
 
 	return beadID, nil
 }

@@ -34,8 +34,8 @@ whether the other layers work.
 DOLT_DATA_DIR="$GT_TOWN_ROOT/.dolt-data"
 PROD_DBS=("hq" "gt" "mo")
 JSONL_EXPORT_DIR="$GT_TOWN_ROOT/.dolt-archive/jsonl"
-DOLT_HOST="127.0.0.1"
-DOLT_PORT=3307
+DOLT_HOST="${GT_DOLT_HOST:-127.0.0.1}"
+DOLT_PORT="${GT_DOLT_PORT:-3307}"
 DOLT_USER="root"
 ```
 
@@ -260,9 +260,8 @@ if [ "$EXPORT_FAILED" -gt 0 ] || [ "$DOLT_PUSH_FAILED" -gt 0 ] || [ "$VERIFY_FAI
   RESULT="warning"
 fi
 
-bd create "$SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:dolt-archive,result:$RESULT \
-  -d "$SUMMARY" --silent 2>/dev/null || true
+gt plugin record-run --plugin dolt-archive --result "$RESULT" \
+  --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 
 if [ "$EXPORT_FAILED" -gt 0 ]; then
   gt escalate "JSONL export failed for $EXPORT_FAILED databases" \

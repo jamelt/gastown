@@ -7,11 +7,12 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"io"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -136,14 +137,15 @@ func getConvoyInfoForIssue(issueID string) *ConvoyInfo {
 	}
 	townBeads := filepath.Join(townRoot, ".beads")
 
-	// Get convoy details (labels + description) for ownership and merge strategy
-	showCmd := exec.Command("bd", "show", convoyID, "--json")
-	showCmd.Dir = townBeads
-	var stdout, stderr bytes.Buffer
-	showCmd.Stdout = &stdout
-	showCmd.Stderr = &stderr
+	var stderr bytes.Buffer
+	stdout, err := BdCmd("show", convoyID, "--json").
+		AllowStale().
+		Dir(townRoot).
+		WithBeadsDir(townBeads).
+		Stderr(&stderr).
+		Output()
 
-	if err := showCmd.Run(); err != nil {
+	if err != nil {
 		// Check if this is a "not found" error (phantom convoy) vs transient error.
 		// Phantom convoys occur when a convoy bead is deleted from HQ but tracking
 		// deps still exist in local beads DB (gt-9xum2). Return nil to treat as
@@ -162,7 +164,7 @@ func getConvoyInfoForIssue(issueID string) *ConvoyInfo {
 		Labels      []string `json:"labels"`
 		Description string   `json:"description"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil || len(convoys) == 0 {
+	if err := json.Unmarshal(stdout, &convoys); err != nil || len(convoys) == 0 {
 		return &ConvoyInfo{ID: convoyID}
 	}
 
@@ -197,6 +199,10 @@ func getConvoyInfoFromIssue(issueID, cwd string) *ConvoyInfo {
 		return nil
 	}
 
+	return getConvoyInfoFromSourceIssue(issue)
+}
+
+func getConvoyInfoFromSourceIssue(issue *beads.Issue) *ConvoyInfo {
 	attachment := beads.ParseAttachmentFields(issue)
 	if attachment == nil || attachment.ConvoyID == "" {
 		return nil
@@ -220,17 +226,18 @@ func printConvoyConflict(beadID, convoyID string) {
 	}
 	townBeads := filepath.Join(townRoot, ".beads")
 
-	// Get convoy title
 	var convoyTitle string
-	showCmd := exec.Command("bd", "show", convoyID, "--json")
-	showCmd.Dir = townBeads
-	var showOut bytes.Buffer
-	showCmd.Stdout = &showOut
-	if err := showCmd.Run(); err == nil {
+	showOut, err := BdCmd("show", convoyID, "--json").
+		AllowStale().
+		Dir(townRoot).
+		WithBeadsDir(townBeads).
+		Stderr(io.Discard).
+		Output()
+	if err == nil {
 		var items []struct {
 			Title string `json:"title"`
 		}
-		if json.Unmarshal(showOut.Bytes(), &items) == nil && len(items) > 0 {
+		if json.Unmarshal(showOut, &items) == nil && len(items) > 0 {
 			convoyTitle = items[0].Title
 		}
 	}
@@ -349,7 +356,7 @@ func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrate
 // If owned is true, the convoy is marked with the gt:owned label for caller-managed lifecycle.
 // mergeStrategy is optional: "direct", "mr", or "local" (empty = default mr).
 // Returns the created convoy ID.
-func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch string) (_ string, retErr error) {
+func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch string, refs git.WorkRefs) (_ string, retErr error) {
 	defer func() { telemetry.RecordConvoyCreate(context.Background(), beadID, retErr) }()
 	// Guard against flag-like titles propagating into convoy names (gt-e0kx5)
 	if beads.IsFlagLikeTitle(beadTitle) {
@@ -371,8 +378,12 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseB
 	convoyTitle := fmt.Sprintf("Work: %s", beadTitle)
 	prose := fmt.Sprintf("Auto-created convoy tracking %s", beadID)
 	description := beads.SetConvoyFields(&beads.Issue{Description: prose}, &beads.ConvoyFields{
-		Merge:      mergeStrategy,
-		BaseBranch: baseBranch,
+		Merge:         mergeStrategy,
+		BaseBranch:    baseBranch,
+		BaseRef:       refs.BaseRef,
+		PublishRemote: refs.PublishRemote,
+		PublishRef:    refs.PublishRef,
+		PRTargetRef:   refs.PRTargetRef,
 	})
 
 	createArgs := []string{

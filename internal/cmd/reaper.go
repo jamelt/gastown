@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -38,6 +39,31 @@ func reaperDatabaseNames() []string {
 		}
 	}
 	return databases
+}
+
+func defaultReaperEndpoint() (string, int) {
+	host := agentconfig.ResolveDoltHost("")
+	port := 0
+	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			port = v
+		}
+	}
+	if townRoot, err := findTownRoot(); err == nil {
+		if host == "" {
+			host = agentconfig.ResolveDoltHost(townRoot)
+		}
+		if port == 0 {
+			port = agentconfig.ResolveDoltPort(townRoot)
+		}
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == 0 {
+		port = 3307
+	}
+	return host, port
 }
 
 func waitBeforeReaperDatabase(index int) error {
@@ -155,10 +181,13 @@ The Dog uses this to understand the state before deciding what to reap.`,
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(results))
 		} else {
-			var totalReap, totalPurge, totalMail, totalStale, totalOpen int
+			var totalReap, totalMoleculeSteps, totalPurge, totalMail, totalStale, totalOpen int
 			for _, r := range results {
 				fmt.Printf("Database: %s\n", r.Database)
 				fmt.Printf("  Reap candidates:  %d\n", r.ReapCandidates)
+				if r.MoleculeStepCandidates > 0 {
+					fmt.Printf("  Molecule steps:   %d\n", r.MoleculeStepCandidates)
+				}
 				fmt.Printf("  Purge candidates: %d\n", r.PurgeCandidates)
 				fmt.Printf("  Mail candidates:  %d\n", r.MailCandidates)
 				fmt.Printf("  Stale candidates: %d\n", r.StaleCandidates)
@@ -167,6 +196,7 @@ The Dog uses this to understand the state before deciding what to reap.`,
 					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
 				}
 				totalReap += r.ReapCandidates
+				totalMoleculeSteps += r.MoleculeStepCandidates
 				totalPurge += r.PurgeCandidates
 				totalMail += r.MailCandidates
 				totalStale += r.StaleCandidates
@@ -175,6 +205,9 @@ The Dog uses this to understand the state before deciding what to reap.`,
 			if len(results) > 1 {
 				fmt.Printf("\nScan summary (%d databases):\n", len(results))
 				fmt.Printf("  Reap candidates:  %d\n", totalReap)
+				if totalMoleculeSteps > 0 {
+					fmt.Printf("  Molecule steps:   %d\n", totalMoleculeSteps)
+				}
 				fmt.Printf("  Purge candidates: %d\n", totalPurge)
 				fmt.Printf("  Mail candidates:  %d\n", totalMail)
 				fmt.Printf("  Stale candidates: %d\n", totalStale)
@@ -240,28 +273,40 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(results))
 		} else {
-			var totalReaped, totalOpen int
+			var totalReaped, totalMoleculeSteps, totalOpen int
 			for _, r := range results {
 				prefix := ""
 				if r.DryRun {
 					prefix = "[DRY RUN] would "
 				}
-				fmt.Printf("%s: %sreaped %d wisps, %d open remain\n",
-					r.Database, prefix, r.Reaped, r.OpenRemain)
+				extra := ""
+				if r.MoleculeStepsClosed > 0 {
+					extra = fmt.Sprintf(" (+%d closed-molecule steps)", r.MoleculeStepsClosed)
+				}
+				fmt.Printf("%s: %sreaped %d wisps%s, %d open remain\n",
+					r.Database, prefix, r.Reaped, extra, r.OpenRemain)
 				totalReaped += r.Reaped
+				totalMoleculeSteps += r.MoleculeStepsClosed
 				totalOpen += r.OpenRemain
+				// Evaluated per database, not against the cross-database sum below —
+				// summing first would make this scale with the number of monitored
+				// databases rather than any single database's health.
+				if reaper.ExceedsOpenWispSafetyThreshold(r.OpenRemain) {
+					fmt.Fprintf(os.Stderr, "WARNING: %s: %d open wisps exceed safety threshold (%d) — possible stuck-parent leak\n",
+						r.Database, r.OpenRemain, reaper.DefaultOpenWispSafetyThreshold)
+				}
 			}
 			if len(results) > 1 {
 				prefix := ""
 				if reaperDryRun {
 					prefix = "[DRY RUN] "
 				}
-				fmt.Printf("\n%sReap summary (%d databases): reaped %d wisps, %d open remain\n",
-					prefix, len(results), totalReaped, totalOpen)
-				if totalOpen > reaper.DefaultAlertThreshold {
-					fmt.Fprintf(os.Stderr, "WARNING: %d open wisps exceed alert threshold (%d)\n",
-						totalOpen, reaper.DefaultAlertThreshold)
+				extra := ""
+				if totalMoleculeSteps > 0 {
+					extra = fmt.Sprintf(" (+%d closed-molecule steps)", totalMoleculeSteps)
 				}
+				fmt.Printf("\n%sReap summary (%d databases): reaped %d wisps%s, %d open remain\n",
+					prefix, len(results), totalReaped, extra, totalOpen)
 			}
 		}
 		return nil
@@ -463,7 +508,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			return fmt.Errorf("invalid --stale-age: %w", err)
 		}
 
-		var totalReaped, totalPurged, totalMailPurged, totalClosed, totalOpen int
+		var totalReaped, totalMoleculeSteps, totalPurged, totalMailPurged, totalClosed, totalOpen int
 
 		for i, dbName := range databases {
 			if err := waitBeforeReaperDatabase(i); err != nil {
@@ -507,6 +552,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 				fmt.Printf("%s: reap error: %v\n", dbName, err)
 			} else {
 				totalReaped += reapResult.Reaped
+				totalMoleculeSteps += reapResult.MoleculeStepsClosed
 				totalOpen += reapResult.OpenRemain
 			}
 
@@ -541,7 +587,11 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 		}
 		fmt.Printf("\n%sReaper cycle complete:\n", prefix)
 		fmt.Printf("  Databases: %d\n", len(databases))
-		fmt.Printf("  Reaped:    %d\n", totalReaped)
+		fmt.Printf("  Reaped:    %d", totalReaped)
+		if totalMoleculeSteps > 0 {
+			fmt.Printf(" (+%d closed-molecule steps)", totalMoleculeSteps)
+		}
+		fmt.Println()
 		fmt.Printf("  Purged:    %d wisps, %d mail\n", totalPurged, totalMailPurged)
 		fmt.Printf("  Closed:    %d stale issues\n", totalClosed)
 		fmt.Printf("  Open:      %d wisps remain\n", totalOpen)
@@ -552,23 +602,10 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 
 func init() {
 	// Shared flags
-	// GH#2601: Default host/port from env vars for non-localhost setups.
-	defaultHost := "127.0.0.1"
-	if h := os.Getenv("GT_DOLT_HOST"); h != "" {
-		defaultHost = h
-	} else if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
-		defaultHost = h
-	}
-	defaultPort := 3307
-	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil {
-			defaultPort = v
-		}
-	} else if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil {
-			defaultPort = v
-		}
-	}
+	// GH#2601: Default host/port from GT/town config for non-localhost setups.
+	// BEADS_DOLT_* aliases are intentionally ignored because they are derived bd
+	// client outputs, not endpoint authority.
+	defaultHost, defaultPort := defaultReaperEndpoint()
 
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")

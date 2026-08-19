@@ -468,6 +468,21 @@ func SyncDatabases(townRoot string, opts SyncOptions) []SyncResult {
 			}
 		}
 
+		// Fail closed before committing or pushing when local and remote are
+		// independent histories. --force must never turn reconciliation into
+		// an implicit history replacement.
+		lineage, err := InspectLineageCLI(dbDir, db)
+		if err != nil {
+			result.Error = fmt.Errorf("checking Dolt lineage: %w", err)
+			results = append(results, result)
+			continue
+		}
+		if !lineage.SafeToPush() {
+			result.Error = unsafeLineagePushError(lineage, db)
+			results = append(results, result)
+			continue
+		}
+
 		if opts.DryRun {
 			result.DryRun = true
 			results = append(results, result)
@@ -560,6 +575,20 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 			}
 		}
 
+		// Inspect before PushDatabaseSQL stages or commits anything. This also
+		// blocks --force for unrelated histories.
+		lineage, err := InspectLineageSQL(townRoot, db)
+		if err != nil {
+			result.Error = fmt.Errorf("checking Dolt lineage: %w", err)
+			results = append(results, result)
+			continue
+		}
+		if !lineage.SafeToPush() {
+			result.Error = unsafeLineagePushError(lineage, db)
+			results = append(results, result)
+			continue
+		}
+
 		if opts.DryRun {
 			result.DryRun = true
 			results = append(results, result)
@@ -578,6 +607,13 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 	}
 
 	return results
+}
+
+func unsafeLineagePushError(lineage LineageReport, db string) error {
+	if lineage.State == LineageDiverged {
+		return fmt.Errorf("refusing push: %s; run 'gt dolt reconcile --db %s'", lineage.Diagnostic(), db)
+	}
+	return fmt.Errorf("refusing push: %s; bootstrap from or fetch and verify the configured remote before pushing", lineage.Diagnostic())
 }
 
 // PurgeClosedEphemerals runs "bd purge" for a specific rig database to remove
@@ -615,8 +651,9 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	// Build bd purge command with safety-net timeout.
 	// bd purge v2 uses batched SQL (completes in seconds), but we keep a
 	// generous timeout as a circuit breaker against future regressions.
-	// Conditionally use --allow-stale if bd supports it.
-	args := beads.MaybePrependAllowStale([]string{"purge", "--json"})
+	env := beads.BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
+	// Probe --allow-stale support with the same hardened target env used by purge.
+	args := beads.MaybePrependAllowStaleWithEnv(env, []string{"purge", "--json"})
 	if dryRun {
 		args = append(args, "--dry-run")
 	}
@@ -626,7 +663,7 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	cmd.Dir = filepath.Dir(beadsDir) // run from parent of .beads
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd.Env = env
 	setProcessGroup(cmd)
 
 	var stdout, stderr bytes.Buffer

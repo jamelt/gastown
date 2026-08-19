@@ -370,6 +370,12 @@ func startRigAgents(rigs []*rig.Rig, mu *sync.Mutex) {
 	var wg sync.WaitGroup
 
 	for _, r := range rigs {
+		if err := r.EnsureIdentities(); err != nil {
+			mu.Lock()
+			fmt.Printf("  %s %s managers not started: identity preflight failed: %v\n", style.Dim.Render("○"), r.Name, err)
+			mu.Unlock()
+			continue
+		}
 		wg.Add(2) // Witness + Refinery
 
 		// Start Witness in goroutine
@@ -412,6 +418,9 @@ func startRefineryForRig(r *rig.Rig) string {
 	if err := refineryMgr.Start(false, ""); err != nil {
 		if errors.Is(err, refinery.ErrAlreadyRunning) {
 			return fmt.Sprintf("  %s %s refinery already running\n", style.Dim.Render("○"), r.Name)
+		}
+		if errors.Is(err, refinery.ErrForkRig) {
+			return fmt.Sprintf("  %s %s refinery skipped (fork-backed rig; use PR workflow)\n", style.Dim.Render("○"), r.Name)
 		}
 		return fmt.Sprintf("  %s %s refinery failed: %v\n", style.Dim.Render("○"), r.Name, err)
 	}

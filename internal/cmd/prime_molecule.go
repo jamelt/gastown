@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/formula"
+	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -113,30 +114,15 @@ func showMoleculeExecutionPrompt(workDir, moleculeID string) {
 // extraVars is an optional list of "key=value" overrides that are substituted into
 // step descriptions before rendering, taking precedence over formula defaults.
 func showFormulaSteps(formulaName, label, townRoot, rigName string, extraVars ...[]string) {
-	content, err := formula.ResolveFormulaContent(formulaName, townRoot, rigName)
+	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
 	if err != nil {
-		style.PrintWarning("could not load formula %s: %v", formulaName, err)
-		return
-	}
-
-	f, err := formula.Parse(content)
-	if err != nil {
-		style.PrintWarning("could not parse formula %s: %v", formulaName, err)
+		style.PrintWarning("%v", err)
 		return
 	}
 
 	if len(f.Steps) == 0 {
 		return
 	}
-
-	// Apply formula overlays if townRoot is available.
-	applyFormulaOverlays(f, formulaName, townRoot, rigName)
-
-	var vars []string
-	if len(extraVars) > 0 {
-		vars = extraVars[0]
-	}
-	varMap := buildFormulaVarMap(f, vars)
 
 	fmt.Println()
 	fmt.Printf("**%s** (%d steps from %s):\n", label, len(f.Steps), formulaName)
@@ -152,41 +138,75 @@ func showFormulaSteps(formulaName, label, townRoot, rigName string, extraVars ..
 // townRoot and rigName are used to load formula overlays (operator customizations).
 // extraVars is an optional list of "key=value" overrides substituted into step descriptions.
 func showFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) {
+	rendered, err := renderFormulaStepsFull(formulaName, townRoot, rigName, extraVars...)
+	if err != nil {
+		style.PrintWarning("%v", err)
+		return
+	}
+	fmt.Print(rendered)
+}
+
+func renderFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) (string, error) {
+	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
+	if err != nil {
+		return "", err
+	}
+	return renderFormulaStepsFullParsed(formulaName, f, varMap), nil
+}
+
+func renderFormulaRootAndStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) (string, error) {
+	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
+	if err != nil {
+		return "", err
+	}
+
+	var sb strings.Builder
+	if desc := strings.TrimSpace(applyFormulaVars(f.Description, varMap)); desc != "" {
+		sb.WriteString(desc)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString(strings.TrimLeft(renderFormulaStepsFullParsed(formulaName, f, varMap), "\n"))
+	return strings.TrimSpace(sb.String()), nil
+}
+
+func resolveFormulaForRendering(formulaName, townRoot, rigName string, vars []string) (*formula.Formula, map[string]string, error) {
 	content, err := formula.ResolveFormulaContent(formulaName, townRoot, rigName)
 	if err != nil {
-		style.PrintWarning("could not load formula %s: %v", formulaName, err)
-		return
+		return nil, nil, fmt.Errorf("could not load formula %s: %w", formulaName, err)
 	}
 
 	f, err := formula.Parse(content)
 	if err != nil {
-		style.PrintWarning("could not parse formula %s: %v", formulaName, err)
-		return
+		return nil, nil, fmt.Errorf("could not parse formula %s: %w", formulaName, err)
 	}
-
-	if len(f.Steps) == 0 {
-		return
-	}
-
-	// Apply formula overlays if townRoot is available.
 	applyFormulaOverlays(f, formulaName, townRoot, rigName)
+	return f, buildFormulaVarMap(f, vars), nil
+}
 
-	var vars []string
-	if len(extraVars) > 0 {
-		vars = extraVars[0]
+func firstFormulaVars(extraVars [][]string) []string {
+	if len(extraVars) == 0 {
+		return nil
 	}
-	varMap := buildFormulaVarMap(f, vars)
+	return extraVars[0]
+}
 
-	fmt.Println()
-	fmt.Printf("**Formula Checklist** (%d steps from %s):\n\n", len(f.Steps), formulaName)
+func renderFormulaStepsFullParsed(formulaName string, f *formula.Formula, varMap map[string]string) string {
+	if len(f.Steps) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(f.Steps), formulaName)
 	for i, step := range f.Steps {
 		title := applyFormulaVars(step.Title, varMap)
-		fmt.Printf("### Step %d: %s\n\n", i+1, title)
+		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, title)
 		if step.Description != "" {
-			fmt.Println(applyFormulaVars(step.Description, varMap))
-			fmt.Println()
+			sb.WriteString(applyFormulaVars(step.Description, varMap))
+			sb.WriteString("\n\n")
 		}
 	}
+	return sb.String()
 }
 
 // buildFormulaVarMap builds a map of variable name → value for substitution.
@@ -194,7 +214,7 @@ func showFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]
 func buildFormulaVarMap(f *formula.Formula, extraVars []string) map[string]string {
 	m := make(map[string]string, len(f.Vars))
 	for k, v := range f.Vars {
-		if v.Default != "" {
+		if v.Default != "" || !v.Required {
 			m[k] = v.Default
 		}
 	}
@@ -210,13 +230,32 @@ func attachmentFormulaVars(attachment *beads.AttachmentFields) []string {
 	if attachment == nil {
 		return nil
 	}
-	if len(attachment.AttachedVars) > 0 {
-		return attachment.AttachedVars
+	indexes := make(map[string]int)
+	vars := make([]string, 0, len(attachment.AttachedVars))
+	add := func(variable string) {
+		variable = strings.TrimSpace(variable)
+		if variable == "" {
+			return
+		}
+		idx := strings.IndexByte(variable, '=')
+		if idx <= 0 {
+			return
+		}
+		key := strings.TrimSpace(variable[:idx])
+		if idx, ok := indexes[key]; ok {
+			vars[idx] = variable
+			return
+		}
+		indexes[key] = len(vars)
+		vars = append(vars, variable)
 	}
-	if attachment.FormulaVars == "" {
-		return nil
+	for _, variable := range strings.Split(attachment.FormulaVars, "\n") {
+		add(variable)
 	}
-	return strings.Split(attachment.FormulaVars, "\n")
+	for _, variable := range attachment.AttachedVars {
+		add(variable)
+	}
+	return vars
 }
 
 // applyFormulaVars replaces {{key}} placeholders in text with values from varMap.
@@ -309,7 +348,7 @@ func outputDeaconPatrolContext(ctx RoleContext) {
 		},
 	}
 	outputPatrolContext(cfg)
-	showFormulaSteps(constants.MolDeaconPatrol, "Patrol Steps", ctx.TownRoot, ctx.Rig)
+	showFormulaStepsFull(constants.MolDeaconPatrol, ctx.TownRoot, ctx.Rig)
 }
 
 // outputWitnessPatrolContext shows patrol molecule status for the Witness.
@@ -342,6 +381,13 @@ func outputWitnessPatrolContext(ctx RoleContext) {
 func outputRefineryPatrolContext(ctx RoleContext) {
 	if stopped, reason := IsRigParkedOrDocked(ctx.TownRoot, ctx.Rig); stopped {
 		fmt.Printf("\n⏸️  Rig %s is %s — skipping patrol wisp generation.\n", ctx.Rig, reason)
+		return
+	}
+	if stop, err := refinery.ActiveSafetyStop(ctx.TownRoot, ctx.Rig); err != nil {
+		style.PrintWarning("could not check refinery safety stop: %v", err)
+		return
+	} else if stop != nil {
+		fmt.Printf("\nRefinery %s is %s; skipping patrol wisp generation.\n", ctx.Rig, stop.Reason())
 		return
 	}
 	cfg := PatrolConfig{
@@ -394,6 +440,7 @@ func buildRefineryPatrolVars(ctx RoleContext) []string {
 	if err == nil && rigCfg != nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
+	vars = append(vars, fmt.Sprintf("rig=%s", ctx.Rig))
 	vars = append(vars, fmt.Sprintf("target_branch=%s", defaultBranch))
 
 	// MQ-specific vars: try settings/config.json first (legacy format), then

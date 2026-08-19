@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -122,6 +125,55 @@ func TestHookRejectsNonBeadArg(t *testing.T) {
 	}
 }
 
+// TestHookRefusesHardProhibitionWithoutConfirmation pins gt-cpdg: gt hook
+// bypassed the hq-1s4w hard-prohibition gate entirely, attaching a
+// credentials/production/money-policy/human-decision-labeled bead to a live
+// agent's hook with no check at all (unlike gt sling, gated by gt-b2qi).
+// An already-running agent picks up hooked work on its next gt prime with no
+// further nudge needed, so gt hook needs the same gate as gt sling.
+func TestHookRefusesHardProhibitionWithoutConfirmation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix shell script bd stub")
+	}
+	t.Setenv("GT_ROLE", "")
+	t.Setenv("GT_POLECAT", "")
+
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$1" = "show" ]; then
+  echo '[{"title":"Rotate root AWS credentials","status":"open","assignee":"","description":"","labels":["human"]}]'
+  exit 0
+fi
+echo "unexpected bd invocation: $*" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	prevConfirm := hookConfirmHumanApproved
+	t.Cleanup(func() { hookConfirmHumanApproved = prevConfirm })
+
+	hookConfirmHumanApproved = false
+	err := runHook(nil, []string{"gt-secret"})
+	if err == nil {
+		t.Fatal("runHook error = nil, want hard-prohibition block")
+	}
+	if !strings.Contains(err.Error(), "fresh human approval") {
+		t.Fatalf("runHook error = %v, want it to mention fresh human approval", err)
+	}
+	if !strings.Contains(err.Error(), "--confirm-human-approved") {
+		t.Fatalf("runHook error = %v, want it to point at --confirm-human-approved", err)
+	}
+
+	hookConfirmHumanApproved = true
+	err = runHook(nil, []string{"gt-secret"})
+	if err != nil && strings.Contains(err.Error(), "fresh human approval") {
+		t.Fatalf("runHook with hookConfirmHumanApproved=true still blocked by hard-prohibition guard: %v", err)
+	}
+}
+
 func TestNormalizeHookShowTarget(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -143,6 +195,11 @@ func TestNormalizeHookShowTarget(t *testing.T) {
 			target: "this-is-not-an-agent-path",
 			want:   "this-is-not-an-agent-path",
 		},
+		{
+			name:   "path traversal shorthand stays unchanged",
+			target: "../toast",
+			want:   "../toast",
+		},
 	}
 
 	for _, tt := range tests {
@@ -153,4 +210,71 @@ func TestNormalizeHookShowTarget(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCloseCompletedHookedMoleculeUsesBdCmdEnv(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	writeHookBDStub(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_STUB_LOG", logPath)
+	t.Setenv("CLAUDE_SESSION_ID", "ses-hook-test")
+	t.Setenv("BEADS_DIR", "/wrong")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "hq")
+	t.Setenv("BD_READONLY", "true")
+	t.Setenv("BD_DOLT_AUTO_COMMIT", "off")
+
+	workDir := t.TempDir()
+	beadsDir := filepath.Join(workDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"hookdb"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := closeCompletedHookedMolecule(workDir, "gt-old"); err != nil {
+		t.Fatalf("closeCompletedHookedMolecule: %v", err)
+	}
+	log := readHookStubLog(t, logPath)
+	for _, want := range []string{
+		"args:[close][gt-old][--force][--reason=Auto-replaced by gt hook (molecule complete)][--session=ses-hook-test]",
+		"BEADS_DIR=" + beadsDir,
+		"BEADS_DOLT_SERVER_DATABASE=hookdb",
+		"\nBD_READONLY=\n",
+		"BD_DOLT_AUTO_COMMIT=on",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("hook close log missing %q:\n%s", want, log)
+		}
+	}
+}
+
+func writeHookBDStub(t *testing.T, binDir string) {
+	t.Helper()
+	script := `#!/usr/bin/env sh
+{
+	printf 'args:'
+	for arg in "$@"; do
+		printf '[%s]' "$arg"
+	done
+	printf '\n'
+	printf 'BEADS_DIR=%s\n' "${BEADS_DIR-}"
+	printf 'BEADS_DOLT_SERVER_DATABASE=%s\n' "${BEADS_DOLT_SERVER_DATABASE-}"
+	printf 'BD_READONLY=%s\n' "${BD_READONLY-}"
+	printf 'BD_DOLT_AUTO_COMMIT=%s\n' "${BD_DOLT_AUTO_COMMIT-}"
+} >> "$BD_STUB_LOG"
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readHookStubLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

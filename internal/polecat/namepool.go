@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -17,9 +18,8 @@ import (
 
 const (
 	// DefaultPoolSize is the number of name slots in the pool.
-	// Names are allocated when a polecat is first created. In the persistent
-	// polecat model (gt-4ac), polecats cycle IDLE → WORKING → DONE → IDLE,
-	// keeping their name, identity, and sandbox across assignments.
+	// Names are allocated when a polecat is first created. Polecat identity persists,
+	// while clean completion retires the live session and cleanup owns remaining state.
 	DefaultPoolSize = 50
 
 	// DefaultTheme is the default theme for new rigs.
@@ -362,6 +362,10 @@ func (p *NamePool) Reconcile(existingPolecats []string) {
 	for _, name := range existingPolecats {
 		if p.isThemedName(name) {
 			p.InUse[name] = true
+			continue
+		}
+		if seq, err := strconv.Atoi(name); err == nil && seq >= p.OverflowNext {
+			p.OverflowNext = seq + 1
 		}
 	}
 }

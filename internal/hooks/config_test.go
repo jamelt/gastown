@@ -444,8 +444,8 @@ func TestComputeExpected(t *testing.T) {
 	if len(expected.SessionStart) != 1 || expected.SessionStart[0].Hooks[0].Command != "gastown-crew-session" {
 		t.Errorf("expected gastown/crew SessionStart, got %v", expected.SessionStart)
 	}
-	// On-disk base has no PreToolUse, so DefaultBase's 3 pr-workflow guards are
-	// backfilled. The crew override adds Bash(git*), making 4 total.
+	// On-disk base has no PreToolUse, so DefaultBase's guards are backfilled.
+	// The crew override adds Bash(git*), making defaultPTU+1 total.
 	defaultPTU := len(DefaultBase().PreToolUse)
 	if len(expected.PreToolUse) != defaultPTU+1 {
 		t.Errorf("expected %d PreToolUse (default %d + crew 1), got %d", defaultPTU+1, defaultPTU, len(expected.PreToolUse))
@@ -700,8 +700,86 @@ func TestComputeExpectedWitnessRigSpecific(t *testing.T) {
 	if len(skyWitness.SessionStart) == 0 {
 		t.Error("sky/witness should inherit SessionStart from DefaultBase")
 	}
-	if len(skyWitness.UserPromptSubmit) == 0 {
-		t.Error("sky/witness should inherit UserPromptSubmit (mail-check) from DefaultBase")
+	if len(skyWitness.UserPromptSubmit) != 0 {
+		t.Error("sky/witness should disable UserPromptSubmit mail-check from DefaultBase")
+	}
+}
+
+func TestComputeExpectedPatrolRolesDisableUserPromptMailCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	for _, target := range []string{"witness", "refinery", "deacon", "boot", "sky/witness", "sky/refinery"} {
+		t.Run(target, func(t *testing.T) {
+			cfg, err := ComputeExpected(target)
+			if err != nil {
+				t.Fatalf("ComputeExpected(%s): %v", target, err)
+			}
+			if len(cfg.UserPromptSubmit) != 0 {
+				t.Fatalf("%s should disable UserPromptSubmit mail-check, got %+v", target, cfg.UserPromptSubmit)
+			}
+		})
+	}
+}
+
+func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	boot, err := ComputeExpected("boot")
+	if err != nil {
+		t.Fatalf("ComputeExpected(boot): %v", err)
+	}
+
+	entry, ok := findPreToolUse(boot, "Bash(*tmux*send-keys*)")
+	if !ok {
+		t.Fatal("boot missing raw tmux send-keys guard")
+	}
+	if len(entry.Hooks) != 1 {
+		t.Fatalf("boot raw tmux guard hooks = %d, want 1", len(entry.Hooks))
+	}
+	command := entry.Hooks[0].Command
+	for _, want := range []string{
+		"BLOCKED: Boot must not use raw tmux send-keys",
+		"gt nudge --mode=immediate deacon",
+		"exit 2",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("boot raw tmux guard command missing %q: %s", want, command)
+		}
+	}
+	if len(boot.UserPromptSubmit) != 0 {
+		t.Fatalf("boot should still disable UserPromptSubmit mail-check, got %+v", boot.UserPromptSubmit)
+	}
+
+	mayor, err := ComputeExpected("mayor")
+	if err != nil {
+		t.Fatalf("ComputeExpected(mayor): %v", err)
+	}
+	if _, ok := findPreToolUse(mayor, "Bash(*tmux*send-keys*)"); ok {
+		t.Fatal("mayor must not receive Boot's raw tmux send-keys guard")
+	}
+}
+
+func findPreToolUse(cfg *HooksConfig, matcher string) (HookEntry, bool) {
+	for _, entry := range cfg.PreToolUse {
+		if entry.Matcher == matcher {
+			return entry, true
+		}
+	}
+	return HookEntry{}, false
+}
+
+func TestComputeExpectedPolecatsKeepUserPromptMailCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	cfg, err := ComputeExpected("polecats")
+	if err != nil {
+		t.Fatalf("ComputeExpected(polecats): %v", err)
+	}
+	if len(cfg.UserPromptSubmit) == 0 {
+		t.Fatal("polecats should retain UserPromptSubmit mail-check")
 	}
 }
 

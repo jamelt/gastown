@@ -31,10 +31,13 @@ jobs:
         with:
           go-version: '1.26'
 
-      - name: Install cross-compilation toolchains
+      - name: Install build dependencies
+        # libicu-dev supplies the ICU4C headers the CGO linux builds need via
+        # github.com/dolthub/go-icu-regex (matches ci.yml); the gcc-* packages
+        # are the windows/arm64 cross-compilers.
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu
+          sudo apt-get install -y libicu-dev gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu
 
       - name: Reject replace directives in go.mod
         run: |
@@ -251,7 +254,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Update npm for provenance support
-        run: npm install -g npm@latest
+        run: npm install -g npm@latest --min-release-age=7
 
       - name: Publish to npm
         run: |

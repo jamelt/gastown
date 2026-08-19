@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/gofrs/flock"
+	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -28,8 +28,11 @@ var timeNow = time.Now
 // Common errors
 var (
 	ErrMessageNotFound = errors.New("message not found")
+	ErrNotInboxMessage = errors.New("ID is not a message in this inbox")
 	ErrEmptyInbox      = errors.New("inbox is empty")
 )
+
+const archivedLabel = "archived"
 
 // Mailbox manages messages for an identity via beads.
 // When store is non-nil, beads-mode methods use the in-process beadsdk.Storage
@@ -90,6 +93,15 @@ func NewMailboxWithBeadsDir(address, workDir, beadsDir string) *Mailbox {
 // Identity returns the beads identity for this mailbox.
 func (m *Mailbox) Identity() string {
 	return m.identity
+}
+
+// mutationActor returns the canonical identity authorized to mutate this
+// mailbox. In particular, town-level sessions use BD_ACTOR values such as
+// "deacon", while their mail assignees are stored as "deacon/". Passing the
+// canonical mailbox identity to beads keeps mutation authorization consistent
+// with inbox lookup without broadening access to another mailbox.
+func (m *Mailbox) mutationActor() string {
+	return AddressToIdentity(m.identity)
 }
 
 // Path returns the JSONL path for legacy mailboxes.
@@ -155,11 +167,55 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 		return nil, fmt.Errorf("ensuring custom types: %w", err)
 	}
 
-	// Deduplicate messages across queries (assignee + CC may overlap)
-	seen := make(map[string]bool)
-	messages := make([]*Message, 0)
+	type beadsFetch struct {
+		messages []BeadsMessage
+		err      error
+	}
+	type wispFetch struct {
+		messages []wispQueryMessage
+		err      error
+	}
 
-	// Query 1: assignee match (per identity variant)
+	var assignee beadsFetch
+	var cc beadsFetch
+	var wisps wispFetch
+
+	// The three fetches are independent. Keep identity variants collapsed inside
+	// each fetch so parallelism reduces latency without multiplying wisp SQL work.
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		assignee.messages, assignee.err = m.queryIssueMessagesByAssignee(beadsDir, identities)
+	}()
+	go func() {
+		defer wg.Done()
+		cc.messages = m.queryIssueMessagesByCC(beadsDir, identities)
+	}()
+	go func() {
+		defer wg.Done()
+		wisps.messages, wisps.err = m.queryWispMessages(beadsDir, identities)
+	}()
+	wg.Wait()
+
+	if assignee.err != nil {
+		return nil, assignee.err
+	}
+
+	// Deduplicate messages across queries (assignee + CC + wisps may overlap).
+	seen := make(map[string]bool)
+	messages := make([]*Message, 0, len(assignee.messages)+len(cc.messages)+len(wisps.messages))
+	messages = appendBeadsMessages(messages, seen, assignee.messages, true)
+	messages = appendBeadsMessages(messages, seen, cc.messages, false)
+	if wisps.err == nil {
+		messages = appendWispMessages(messages, seen, wisps.messages)
+	}
+
+	return messages, nil
+}
+
+func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []string) ([]BeadsMessage, error) {
+	var messages []BeadsMessage
 	for _, id := range identities {
 		args := []string{"list",
 			"--label", "gt:message",
@@ -174,42 +230,21 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 		if err != nil {
 			return nil, err
 		}
-
-		// bd v0.58.0 returns plain text (e.g. "No issues found.") for
-		// empty result sets instead of JSON. Skip non-JSON output.
-		if !isJSON(stdout) {
-			continue
-		}
-		var msgs []BeadsMessage
-		trimmed := bytes.TrimSpace(stdout)
-		if len(trimmed) == 0 || string(trimmed) == "null" || (trimmed[0] != '[' && trimmed[0] != '{') {
-			// bd v0.58.0 returns plain text (e.g. "No issues found.") for
-			// empty result sets instead of JSON. Skip non-JSON output.
-			continue
-		}
-		if err := json.Unmarshal(stdout, &msgs); err != nil {
+		msgs, err := parseBeadsListOutput(stdout)
+		if err != nil {
 			return nil, err
 		}
-
-		for i := range msgs {
-			bm := &msgs[i]
-			if seen[bm.ID] {
-				continue
-			}
-			// Assignee match: open or hooked status
-			if bm.Status == "open" || bm.Status == "hooked" {
-				seen[bm.ID] = true
-				messages = append(messages, bm.ToMessage())
-			}
-		}
+		messages = append(messages, msgs...)
 	}
+	return messages, nil
+}
 
-	// Query 2: CC match — fetch messages with cc:<identity> label
+func (m *Mailbox) queryIssueMessagesByCC(beadsDir string, identities []string) []BeadsMessage {
+	var messages []BeadsMessage
 	for _, id := range identities {
-		ccLabel := "cc:" + id
 		args := []string{"list",
 			"--label", "gt:message",
-			"--label", ccLabel,
+			"--label", "cc:" + id,
 			"--json",
 			"--limit", "0",
 		}
@@ -218,107 +253,103 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 		stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
 		cancel()
 		if err != nil {
-			// CC query failure is non-fatal — assignee messages are primary
 			continue
 		}
-
-		if !isJSON(stdout) {
+		msgs, err := parseBeadsListOutput(stdout)
+		if err != nil {
 			continue
 		}
-		var msgs []BeadsMessage
-		trimmedCC := bytes.TrimSpace(stdout)
-		if len(trimmedCC) == 0 || string(trimmedCC) == "null" || (trimmedCC[0] != '[' && trimmedCC[0] != '{') {
-			continue
-		}
-		if err := json.Unmarshal(stdout, &msgs); err != nil {
-			continue // Non-fatal for CC
-		}
-
-		for i := range msgs {
-			bm := &msgs[i]
-			if seen[bm.ID] {
-				continue
-			}
-			// CC match: open status only
-			if bm.Status == "open" {
-				seen[bm.ID] = true
-				messages = append(messages, bm.ToMessage())
-			}
-		}
+		messages = append(messages, msgs...)
 	}
-
-	// Query 3: Wisps table — ephemeral messages (protocol/lifecycle) are stored
-	// as wisps by shouldBeWisp(), but bd list only queries the issues table.
-	wispMessages := m.listWispMessages(beadsDir, identities, seen)
-	messages = append(messages, wispMessages...)
-
-	return messages, nil
-}
-
-// listWispMessages queries the wisps table for ephemeral messages matching the identity.
-// Protocol/lifecycle messages are stored as wisps by shouldBeWisp(), but bd list only
-// queries the issues table. Uses bd sql --json for full wisp data.
-func (m *Mailbox) listWispMessages(beadsDir string, identities []string, seen map[string]bool) []*Message {
-	var messages []*Message
-
-	// Query 3a: assignee match via SQL on wisps table
-	for _, id := range identities {
-		wispMsgs := m.queryWispMessagesByAssignee(beadsDir, id)
-		for _, bm := range wispMsgs {
-			if seen[bm.ID] {
-				continue
-			}
-			if bm.Status == "open" || bm.Status == "hooked" {
-				seen[bm.ID] = true
-				messages = append(messages, bm.ToMessage())
-			}
-		}
-	}
-
-	// Query 3b: CC match via SQL on wisps table
-	for _, id := range identities {
-		wispMsgs := m.queryWispMessagesByCC(beadsDir, id)
-		for _, bm := range wispMsgs {
-			if seen[bm.ID] {
-				continue
-			}
-			if bm.Status == "open" {
-				seen[bm.ID] = true
-				messages = append(messages, bm.ToMessage())
-			}
-		}
-	}
-
 	return messages
 }
 
-// queryWispMessagesByAssignee queries wisps table for messages assigned to identity.
-func (m *Mailbox) queryWispMessagesByAssignee(beadsDir, identity string) []BeadsMessage {
-	query := fmt.Sprintf(
-		"SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at, "+
-			"GROUP_CONCAT(al.label) as labels_csv "+
-			"FROM wisps w "+
-			"JOIN wisp_labels l ON w.id = l.issue_id "+
-			"JOIN wisp_labels al ON w.id = al.issue_id "+
-			"WHERE l.label = 'gt:message' AND w.status IN ('open', 'hooked') AND w.assignee = '%s' "+
-			"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at",
-		escapeSQLString(identity))
-	return m.runWispSQL(beadsDir, query)
+func parseBeadsListOutput(stdout []byte) ([]BeadsMessage, error) {
+	trimmed := bytes.TrimSpace(stdout)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("No issues found.")) {
+		return nil, nil
+	}
+	if !isJSON(trimmed) {
+		return nil, nil
+	}
+
+	var msgs []BeadsMessage
+	if err := json.Unmarshal(trimmed, &msgs); err != nil {
+		return nil, err
+	}
+	return msgs, nil
 }
 
-// queryWispMessagesByCC queries wisps table for messages where identity is CC'd.
-func (m *Mailbox) queryWispMessagesByCC(beadsDir, identity string) []BeadsMessage {
-	ccLabel := "cc:" + identity
+func appendBeadsMessages(messages []*Message, seen map[string]bool, msgs []BeadsMessage, includeHooked bool) []*Message {
+	for i := range msgs {
+		bm := &msgs[i]
+		if seen[bm.ID] {
+			continue
+		}
+		if bm.HasLabel(archivedLabel) {
+			continue
+		}
+		if bm.Status == "open" || (includeHooked && bm.Status == "hooked") {
+			seen[bm.ID] = true
+			messages = append(messages, bm.ToMessage())
+		}
+	}
+	return messages
+}
+
+func appendWispMessages(messages []*Message, seen map[string]bool, wisps []wispQueryMessage) []*Message {
+	for i := range wisps {
+		wisp := &wisps[i]
+		bm := &wisp.message
+		if seen[bm.ID] {
+			continue
+		}
+		if bm.HasLabel(archivedLabel) {
+			continue
+		}
+		include := wisp.assigneeMatch && (bm.Status == "open" || bm.Status == "hooked")
+		include = include || (wisp.ccMatch && bm.Status == "open")
+		if include {
+			seen[bm.ID] = true
+			messages = append(messages, bm.ToMessage())
+		}
+	}
+	return messages
+}
+
+type wispQueryMessage struct {
+	message       BeadsMessage
+	assigneeMatch bool
+	ccMatch       bool
+}
+
+// queryWispMessages queries ephemeral messages once across all identity variants.
+// Protocol/lifecycle messages are stored as wisps by shouldBeWisp(), but bd list
+// only queries the issues table.
+func (m *Mailbox) queryWispMessages(beadsDir string, identities []string) ([]wispQueryMessage, error) {
+	if len(identities) == 0 {
+		return nil, nil
+	}
+
+	ccLabels := make([]string, 0, len(identities))
+	for _, id := range identities {
+		ccLabels = append(ccLabels, "cc:"+id)
+	}
+	identityList := sqlStringList(identities)
+	ccLabelList := sqlStringList(ccLabels)
+
 	query := fmt.Sprintf(
 		"SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at, "+
-			"GROUP_CONCAT(al.label) as labels_csv "+
+			"GROUP_CONCAT(DISTINCT al.label) as labels_csv, "+
+			"MAX(CASE WHEN w.assignee IN (%s) THEN 1 ELSE 0 END) as assignee_match, "+
+			"MAX(CASE WHEN cc.label IS NOT NULL THEN 1 ELSE 0 END) as cc_match "+
 			"FROM wisps w "+
-			"JOIN wisp_labels l1 ON w.id = l1.issue_id "+
-			"JOIN wisp_labels l2 ON w.id = l2.issue_id "+
+			"JOIN wisp_labels msg_label ON w.id = msg_label.issue_id AND msg_label.label = 'gt:message' "+
 			"JOIN wisp_labels al ON w.id = al.issue_id "+
-			"WHERE l1.label = 'gt:message' AND l2.label = '%s' AND w.status IN ('open', 'hooked') "+
+			"LEFT JOIN wisp_labels cc ON w.id = cc.issue_id AND cc.label IN (%s) "+
+			"WHERE w.status IN ('open', 'hooked') AND (w.assignee IN (%s) OR cc.label IS NOT NULL) "+
 			"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at",
-		escapeSQLString(ccLabel))
+		identityList, ccLabelList, identityList)
 	return m.runWispSQL(beadsDir, query)
 }
 
@@ -333,27 +364,29 @@ type wispSQLRow struct {
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
 	LabelsCSV   string `json:"labels_csv"`
+	AssigneeHit int    `json:"assignee_match"`
+	CCHit       int    `json:"cc_match"`
 }
 
-// runWispSQL executes a bd sql --json query and converts results to BeadsMessages.
-func (m *Mailbox) runWispSQL(beadsDir, query string) []BeadsMessage {
+// runWispSQL executes a bd sql --json query and converts results to wisp query messages.
+func (m *Mailbox) runWispSQL(beadsDir, query string) ([]wispQueryMessage, error) {
 	args := []string{"sql", "--json", query}
 	ctx, cancel := bdReadCtx()
 	stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
 	cancel()
 	if err != nil {
-		return nil // Wisps table may not exist yet
+		return nil, err // Wisps table may not exist yet.
 	}
 	if !isJSON(stdout) {
-		return nil
+		return nil, nil
 	}
 
 	var rows []wispSQLRow
 	if err := json.Unmarshal(stdout, &rows); err != nil {
-		return nil
+		return nil, err
 	}
 
-	msgs := make([]BeadsMessage, 0, len(rows))
+	msgs := make([]wispQueryMessage, 0, len(rows))
 	for _, row := range rows {
 		bm := BeadsMessage{
 			ID:          row.ID,
@@ -364,21 +397,47 @@ func (m *Mailbox) runWispSQL(beadsDir, query string) []BeadsMessage {
 			Assignee:    row.Assignee,
 			Wisp:        true,
 		}
-		if t, err := time.Parse(time.RFC3339, row.CreatedAt); err == nil {
-			bm.CreatedAt = t
-		} else if t, err := time.Parse("2006-01-02 15:04:05 +0000 UTC", row.CreatedAt); err == nil {
+		if t, ok := parseWispTimestamp(row.CreatedAt); ok {
 			bm.CreatedAt = t
 		}
 		if row.LabelsCSV != "" {
 			bm.Labels = strings.Split(row.LabelsCSV, ",")
 		}
-		msgs = append(msgs, bm)
+		msgs = append(msgs, wispQueryMessage{
+			message:       bm,
+			assigneeMatch: row.AssigneeHit != 0,
+			ccMatch:       row.CCHit != 0,
+		})
 	}
-	return msgs
+	return msgs, nil
 }
 
-// escapeSQLString escapes single quotes for SQL string literals.
+func parseWispTimestamp(value string) (time.Time, bool) {
+	for _, layout := range []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05 -0700 MST",
+		// Dolt/MySQL DATETIME values are emitted without a zone; Gas Town runs
+		// managed Dolt servers in UTC, so treat bare timestamps as UTC.
+		"2006-01-02 15:04:05",
+	} {
+		if t, err := time.Parse(layout, strings.TrimSpace(value)); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func sqlStringList(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, "'"+escapeSQLString(value)+"'")
+	}
+	return strings.Join(quoted, ",")
+}
+
+// escapeSQLString escapes backslashes and single quotes for Dolt/MySQL SQL string literals.
 func escapeSQLString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
 	return strings.ReplaceAll(s, "'", "''")
 }
 
@@ -507,9 +566,25 @@ func (m *Mailbox) getFromDir(id, beadsDir string) (*Message, error) {
 	if len(bms) == 0 {
 		return nil, ErrMessageNotFound
 	}
+	if !bms[0].HasLabel("gt:message") || !m.isInboxMessage(&bms[0]) {
+		return nil, ErrNotInboxMessage
+	}
 
 	// Wisp status comes from beads issue.wisp field via ToMessage()
 	return bms[0].ToMessage(), nil
+}
+
+// isInboxMessage verifies that a Beads message is visible to this mailbox.
+// Archive-by-ID must perform this check before any mutation: accepting an
+// arbitrary bead ID here would let a mail cleanup command mutate molecule rows.
+func (m *Mailbox) isInboxMessage(bm *BeadsMessage) bool {
+	bm.ParseLabels()
+	for _, identity := range m.identityVariants() {
+		if AddressToIdentity(bm.Assignee) == AddressToIdentity(identity) || bm.IsCCRecipient(identity) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Mailbox) getLegacy(id string) (*Message, error) {
@@ -534,6 +609,10 @@ func (m *Mailbox) MarkRead(id string) error {
 }
 
 func (m *Mailbox) markReadBeads(id string) error {
+	if err := m.acknowledgeDeliveryForPrimary(id); err != nil {
+		return err
+	}
+
 	// Resolve correct beadsDir based on bead ID prefix (GH#2423)
 	primary := beads.ResolveBeadsDirForID(m.beadsDir, id)
 	err := m.closeInDir(id, primary)
@@ -560,13 +639,13 @@ func (m *Mailbox) closeInDir(id, beadsDir string) error {
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+	_, err := runBdCommand(ctx, args, m.workDir, beadsDir, "BD_ACTOR="+m.mutationActor())
 	telemetry.RecordMailMessage(context.Background(), "read", telemetry.MailMessageInfo{
 		ID: id,
 		To: m.identity,
 	}, err)
 	if err != nil {
-		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found") {
+		if isBdNotFound(err) {
 			return ErrMessageNotFound
 		}
 		return err
@@ -614,6 +693,10 @@ func (m *Mailbox) MarkReadOnly(id string) error {
 }
 
 func (m *Mailbox) markReadOnlyBeads(id string) error {
+	if err := m.acknowledgeDeliveryForPrimary(id); err != nil {
+		return err
+	}
+
 	if m.store != nil {
 		return m.storeMarkReadOnly(id)
 	}
@@ -624,16 +707,17 @@ func (m *Mailbox) markReadOnlyBeads(id string) error {
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, args, m.workDir, primary)
+	_, err := runBdCommand(ctx, args, m.workDir, primary, "BD_ACTOR="+m.mutationActor())
 	if err != nil {
-		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found") {
+		if isBdNotFound(err) {
 			if primary != m.beadsDir {
 				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
 				ctx2, cancel2 := bdWriteCtx()
 				defer cancel2()
-				_, err2 := runBdCommand(ctx2, args, m.workDir, m.beadsDir)
+				_, err2 := runBdCommand(ctx2, args, m.workDir, m.beadsDir,
+					"BD_ACTOR="+m.mutationActor())
 				if err2 != nil {
-					if bdErr2, ok := err2.(*bdError); ok && bdErr2.ContainsError("not found") || bdErr2.ContainsError("no issue found") {
+					if isBdNotFound(err2) {
 						return ErrMessageNotFound
 					}
 					return err2
@@ -646,6 +730,29 @@ func (m *Mailbox) markReadOnlyBeads(id string) error {
 	}
 
 	return nil
+}
+
+func (m *Mailbox) acknowledgeDeliveryForPrimary(id string) error {
+	if m.legacy {
+		return nil
+	}
+	if m.store != nil {
+		return m.storeAcknowledgeDeliveryForPrimary(id)
+	}
+
+	msg, err := m.Get(id)
+	if err != nil {
+		return err
+	}
+	if msg == nil || msg.DeliveryState == "" || AddressToIdentity(msg.To) != m.identity {
+		return nil
+	}
+	return AcknowledgeDeliveryBead(m.workDir, m.beadsDir, id, m.identity)
+}
+
+func isBdNotFound(err error) bool {
+	bdErr, ok := err.(*bdError)
+	return ok && (bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found"))
 }
 
 // MarkUnreadOnly marks a message as unread (removes "read" label).
@@ -671,14 +778,14 @@ func (m *Mailbox) markUnreadOnlyBeads(id string) error {
 	defer cancel()
 	_, err := runBdCommand(ctx, args, m.workDir, primary)
 	if err != nil {
-		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found") {
+		if isBdNotFound(err) {
 			if primary != m.beadsDir {
 				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
 				ctx2, cancel2 := bdWriteCtx()
 				defer cancel2()
 				_, err2 := runBdCommand(ctx2, args, m.workDir, m.beadsDir)
 				if err2 != nil {
-					if bdErr2, ok := err2.(*bdError); ok && bdErr2.ContainsError("not found") || bdErr2.ContainsError("no issue found") {
+					if isBdNotFound(err2) {
 						return ErrMessageNotFound
 					}
 					if bdErr2, ok := err2.(*bdError); ok && bdErr2.ContainsError("does not have label") {
@@ -720,14 +827,14 @@ func (m *Mailbox) markUnreadBeads(id string) error {
 	defer cancel()
 	_, err := runBdCommand(ctx, args, m.workDir, primary)
 	if err != nil {
-		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found") {
+		if isBdNotFound(err) {
 			if primary != m.beadsDir {
 				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
 				ctx2, cancel2 := bdWriteCtx()
 				defer cancel2()
 				_, err2 := runBdCommand(ctx2, args, m.workDir, m.beadsDir)
 				if err2 != nil {
-					if bdErr2, ok := err2.(*bdError); ok && bdErr2.ContainsError("not found") || bdErr2.ContainsError("no issue found") {
+					if isBdNotFound(err2) {
 						return ErrMessageNotFound
 					}
 					return err2
@@ -806,34 +913,50 @@ func (m *Mailbox) deleteLegacy(id string) error {
 	return m.rewriteLegacy(filtered)
 }
 
-// Archive moves a message to the archive file and removes it from inbox.
+// Archive removes a message from the inbox without closing its Beads row.
 //
-// Archive is a mail cleanup operation, not a bead operation. If the
-// underlying bead has been garbage collected (by `bd mol wisp gc` or
-// `bd compact`), there is nothing to append to the archive and nothing
-// to close — we still return nil so the caller's inbox reference is
-// considered cleared. See aa-6hv.
+// Closing an ephemeral mail wisp can invoke Beads' closed-wisp GC. Keeping the
+// row open and applying an exact archived label contains mail cleanup to the
+// requested ID and cannot cascade into an unrelated active molecule graph.
 func (m *Mailbox) Archive(id string) error {
 	if m.legacy {
 		return m.archiveLegacy(id)
 	}
-	// Beads mode: append to archive then close
-	msg, err := m.Get(id)
+
+	// Resolve and validate before the first mutation. Get rejects IDs that are
+	// not gt:message rows visible in this mailbox.
+	_, err := m.Get(id)
 	if err != nil {
-		if errors.Is(err, ErrMessageNotFound) {
-			// Underlying bead has been GC'd; nothing to archive or close.
-			return nil
-		}
 		return err
 	}
-	if err := m.appendToArchive(msg); err != nil {
+	if err := m.acknowledgeDeliveryForPrimary(id); err != nil {
 		return err
 	}
-	if err := m.Delete(id); err != nil {
-		if errors.Is(err, ErrMessageNotFound) {
-			// Bead was GC'd between Get and Delete; metadata is archived,
-			// and there is nothing left to close.
-			return nil
+
+	primary := beads.ResolveBeadsDirForID(m.beadsDir, id)
+	err = m.archiveInDir(id, primary)
+	if errors.Is(err, ErrMessageNotFound) && primary != m.beadsDir {
+		return m.archiveInDir(id, m.beadsDir)
+	}
+	return err
+}
+
+func (m *Mailbox) archiveInDir(id, beadsDir string) error {
+	if m.store != nil {
+		return m.storeArchiveInDir(id)
+	}
+
+	ctx, cancel := bdWriteCtx()
+	defer cancel()
+	_, err := runBdCommand(ctx, []string{"label", "add", id, archivedLabel}, m.workDir, beadsDir,
+		"BD_ACTOR="+m.mutationActor())
+	telemetry.RecordMailMessage(context.Background(), "archive", telemetry.MailMessageInfo{
+		ID: id,
+		To: m.identity,
+	}, err)
+	if err != nil {
+		if isBdNotFound(err) {
+			return ErrMessageNotFound
 		}
 		return err
 	}
@@ -1153,7 +1276,7 @@ func (m *Mailbox) AcknowledgeDeliveries(recipientAddress string, messages []*Mes
 		if AddressToIdentity(msg.To) != recipientIdentity {
 			continue
 		}
-		if msg.DeliveryState == "" || msg.DeliveryState == DeliveryStateAcked {
+		if msg.DeliveryState == "" {
 			continue
 		}
 		toAck = append(toAck, msg)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,22 @@ func writeTestRoutes(t *testing.T, townRoot string, routes []beads.Route) {
 	}
 	if err := beads.WriteRoutes(beadsDir, routes); err != nil {
 		t.Fatalf("write routes: %v", err)
+	}
+}
+
+func TestRenderFormulaStepsFull_DeaconIncludesHeartbeatCommand(t *testing.T) {
+	out, err := renderFormulaStepsFull(constants.MolDeaconPatrol, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("renderFormulaStepsFull: %v", err)
+	}
+	for _, want := range []string{
+		"### Step 1: Refresh heartbeat",
+		"gt deacon heartbeat \"starting patrol cycle\"",
+		"This MUST run before any other step.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rendered deacon patrol missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -131,6 +148,44 @@ func TestGetAgentBeadID_UsesRigPrefix(t *testing.T) {
 				t.Fatalf("getAgentBeadID() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRigBeadsRootPrefersRouteResolvedRigDir(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestRoutes(t, townRoot, []beads.Route{
+		{Prefix: "gt-", Path: "gastown/mayor/rig"},
+		{Prefix: "hq-", Path: "."},
+	})
+
+	ctx := RoleContext{
+		Role:     RolePolecat,
+		Rig:      "gastown",
+		Polecat:  "toast",
+		TownRoot: townRoot,
+		WorkDir:  filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown"),
+	}
+
+	got := rigBeadsRoot(ctx)
+	want := filepath.Join(townRoot, "gastown", "mayor", "rig")
+	if got != want {
+		t.Fatalf("rigBeadsRoot() = %q, want route-resolved %q", got, want)
+	}
+}
+
+func TestRigBeadsRootFallsBackWhenRouteMissing(t *testing.T) {
+	townRoot := t.TempDir()
+	ctx := RoleContext{
+		Role:     RolePolecat,
+		Rig:      "gastown",
+		TownRoot: townRoot,
+		WorkDir:  filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown"),
+	}
+
+	got := rigBeadsRoot(ctx)
+	want := filepath.Join(townRoot, "gastown")
+	if got != want {
+		t.Fatalf("rigBeadsRoot() = %q, want fallback %q", got, want)
 	}
 }
 
@@ -897,9 +952,13 @@ func TestCheckSlungWork_StandaloneFormulaUsesWorkflowOutput(t *testing.T) {
 	}
 
 	var found bool
+	var gotErr error
 	output := captureStdout(t, func() {
-		found = checkSlungWork(ctx, hookedBead)
+		found, gotErr = checkSlungWork(ctx, hookedBead)
 	})
+	if gotErr != nil {
+		t.Fatalf("checkSlungWork() error = %v", gotErr)
+	}
 
 	if !found {
 		t.Fatalf("checkSlungWork() = false, want true")
@@ -912,6 +971,170 @@ func TestCheckSlungWork_StandaloneFormulaUsesWorkflowOutput(t *testing.T) {
 	}
 	if !strings.Contains(output, "--var version=1.2.3") {
 		t.Fatalf("expected standalone formula context to be shown, got:\n%s", output)
+	}
+}
+
+func TestOutputAutonomousDirectiveForkRigAvoidsMergeQueueGuidance(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig"), 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "myrig", "config.json"), []byte(`{"upstream_url":"https://token@example.com/upstream/repo.git"}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		outputAutonomousDirective(RoleContext{Role: RolePolecat, Rig: "myrig", TownRoot: townRoot, Polecat: "scout"}, &beads.Issue{ID: "gt-test", Title: "test"}, false)
+	})
+	if !strings.Contains(output, "FORK-BACKED RIG") {
+		t.Fatalf("expected fork-backed directive, got:\n%s", output)
+	}
+	for _, forbidden := range []string{"submit to the merge queue", "use the merge queue", "token"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("fork autonomous output contains forbidden %q:\n%s", forbidden, output)
+		}
+	}
+}
+
+func TestOutputAutonomousDirectiveForkRigWithLocalMergeQueueUsesDone(t *testing.T) {
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"upstream_url":"https://github.com/upstream/repo"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(`{"merge_queue":{"enabled":true}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	output := captureStdout(t, func() {
+		outputAutonomousDirective(RoleContext{Role: RolePolecat, Rig: "myrig", TownRoot: townRoot, Polecat: "scout"}, &beads.Issue{ID: "gt-test", Title: "test"}, false)
+	})
+	if !strings.Contains(output, "gt done") || strings.Contains(output, "FORK-BACKED RIG") {
+		t.Fatalf("explicit local merge queue directive mismatch:\n%s", output)
+	}
+}
+
+func TestOutputMoleculeWorkflowForkRigOverridesFormulaMergeQueueReminder(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig"), 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "myrig", "config.json"), []byte(`{"upstream_url":"https://github.com/upstream/repo"}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if err := outputMoleculeWorkflow(RoleContext{Role: RolePolecat, Rig: "myrig", TownRoot: townRoot}, &beads.AttachmentFields{AttachedFormula: "mol-polecat-work"}); err != nil {
+			t.Fatalf("outputMoleculeWorkflow: %v", err)
+		}
+	})
+	if !strings.Contains(output, "FORK-BACKED RIG OVERRIDE") {
+		t.Fatalf("expected fork override, got:\n%s", output)
+	}
+	for _, forbidden := range []string{"REQUIRED: When all steps complete", "gt done", "submit to the merge queue"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("fork molecule workflow kept unsafe formula text %q:\n%s", forbidden, output)
+		}
+	}
+}
+
+func TestCheckSlungWork_RefinerySafetyStoppedSkipsWorkflowOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd script uses POSIX shell")
+	}
+	townRoot := setupRefinerySafetyStopTown(t)
+	installRefinerySafetyStopMockBD(t)
+
+	ctx := RoleContext{Role: RoleRefinery, Rig: "testrig", TownRoot: townRoot}
+	hookedBead := &beads.Issue{
+		ID:    "gt-wisp-refinery",
+		Title: constants.MolRefineryPatrol,
+		Description: strings.Join([]string{
+			"attached_formula: " + constants.MolRefineryPatrol,
+			`attached_vars: ["target_branch=main"]`,
+		}, "\n"),
+	}
+
+	var found bool
+	var gotErr error
+	output := captureStdout(t, func() {
+		found, gotErr = checkSlungWork(ctx, hookedBead)
+	})
+	if gotErr != nil {
+		t.Fatalf("checkSlungWork() error = %v", gotErr)
+	}
+	if !found {
+		t.Fatalf("checkSlungWork() = false, want true")
+	}
+	if !strings.Contains(output, "REFINERY SAFETY STOP ACTIVE") {
+		t.Fatalf("expected safety-stop directive, got:\n%s", output)
+	}
+	for _, forbidden := range []string{"ATTACHED FORMULA", "AUTONOMOUS WORK MODE", "Work through each patrol step"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("did not expect %q while safety-stopped, got:\n%s", forbidden, output)
+		}
+	}
+}
+
+func TestOutputStartupDirective_RefinerySafetyStoppedSkipsPatrolNew(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd script uses POSIX shell")
+	}
+	townRoot := setupRefinerySafetyStopTown(t)
+	installRefinerySafetyStopMockBD(t)
+
+	output := captureStdout(t, func() {
+		outputStartupDirective(RoleContext{Role: RoleRefinery, Rig: "testrig", TownRoot: townRoot})
+	})
+	if !strings.Contains(output, "No patrol needed. Exit cleanly.") {
+		t.Fatalf("expected safety-stop startup directive, got:\n%s", output)
+	}
+	if strings.Contains(output, "gt patrol new") || strings.Contains(output, "create patrol") {
+		t.Fatalf("startup directive should not tell safety-stopped refinery to create patrol, got:\n%s", output)
+	}
+}
+
+func TestCheckSlungWork_RalphModeUsesLoopDirective(t *testing.T) {
+	configDir := t.TempDir()
+	pluginsDir := filepath.Join(configDir, "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		t.Fatalf("mkdir plugins: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginsDir, "installed_plugins.json"), []byte(`{"plugins":{"ralph-loop@claude-plugins-official":{}}}`), 0644); err != nil {
+		t.Fatalf("write plugin manifest: %v", err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	ctx := RoleContext{Role: RoleCrew}
+	hookedBead := &beads.Issue{
+		ID:    "gt-wisp-ralph",
+		Title: "Ralph workflow",
+		Description: strings.Join([]string{
+			"attached_molecule: gt-wisp-ralph",
+			"attached_args: do the loop",
+			"mode: ralph",
+		}, "\n"),
+	}
+
+	var found bool
+	var gotErr error
+	output := captureStdout(t, func() {
+		found, gotErr = checkSlungWork(ctx, hookedBead)
+	})
+	if gotErr != nil {
+		t.Fatalf("checkSlungWork() error = %v", gotErr)
+	}
+	if !found {
+		t.Fatalf("checkSlungWork() = false, want true")
+	}
+	if !strings.Contains(output, "/ralph-loop ") || !strings.Contains(output, "--completion-promise DONE") {
+		t.Fatalf("expected ralph-loop directive, got:\n%s", output)
+	}
+	if strings.Contains(output, "Formula Checklist") {
+		t.Fatalf("ralph mode should emit plugin directive instead of inline checklist, got:\n%s", output)
 	}
 }
 
@@ -1028,62 +1251,187 @@ func TestEnsureBeadsRedirect_RepairsExistingRedirectChain(t *testing.T) {
 	}
 }
 
-// TestOutputRalphLoopDirective_NoSlashCommand verifies that ralph mode emits
-// inline iterative work instructions instead of referencing a nonexistent
-// /ralph-loop slash command. This is the regression test for the ralph-loop
-// dies-on-spawn bug: polecats died immediately because Claude tried to run
-// /ralph-loop which didn't exist as a provisioned slash command.
-func TestOutputRalphLoopDirective_NoSlashCommand(t *testing.T) {
-	attachment := &beads.AttachmentFields{
-		Mode:         "ralph",
-		AttachedArgs: "Run story audit, fix worst gap, commit, loop",
-	}
-	output := captureStdout(t, func() {
-		outputRalphLoopDirective(RoleContext{}, attachment)
-	})
-
-	// Must NOT reference /ralph-loop (nonexistent slash command)
-	if strings.Contains(output, "/ralph-loop") {
-		t.Fatalf("ralph directive must NOT reference /ralph-loop (slash command doesn't exist), got:\n%s", output)
+func TestEnsureBeadsRedirect_CleansIdentityFilesWhenRedirectAlreadyCorrect(t *testing.T) {
+	runGit := func(t *testing.T, dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
 	}
 
-	// Must contain iterative workflow instructions
-	if !strings.Contains(output, "RALPH LOOP MODE") {
-		t.Fatalf("expected 'RALPH LOOP MODE' header, got:\n%s", output)
+	townRoot := t.TempDir()
+	rigRoot := filepath.Join(townRoot, "testrig")
+	rigBeadsDir := filepath.Join(rigRoot, ".beads")
+	mayorBeadsDir := filepath.Join(rigRoot, "mayor", "rig", ".beads")
+	workDir := filepath.Join(rigRoot, "polecats", "worker1", "gastown")
+	workBeadsDir := filepath.Join(workDir, ".beads")
+
+	if err := os.MkdirAll(mayorBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir mayor beads dir: %v", err)
 	}
-	if !strings.Contains(output, "gt done") {
-		t.Fatalf("expected 'gt done' instruction for completion, got:\n%s", output)
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir rig beads dir: %v", err)
 	}
-	if !strings.Contains(output, "Commit frequently") {
-		t.Fatalf("expected commit guidance, got:\n%s", output)
+	if err := os.WriteFile(filepath.Join(rigBeadsDir, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatalf("write rig redirect: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeadsDir, "metadata.json"), []byte(`{"dolt_database":"hq","backend":"dolt"}`), 0644); err != nil {
+		t.Fatalf("write rig metadata: %v", err)
+	}
+	if err := os.MkdirAll(workBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir work beads dir: %v", err)
+	}
+	runGit(t, workDir, "init")
+
+	redirectPath := filepath.Join(workBeadsDir, "redirect")
+	if err := os.WriteFile(redirectPath, []byte("../../../mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatalf("write redirect: %v", err)
+	}
+	for _, file := range []string{"metadata.json", "config.yaml"} {
+		if err := os.WriteFile(filepath.Join(workBeadsDir, file), []byte("stale identity"), 0644); err != nil {
+			t.Fatalf("write %s: %v", file, err)
+		}
 	}
 
-	// Must include the context/args
-	if !strings.Contains(output, "story audit") {
-		t.Fatalf("expected attached args in output, got:\n%s", output)
+	ctx := RoleContext{
+		Role:     RolePolecat,
+		WorkDir:  workDir,
+		TownRoot: townRoot,
+	}
+
+	ensureBeadsRedirect(ctx)
+
+	content, err := os.ReadFile(redirectPath)
+	if err != nil {
+		t.Fatalf("read redirect: %v", err)
+	}
+	if got, want := string(content), "../../../mayor/rig/.beads\n"; got != want {
+		t.Fatalf("redirect content = %q, want %q", got, want)
+	}
+	for _, file := range []string{"metadata.json", "config.yaml"} {
+		if _, err := os.Stat(filepath.Join(workBeadsDir, file)); !os.IsNotExist(err) {
+			t.Fatalf("%s should have been cleaned, stat err=%v", file, err)
+		}
 	}
 }
 
-// TestOutputRalphLoopDirective_WithFormula verifies that ralph mode shows
-// formula steps inline (same as normal mode) when a formula is attached.
-func TestOutputRalphLoopDirective_WithFormula(t *testing.T) {
+func TestOutputRalphLoopDirective_PluginInstalled(t *testing.T) {
 	attachment := &beads.AttachmentFields{
 		Mode:            "ralph",
 		AttachedFormula: "mol-polecat-work",
+		AttachedArgs:    "Run story audit, fix worst gap, commit, loop",
 		FormulaVars:     "base_branch=main",
 	}
+	var gotErr error
 	output := captureStdout(t, func() {
-		outputRalphLoopDirective(RoleContext{}, attachment)
+		gotErr = outputRalphLoopDirectiveWithPluginCheck(RoleContext{}, attachment, true, t.TempDir())
 	})
-
-	// Should NOT reference /ralph-loop
-	if strings.Contains(output, "/ralph-loop") {
-		t.Fatalf("ralph directive must NOT reference /ralph-loop, got:\n%s", output)
+	if gotErr != nil {
+		t.Fatalf("outputRalphLoopDirectiveWithPluginCheck: %v", gotErr)
 	}
 
-	// Should show formula steps (from mol-polecat-work)
+	if !strings.Contains(output, "/ralph-loop ") {
+		t.Fatalf("expected /ralph-loop command, got:\n%s", output)
+	}
+	if !strings.Contains(output, "--completion-promise DONE") {
+		t.Fatalf("expected completion promise flag, got:\n%s", output)
+	}
 	if !strings.Contains(output, "Formula Checklist") {
-		t.Fatalf("expected formula checklist in ralph output, got:\n%s", output)
+		t.Fatalf("expected rendered formula checklist in prompt, got:\n%s", output)
+	}
+	if !strings.Contains(output, "story audit") {
+		t.Fatalf("expected attached args in prompt, got:\n%s", output)
+	}
+	if !strings.Contains(output, `<promise>DONE</promise>`) {
+		t.Fatalf("expected DONE promise instruction in prompt, got:\n%s", output)
+	}
+}
+
+func TestOutputRalphLoopDirective_PluginMissing(t *testing.T) {
+	var gotErr error
+	output := captureStdout(t, func() {
+		gotErr = outputRalphLoopDirectiveWithPluginCheck(RoleContext{}, &beads.AttachmentFields{Mode: "ralph"}, false, "/tmp/claude-test")
+	})
+	if gotErr == nil {
+		t.Fatal("expected missing plugin error")
+	}
+	if !strings.Contains(gotErr.Error(), ralphLoopPluginID) || !strings.Contains(gotErr.Error(), "/plugin install") {
+		t.Fatalf("missing plugin error not actionable: %v", gotErr)
+	}
+	if strings.Contains(output, "/ralph-loop") {
+		t.Fatalf("should not emit /ralph-loop when plugin is missing, got:\n%s", output)
+	}
+}
+
+func TestRalphLoopPluginInstalledIn(t *testing.T) {
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		t.Fatalf("mkdir plugins: %v", err)
+	}
+	manifestPath := filepath.Join(pluginsDir, "installed_plugins.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"plugins":{"ralph-loop@claude-plugins-official":{},"ralph-loop-evil@claude-plugins-official":{}}}`), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	installed, err := ralphLoopPluginInstalledIn(manifestPath)
+	if err != nil {
+		t.Fatalf("ralphLoopPluginInstalledIn: %v", err)
+	}
+	if !installed {
+		t.Fatal("expected canonical ralph-loop plugin to be detected")
+	}
+
+	if err := os.WriteFile(manifestPath, []byte(`{"plugins":{"ralph-loop-evil@claude-plugins-official":{}}}`), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	installed, err = ralphLoopPluginInstalledIn(manifestPath)
+	if err != nil {
+		t.Fatalf("ralphLoopPluginInstalledIn malicious key: %v", err)
+	}
+	if installed {
+		t.Fatal("must not accept prefix-like plugin IDs")
+	}
+}
+
+func TestIsRalphLoopPluginInstalledUsesClaudeConfigDir(t *testing.T) {
+	configDir := t.TempDir()
+	pluginsDir := filepath.Join(configDir, "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		t.Fatalf("mkdir plugins: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginsDir, "installed_plugins.json"), []byte(`{"plugins":{"ralph-loop@claude-plugins-official":{}}}`), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	installed, gotConfigDir, err := isRalphLoopPluginInstalled()
+	if err != nil {
+		t.Fatalf("isRalphLoopPluginInstalled: %v", err)
+	}
+	if !installed {
+		t.Fatal("expected plugin installed via CLAUDE_CONFIG_DIR")
+	}
+	if gotConfigDir != configDir {
+		t.Fatalf("configDir = %q, want %q", gotConfigDir, configDir)
+	}
+}
+
+func TestQuoteForRalphLoop(t *testing.T) {
+	quoted := quoteForRalphLoop("line1\r\nline2 \"quoted\" \\ $HOME `cmd`")
+	if !strings.HasPrefix(quoted, `"`) || !strings.HasSuffix(quoted, `"`) {
+		t.Fatalf("expected double-quoted prompt, got %q", quoted)
+	}
+	for _, forbidden := range []string{"\n", "\r"} {
+		if strings.Contains(quoted, forbidden) {
+			t.Fatalf("quoted prompt contains raw line break %q: %q", forbidden, quoted)
+		}
+	}
+	for _, want := range []string{`\n`, `\"`, `\\`, `\$`, "\\`"} {
+		if !strings.Contains(quoted, want) {
+			t.Fatalf("quoted prompt missing escape %q: %q", want, quoted)
+		}
 	}
 }
 

@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gt mail send --from` no longer permits sender impersonation** — `--from`
+  is now restricted to `convoy/<id>` overrides (the convoy notification
+  subsystem's synthetic actor, the only legitimate use in the codebase); any
+  other value is rejected with an error naming the detected identity instead
+  of silently forging the message's `From` (and, transitively, the `bd
+  --actor` audit attribution routed through it) (gt-p7gu).
+- **`gt mail send` no longer trusts a bare `GT_ROLE` override** — the `--from`
+  fix above still left a wider hole: any local caller could run `GT_ROLE=
+  overseer gt mail send ...` (no `--from` needed) and forge the same sender/
+  actor attribution, since `GT_ROLE` is a self-reported env var nothing
+  verified. Sending now cross-checks the `GT_ROLE` claim against the identity
+  of the tmux session the process is actually running in (resolved via
+  kernel process ancestry, not another env var); a mismatch is rejected
+  instead of trusted, unless it's the recognized `convoy/<id>` synthetic
+  actor. Verification is skipped (unchanged prior behavior) when no tmux
+  session can be resolved, e.g. tests, CI, human terminals (gt-9z0y).
+
+- **Scheduler `paused_by` no longer records a bare `"unknown"` actor** — when
+  Gas Town role detection fails, `detectActor()` now falls back to an
+  OS-identity string (`unknown(user@host)`) instead of the uninspectable
+  literal `"unknown"`, leaving a forensic trail for future incident review.
+  Not an authentication mechanism — `$USER`/hostname are as forgeable as
+  `GT_ROLE` (gt-h0ie).
+
+## [1.2.1] - 2026-06-06
+
+### Fixed
+
+- **Shell integration no longer nags in arbitrary shells** — the
+  `gt install --shell` hook prompted `Add '<repo>' to Gas Town? [y/N/never]` in
+  any git repo that wasn't a known rig, and on bash it re-prompted before
+  *every* command (not just on `cd`). An interrupted prompt (Ctrl-C) never
+  recorded the answer and could loop indefinitely across restored terminal
+  sessions. The add-offer is now **opt-in** (set `GASTOWN_OFFER_ADD=1`); by
+  default the hook stays silent and only exports `GT_TOWN_ROOT`/`GT_RIG` inside
+  known rigs. bash now offers only on a real directory change, and the repo is
+  recorded before the prompt so an interrupted read can't loop.
+- **`bd create` repo aliases route canonically** (gh#4180).
+- **Mail reply-to is inferred from the inbox** so reply-reminders clear
+  correctly (gt-zzob).
+- **`gt doctor` rig-config-sync accepts prefix-named Dolt databases** (gt-5hd2).
+
+### Changed
+
+- Clarified Gas Town HQ beads routing documentation (gh#4181).
+- Internal: added a nix flake update CI workflow.
+
+## [1.2.0] - 2026-05-27
+
+### Fixed
+
 - **Daemon crash-loop vs Claude usage limits** — Stuck-agent-dog now inspects
   the agent's tmux pane for Claude usage-limit / rate-limit signatures before
   killing and restarting. Detected pauses apply a fixed retry delay

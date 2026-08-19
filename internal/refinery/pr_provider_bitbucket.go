@@ -30,24 +30,18 @@ func newBitbucketPRProvider(g *git.Git) (PRProvider, error) {
 	}, nil
 }
 
-func (p *bitbucketPRProvider) FindPRNumber(branch string) (int, error) {
-	return p.git.FindBitbucketPRNumber(p.workspace, p.repoSlug, branch)
+func (p *bitbucketPRProvider) FindPullRequest(branch, _ string, _ int, headSHA string) (*git.PullRequestInfo, error) {
+	return p.git.FindBitbucketPullRequest(p.workspace, p.repoSlug, branch, headSHA)
 }
 
-func (p *bitbucketPRProvider) IsPRApproved(prNumber int) (bool, error) {
-	return p.git.IsBitbucketPRApproved(p.workspace, p.repoSlug, prNumber)
+func (p *bitbucketPRProvider) IsPRApproved(pr *git.PullRequestInfo) (bool, error) {
+	return p.git.IsBitbucketPRApproved(p.workspace, p.repoSlug, pr.Number)
 }
 
-func (p *bitbucketPRProvider) MergePR(prNumber int, method string) (string, error) {
-	// Map generic merge methods to Bitbucket strategy names.
-	bbStrategy := method
-	switch method {
-	case "squash":
-		bbStrategy = "squash"
-	case "merge":
-		bbStrategy = "merge_commit"
-	case "rebase":
-		bbStrategy = "fast_forward"
+func (p *bitbucketPRProvider) MergePR(pr *git.PullRequestInfo, method string) (string, error) {
+	prNumber := 0
+	if pr != nil {
+		prNumber = pr.Number
 	}
-	return p.git.BitbucketPRMerge(p.workspace, p.repoSlug, prNumber, bbStrategy)
+	return "", fmt.Errorf("bitbucket PR merge is disabled until the provider supports submitted-head conditional merge for PR #%d", prNumber)
 }

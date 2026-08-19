@@ -1,16 +1,19 @@
 package beads
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestFormatRigDescription(t *testing.T) {
 	tests := []struct {
-		name   string
+		name    string
 		rigName string
-		fields *RigFields
-		want   []string
+		fields  *RigFields
+		want    []string
 	}{
 		{
 			name:    "nil fields",
@@ -217,5 +220,106 @@ func TestValidRigState(t *testing.T) {
 				t.Errorf("ValidRigState(%q) = %v, want %v", tt.state, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCreateRigBeadUsesDurableBuiltInType(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses POSIX shell fake bd")
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_LOG"
+case "$1:$2:$3" in
+  config:get:types.custom)
+    printf '%s\n' 'agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request'
+    exit 0
+    ;;
+  config:get:types.infra)
+    printf '%s\n' 'agent,role,message'
+    exit 0
+    ;;
+esac
+if [ "$1" = "create" ]; then
+  printf '%s\n' '{"id":"gt-rig-gastown","title":"gastown","issue_type":"task","status":"open","priority":2,"created_at":"2026-07-07T00:00:00Z","updated_at":"2026-07-07T00:00:00Z","labels":["gt:rig"]}'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_LOG", logPath)
+
+	workDir := t.TempDir()
+	beadsDir := filepath.Join(workDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	ResetEnsuredDirs()
+
+	issue, err := NewIsolated(workDir).CreateRigBead("gastown", &RigFields{Prefix: "gt", State: RigStateActive})
+	if err != nil {
+		t.Fatalf("CreateRigBead: %v", err)
+	}
+	if issue.Type != "task" || issue.Ephemeral {
+		t.Fatalf("created issue type/ephemeral = %q/%v, want task/false", issue.Type, issue.Ephemeral)
+	}
+
+	log := string(mustReadFile(t, logPath))
+	for _, want := range []string{"create --json", "--labels=gt:rig", "--type=task"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("bd log missing %q in:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "--type=rig") || strings.Contains(log, "config set types.custom") {
+		t.Fatalf("rig bead creation depended on custom rig type:\n%s", log)
+	}
+}
+
+func TestCreateRigBeadDoesNotRequireCustomTypeConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses POSIX shell fake bd")
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_LOG"
+if [ "$1" = "config" ]; then
+  echo 'custom types unavailable' >&2
+  exit 1
+fi
+if [ "$1" = "create" ]; then
+  printf '%s\n' '{"id":"gt-rig-gastown","title":"gastown","issue_type":"task","status":"open","labels":["gt:rig"]}'
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_LOG", logPath)
+
+	workDir := t.TempDir()
+	beadsDir := filepath.Join(workDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	ResetEnsuredDirs()
+
+	issue, err := NewIsolated(workDir).CreateRigBead("gastown", &RigFields{Prefix: "gt"})
+	if err != nil {
+		t.Fatalf("CreateRigBead: %v", err)
+	}
+	if issue.Type != "task" {
+		t.Fatalf("issue type = %q, want task", issue.Type)
+	}
+	if log := string(mustReadFile(t, logPath)); strings.Contains(log, "config ") || !strings.Contains(log, "--type=task") {
+		t.Fatalf("unexpected bd calls:\n%s", log)
 	}
 }

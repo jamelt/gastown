@@ -756,10 +756,18 @@ func closePluginMails(dogName string) {
 
 	closed := 0
 	for _, msg := range messages {
-		if msg.Read {
+		// Archive read AND unread direct plugin dispatch mail. The dog must read
+		// the dispatch mail to execute the plugin, so skipping read mail left
+		// every executed dispatch bead open forever. Keep this scoped to Deacon
+		// dispatches so CC or human messages with a similar subject are preserved.
+		if !strings.HasPrefix(msg.Subject, "Plugin: ") {
 			continue
 		}
-		if !strings.HasPrefix(msg.Subject, "Plugin: ") {
+		if mail.AddressToIdentity(msg.To) != mail.AddressToIdentity(dogAddress) {
+			continue
+		}
+		sender := mail.AddressToIdentity(msg.From)
+		if sender != "deacon/" && sender != "daemon" {
 			continue
 		}
 		if archErr := mailbox.Archive(msg.ID); archErr == nil {
@@ -768,7 +776,7 @@ func closePluginMails(dogName string) {
 	}
 
 	if closed > 0 {
-		fmt.Printf("  Closed %d stale plugin mail(s) from inbox\n", closed)
+		fmt.Printf("  Archived %d stale plugin mail(s) from inbox\n", closed)
 	}
 }
 
@@ -1196,7 +1204,7 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 		if !dogDispatchJSON {
 			style.PrintWarning("%s", warn)
 		}
-		if escErr := dogEscalateBestEffort(warn); escErr != nil {
+		if escErr := dogEscalateBestEffort(warn, fmt.Sprintf("dog-dispatch:%s:session-start-failed", targetDog.Name)); escErr != nil {
 			if !dogDispatchJSON {
 				style.PrintWarning("escalation also failed (%v) — escalate manually: gt escalate --severity medium %q", escErr, warn)
 			}
@@ -1213,7 +1221,7 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 		if !dogDispatchJSON {
 			style.PrintWarning("%s", warn)
 		}
-		_ = dogEscalateBestEffort(warn)
+		_ = dogEscalateBestEffort(warn, fmt.Sprintf("dog-dispatch:%s:verify-get-failed", targetDog.Name))
 	} else if d.Work != "" {
 		result.WorkConfirmed = true
 	} else {
@@ -1222,7 +1230,7 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 		if !dogDispatchJSON {
 			style.PrintWarning("%s", warn)
 		}
-		_ = dogEscalateBestEffort(warn)
+		_ = dogEscalateBestEffort(warn, fmt.Sprintf("dog-dispatch:%s:work-cleared", targetDog.Name))
 	}
 
 	// Success - output result
@@ -1261,9 +1269,12 @@ type dogDispatchResult struct {
 	Warnings       []string `json:"warnings,omitempty"`
 }
 
-// dogEscalateBestEffort fires a MEDIUM escalation via gt escalate.
-func dogEscalateBestEffort(msg string) error {
-	cmd := exec.Command("gt", "escalate", "--severity", "medium", msg)
+// dogEscalateBestEffort fires a MEDIUM escalation via gt escalate. fingerprint
+// is a stable duplicate-suppression key (e.g. "dog-dispatch:<dog>:<kind>") —
+// it must not embed dynamic detail like error text, or every call becomes a
+// unique fingerprint and dedup never triggers.
+func dogEscalateBestEffort(msg, fingerprint string) error {
+	cmd := exec.Command("gt", "escalate", "--severity", "medium", msg, "--reason", msg, "--fingerprint", fingerprint)
 	return cmd.Run()
 }
 
@@ -1274,4 +1285,3 @@ func ifStr(cond bool, ifTrue, ifFalse string) string {
 	}
 	return ifFalse
 }
-

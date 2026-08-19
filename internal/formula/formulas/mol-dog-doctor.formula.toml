@@ -24,7 +24,6 @@ This is infrastructure work. You:
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| port | config | Dolt server port (default 3307) |
 | latency_threshold | config | Latency warning threshold (default 1s) |
 
 ## Safety
@@ -63,7 +62,7 @@ Time the probe query. Warn if > {{latency_threshold}}.
 **If server unreachable:**
 This is a critical failure. Escalate immediately:
 ```bash
-gt escalate -s CRITICAL "Dolt: server unreachable on port {{port}}"
+gt escalate -s CRITICAL "Dolt: server unreachable"
 ```
 
 **Exit criteria:** Server connectivity confirmed (or escalated)."""
@@ -168,13 +167,27 @@ Orphans: {{orphan_count}}
 Status: COMPLETE"
 ```
 
-**Exit criteria:** Report sent, dog returned to kennel."""
+**Exit criteria:** Report sent."""
+
+[[steps]]
+id = "return-to-kennel"
+title = "Return to kennel"
+needs = ["report"]
+description = """
+Return to available pool (MANDATORY — the DOG_DONE mail above is a
+notification, not a state change):
+```bash
+gt dog done
+```
+This atomically clears your work assignment and returns you to idle. It is
+idempotent — safe to run even if state is already idle. Sending the
+DOG_DONE mail alone does NOT change `gt dog status`; without this command
+you remain shown as "working" until a patrol force-clears you, which is
+the exact lifecycle regression this formula must not reproduce.
+
+**Exit criteria:** `gt dog status` shows this dog idle with no work."""
 
 [vars]
-[vars.port]
-description = "Dolt server port"
-default = "3307"
-
 [vars.latency_threshold]
 description = "Latency warning threshold"
 default = "1s"

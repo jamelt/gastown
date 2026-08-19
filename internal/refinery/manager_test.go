@@ -1,8 +1,12 @@
 package refinery
 
 import (
+	"crypto/sha256"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +17,19 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
+
+func initRefineryTestBeads(t *testing.T, workDir string) *beads.Beads {
+	t.Helper()
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	sum := sha256.Sum256([]byte(workDir))
+	prefix := fmt.Sprintf("rt%x", sum[:3])
+	b := beads.NewIsolatedWithPort(workDir, port)
+	if err := b.Init(prefix); err != nil {
+		t.Skipf("bd init unavailable with isolated prefix %s: %v", prefix, err)
+	}
+	return b
+}
 
 func setupTestRegistry(t *testing.T) {
 	t.Helper()
@@ -67,6 +84,371 @@ func TestManager_SessionName(t *testing.T) {
 	}
 }
 
+func TestSafetyStopFromIssue(t *testing.T) {
+	stop := safetyStopFromIssue("", &beads.Issue{
+		ID:     "gt-testrig-refinery",
+		Labels: []string{"gt:agent", "safety_stop:hq-vmrwr"},
+	})
+	if stop == nil {
+		t.Fatal("expected safety stop")
+	}
+	if stop.AgentID != "gt-testrig-refinery" || stop.Label != "safety_stop:hq-vmrwr" || stop.StopID != "hq-vmrwr" {
+		t.Fatalf("stop = %+v", stop)
+	}
+
+	if got := safetyStopFromIssue("gt-testrig-refinery", &beads.Issue{Labels: []string{"gt:agent"}}); got != nil {
+		t.Fatalf("unexpected safety stop: %+v", got)
+	}
+}
+
+func TestActiveSafetyStopUsesRoutesPrefix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd script uses POSIX shell")
+	}
+	townRoot := t.TempDir()
+	for _, dir := range []string{filepath.Join(townRoot, "mayor"), filepath.Join(townRoot, ".beads"), filepath.Join(townRoot, "beads")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	if err := beads.WriteRoutes(filepath.Join(townRoot, ".beads"), []beads.Route{{Prefix: "bd-", Path: "beads/mayor/rig"}}); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	binDir := t.TempDir()
+	writeRoutePrefixSafetyStopMockBD(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stop, err := ActiveSafetyStop(townRoot, "beads")
+	if err != nil {
+		t.Fatalf("ActiveSafetyStop: %v", err)
+	}
+	if stop == nil {
+		t.Fatal("expected safety stop from route-prefixed refinery bead")
+	}
+	if stop.AgentID != "bd-beads-refinery" {
+		t.Fatalf("AgentID = %q, want bd-beads-refinery", stop.AgentID)
+	}
+}
+
+func TestManager_StartSafetyStoppedDoesNotCreateSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd/tmux scripts use POSIX shell")
+	}
+	setupTestRegistry(t)
+
+	townRoot := t.TempDir()
+	for _, dir := range []string{filepath.Join(townRoot, "mayor"), filepath.Join(townRoot, ".beads"), filepath.Join(townRoot, "testrig")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	writeSafetyStopMockBD(t, binDir)
+	writeSafetyStopMockTmux(t, binDir, logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mgr := NewManager(&rig.Rig{Name: "testrig", Path: filepath.Join(townRoot, "testrig")})
+	err := mgr.Start(false, "")
+	if !errors.Is(err, ErrSafetyStopped) {
+		t.Fatalf("Start error = %v, want ErrSafetyStopped", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	if strings.Contains(string(logData), "new-session") {
+		t.Fatalf("Start created a tmux session despite safety stop; log:\n%s", logData)
+	}
+}
+
+func TestManager_StartSafetyStoppedKillsLeftoverSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd/tmux scripts use POSIX shell")
+	}
+	setupTestRegistry(t)
+
+	townRoot := t.TempDir()
+	for _, dir := range []string{filepath.Join(townRoot, "mayor"), filepath.Join(townRoot, ".beads"), filepath.Join(townRoot, "testrig")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	writeSafetyStopMockBD(t, binDir)
+	writeSafetyStopRunningMockTmux(t, binDir, logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mgr := NewManager(&rig.Rig{Name: "testrig", Path: filepath.Join(townRoot, "testrig")})
+	err := mgr.Start(false, "")
+	if !errors.Is(err, ErrSafetyStopped) {
+		t.Fatalf("Start error = %v, want ErrSafetyStopped", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "kill-session") {
+		t.Fatalf("Start did not kill leftover safety-stopped session; log:\n%s", logData)
+	}
+	if strings.Contains(log, "new-session") {
+		t.Fatalf("Start created a tmux session despite safety stop; log:\n%s", logData)
+	}
+}
+
+func TestManager_StartForkRigDoesNotCreateSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock tmux script uses POSIX shell")
+	}
+	setupTestRegistry(t)
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	writeRigConfig(t, rigPath, `{"upstream_url":"https://token@example.com/upstream/repo.git"}`)
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	writeSafetyStopMockTmux(t, binDir, logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mgr := NewManager(&rig.Rig{Name: "testrig", Path: rigPath})
+	err := mgr.Start(false, "")
+	if !errors.Is(err, ErrForkRig) {
+		t.Fatalf("Start error = %v, want ErrForkRig", err)
+	}
+	if strings.Contains(err.Error(), "token") {
+		t.Fatalf("fork error leaked credential: %v", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	if strings.Contains(string(logData), "new-session") {
+		t.Fatalf("Start created a tmux session for fork rig; log:\n%s", logData)
+	}
+}
+
+func TestManager_ForkRigAllowsExplicitLocalMergeQueue(t *testing.T) {
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigConfig(t, rigPath, `{"upstream_url":"https://github.com/upstream/repo"}`)
+	if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(`{"merge_queue":{"enabled":true}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(&rig.Rig{Name: "testrig", Path: rigPath})
+	if err := mgr.ForkRigStartError(); err != nil {
+		t.Fatalf("explicit local merge queue should allow fork-backed Refinery: %v", err)
+	}
+}
+
+func TestManager_IdentityPreflightFailureDoesNotCreateSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd/tmux scripts use POSIX shell")
+	}
+	setupTestRegistry(t)
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+	for _, dir := range []string{filepath.Join(townRoot, "mayor"), filepath.Join(townRoot, ".beads"), filepath.Join(rigPath, ".beads")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeRigConfig(t, rigPath, `{"beads":{"prefix":"gt"}}`)
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	writeSafetyStopMockTmux(t, binDir, logPath)
+	bdScript := `#!/bin/sh
+if [ "$1" = "--allow-stale" ]; then shift; fi
+case "$1" in
+  version) exit 0 ;;
+  show) echo '[]'; exit 0 ;;
+  create) echo 'identity write refused' >&2; exit 9 ;;
+  *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mgr := NewManager(&rig.Rig{Name: "testrig", Path: rigPath})
+	err := mgr.Start(false, "")
+	if err == nil || !strings.Contains(err.Error(), "identity preflight failed") {
+		t.Fatalf("Start error = %v, want identity preflight failure", err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logBytes), "new-session") {
+		t.Fatalf("manager session started despite identity failure:\n%s", logBytes)
+	}
+}
+
+func TestManager_StartAllowingForkRigStillHonorsSafetyStop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd/tmux scripts use POSIX shell")
+	}
+	setupTestRegistry(t)
+
+	townRoot := t.TempDir()
+	for _, dir := range []string{filepath.Join(townRoot, "mayor"), filepath.Join(townRoot, ".beads"), filepath.Join(townRoot, "testrig")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	writeRigConfig(t, filepath.Join(townRoot, "testrig"), `{"upstream_url":"https://github.com/upstream/repo"}`)
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	writeSafetyStopMockBD(t, binDir)
+	writeSafetyStopMockTmux(t, binDir, logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mgr := NewManager(&rig.Rig{Name: "testrig", Path: filepath.Join(townRoot, "testrig")})
+	err := mgr.StartAllowingForkRig(false, "")
+	if !errors.Is(err, ErrSafetyStopped) {
+		t.Fatalf("StartAllowingForkRig error = %v, want ErrSafetyStopped", err)
+	}
+}
+
+func writeRigConfig(t *testing.T, rigPath, data string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(data), 0o644); err != nil {
+		t.Fatalf("write rig config: %v", err)
+	}
+}
+
+func writeSafetyStopMockBD(t *testing.T, binDir string) {
+	t.Helper()
+	script := `#!/bin/sh
+cmd=""
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) cmd="$arg"; break ;;
+  esac
+done
+case "$cmd" in
+  version)
+    echo "bd test"
+    ;;
+  show)
+    printf '%s\n' '[{"id":"gt-testrig-refinery","title":"Refinery","issue_type":"task","labels":["gt:agent","safety_stop:hq-vmrwr"],"status":"open","description":"role_type: refinery\nrig: testrig\nagent_state: idle"}]'
+    ;;
+  *)
+    echo "unexpected bd command: $*" >&2
+    exit 9
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+}
+
+func writeRoutePrefixSafetyStopMockBD(t *testing.T, binDir string) {
+	t.Helper()
+	script := `#!/bin/sh
+cmd=""
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) cmd="$arg"; break ;;
+  esac
+done
+case "$cmd" in
+  version)
+    echo "bd test"
+    ;;
+  show)
+    case "$*" in
+      *bd-beads-refinery*)
+        printf '%s\n' '[{"id":"bd-beads-refinery","title":"Refinery","issue_type":"task","labels":["gt:agent","safety_stop:hq-vmrwr"],"status":"open","description":"role_type: refinery\nrig: beads\nagent_state: idle"}]'
+        ;;
+      *)
+        printf '%s\n' '[]'
+        ;;
+    esac
+    ;;
+  *)
+    echo "unexpected bd command: $*" >&2
+    exit 9
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+}
+
+func writeSafetyStopMockTmux(t *testing.T, binDir, logPath string) {
+	t.Helper()
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$1" in
+  has-session)
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+}
+
+func writeSafetyStopRunningMockTmux(t *testing.T, binDir, logPath string) {
+	t.Helper()
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$1" in
+  has-session)
+    exit 0
+    ;;
+  display-message)
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+}
+
 func TestManager_IsRunning_NoSession(t *testing.T) {
 	mgr, _ := setupTestManager(t)
 
@@ -114,12 +496,7 @@ func TestManager_Queue_NoBeads(t *testing.T) {
 
 func TestManager_Queue_FiltersClosedMergeRequests(t *testing.T) {
 	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		t.Skipf("bd init unavailable in test environment: %v", err)
-	}
+	b := initRefineryTestBeads(t, rigPath)
 
 	openIssue, err := b.Create(beads.CreateOptions{
 		Title:  "Open MR",
@@ -229,12 +606,7 @@ func TestCompareScoredIssues_UsesDeterministicIDTieBreaker(t *testing.T) {
 
 func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		t.Skipf("bd init unavailable: %v", err)
-	}
+	b := initRefineryTestBeads(t, rigPath)
 
 	// Create a source issue
 	srcIssue, err := b.Create(beads.CreateOptions{
@@ -277,14 +649,216 @@ func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 	}
 }
 
+func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	b := initRefineryTestBeads(t, rigPath)
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	agentIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Polecat nux",
+		Labels:      []string{"gt:agent"},
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: null",
+	})
+	if err != nil {
+		t.Fatalf("create agent issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/test/gt-xyz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main\nagent_bead: " + agentIssue.ID,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
+		t.Fatalf("set active_mr: %v", err)
+	}
+
+	result, err := mgr.RejectMR(mrIssue.ID, "policy failed", false)
+	if err != nil {
+		t.Fatalf("RejectMR() error: %v", err)
+	}
+	if result.Status != MRClosed {
+		t.Fatalf("RejectMR() status = %s, want closed", result.Status)
+	}
+
+	assertAgentActiveMR(t, b, agentIssue.ID, "")
+	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusOpen))
+	assertMRCloseReason(t, b, mrIssue.ID, string(CloseReasonRejected))
+}
+
+func TestManager_PostMerge_ClearsMatchingActiveMRAndClosesSource(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	b := initRefineryTestBeads(t, rigPath)
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	agentIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Polecat nux",
+		Labels:      []string{"gt:agent"},
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: null",
+	})
+	if err != nil {
+		t.Fatalf("create agent issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/test/gt-xyz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main\nagent_bead: " + agentIssue.ID + "\nmerge_commit: abc123",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
+		t.Fatalf("set active_mr: %v", err)
+	}
+
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() error: %v", err)
+	}
+	if !result.MRClosed || !result.SourceIssueClosed {
+		t.Fatalf("PostMerge() result = %+v, want MR/source closed", result)
+	}
+
+	assertAgentActiveMR(t, b, agentIssue.ID, "")
+	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusClosed))
+	assertMRCloseReason(t, b, mrIssue.ID, string(CloseReasonMerged))
+}
+
+func TestManager_PostMerge_ClosesWorkBeadFromAgentFallbackBeforeActiveMRClear(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	b := initRefineryTestBeads(t, rigPath)
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	agentIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Polecat nux",
+		Labels:      []string{"gt:agent"},
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: null",
+	})
+	if err != nil {
+		t.Fatalf("create agent issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/test/gt-xyz\nworker: test\ntarget: main\nagent_bead: " + agentIssue.ID + "\nmerge_commit: abc123",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	branch := "polecat/test/gt-xyz"
+	lastSourceIssue := srcIssue.ID
+	if err := b.UpdateAgentDescriptionFields(agentIssue.ID, beads.AgentFieldUpdates{Branch: &branch, LastSourceIssue: &lastSourceIssue}); err != nil {
+		t.Fatalf("set fallback metadata: %v", err)
+	}
+	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
+		t.Fatalf("set active_mr: %v", err)
+	}
+
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() error: %v", err)
+	}
+	if !result.MRClosed || !result.SourceIssueClosed {
+		t.Fatalf("PostMerge() result = %+v, want MR/source closed", result)
+	}
+	if result.SourceIssueID != srcIssue.ID {
+		t.Fatalf("SourceIssueID = %q, want %q", result.SourceIssueID, srcIssue.ID)
+	}
+
+	assertAgentActiveMR(t, b, agentIssue.ID, "")
+	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusClosed))
+	assertMRCloseReason(t, b, mrIssue.ID, string(CloseReasonMerged))
+}
+
+func TestManager_PostMerge_AlreadyClosedMRRetriesActiveMRCleanup(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	b := initRefineryTestBeads(t, rigPath)
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	agentIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Polecat nux",
+		Labels:      []string{"gt:agent"},
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: null",
+	})
+	if err != nil {
+		t.Fatalf("create agent issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Already merged MR",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/test/gt-xyz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main\nagent_bead: " + agentIssue.ID + "\nclose_reason: merged",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
+		t.Fatalf("set active_mr: %v", err)
+	}
+	if err := b.CloseWithReason("merged", mrIssue.ID); err != nil {
+		t.Fatalf("close MR issue: %v", err)
+	}
+
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() error: %v", err)
+	}
+	if !result.MRClosed || !result.SourceIssueClosed {
+		t.Fatalf("PostMerge() result = %+v, want MR/source closed", result)
+	}
+
+	assertAgentActiveMR(t, b, agentIssue.ID, "")
+	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusClosed))
+}
+
+func TestManager_TerminalCloseDoesNotClearNewerActiveMR(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	b := initRefineryTestBeads(t, rigPath)
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	agentIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Polecat nux",
+		Labels:      []string{"gt:agent"},
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: gt-wisp-newer",
+	})
+	if err != nil {
+		t.Fatalf("create agent issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/test/gt-xyz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main\nagent_bead: " + agentIssue.ID,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	if _, err := mgr.RejectMR(mrIssue.ID, "policy failed", false); err != nil {
+		t.Fatalf("RejectMR() error: %v", err)
+	}
+
+	assertAgentActiveMR(t, b, agentIssue.ID, "gt-wisp-newer")
+	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusOpen))
+}
+
 func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		t.Skipf("bd init unavailable: %v", err)
-	}
+	b := initRefineryTestBeads(t, rigPath)
 
 	// Create and close an MR bead
 	mrIssue, err := b.Create(beads.CreateOptions{
@@ -299,10 +873,10 @@ func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 		t.Fatalf("close MR issue: %v", err)
 	}
 
-	// PostMerge should fail since MR is already closed and won't be in queue
+	// Already-closed MRs without a merged close_reason are not safe to post-merge.
 	_, err = mgr.PostMerge(mrIssue.ID)
 	if err == nil {
-		t.Error("PostMerge() expected error for already-closed MR")
+		t.Error("PostMerge() expected error for already-closed MR without merged close_reason")
 	}
 }
 
@@ -312,5 +886,43 @@ func TestManager_PostMerge_NotFound(t *testing.T) {
 	_, err := mgr.PostMerge("nonexistent-mr-id")
 	if err == nil {
 		t.Error("PostMerge() expected error for nonexistent MR")
+	}
+}
+
+func assertAgentActiveMR(t *testing.T, b *beads.Beads, agentID string, want string) {
+	t.Helper()
+	issue, err := b.Show(agentID)
+	if err != nil {
+		t.Fatalf("show agent %s: %v", agentID, err)
+	}
+	fields := beads.ParseAgentFields(issue.Description)
+	if fields.ActiveMR != want {
+		t.Fatalf("agent active_mr = %q, want %q", fields.ActiveMR, want)
+	}
+}
+
+func assertIssueStatus(t *testing.T, b *beads.Beads, issueID string, want string) {
+	t.Helper()
+	issue, err := b.Show(issueID)
+	if err != nil {
+		t.Fatalf("show issue %s: %v", issueID, err)
+	}
+	if issue.Status != want {
+		t.Fatalf("issue %s status = %q, want %q", issueID, issue.Status, want)
+	}
+}
+
+func assertMRCloseReason(t *testing.T, b *beads.Beads, mrID string, want string) {
+	t.Helper()
+	issue, err := b.Show(mrID)
+	if err != nil {
+		t.Fatalf("show MR %s: %v", mrID, err)
+	}
+	fields := beads.ParseMRFields(issue)
+	if fields == nil {
+		t.Fatalf("MR %s missing fields", mrID)
+	}
+	if fields.CloseReason != want {
+		t.Fatalf("MR close_reason = %q, want %q", fields.CloseReason, want)
 	}
 }

@@ -88,6 +88,76 @@ func TestRenderRole_Polecat(t *testing.T) {
 	}
 }
 
+func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	output, err := tmpl.RenderRole("polecat", RoleData{
+		Role:          "polecat",
+		RigName:       "myrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/myrig/polecats/TestCat",
+		DefaultBranch: "main",
+		IsForkRig:     true,
+		UpstreamURL:   "https://example.com/upstream/repo.git",
+		Polecat:       "TestCat",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	})
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	for _, want := range []string{"Fork-backed rig", "GitHub PR/no-merge workflow", "Do NOT submit upstream changes to the local Refinery/MQ"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("fork polecat output missing %q:\n%s", want, output)
+		}
+	}
+	for _, forbidden := range []string{"Merge Queue Workflow (gastown, beads repos)", "Refinery merges to main", "Merges your work when complete"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("fork polecat output contains stale MQ guidance %q:\n%s", forbidden, output)
+		}
+	}
+}
+
+func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	output, err := tmpl.RenderRole("crew", RoleData{
+		Role:          "crew",
+		RigName:       "myrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/myrig/crew/alex",
+		DefaultBranch: "main",
+		IsForkRig:     true,
+		UpstreamURL:   "https://example.com/upstream/repo.git",
+		Polecat:       "alex",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	})
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	for _, want := range []string{"Fork-backed rig", "Fork-Backed PR Workflow", "git fetch upstream main", "gh pr create --base main"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("fork crew output missing %q:\n%s", want, output)
+		}
+	}
+	for _, forbidden := range []string{"Crew workers push directly to main", "git push                    # Direct to main", "Refinery immediately", "origin/main", "commit directly to main"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("fork crew output contains stale direct-main guidance %q:\n%s", forbidden, output)
+		}
+	}
+}
+
 func TestRenderRole_Deacon(t *testing.T) {
 	tmpl, err := New()
 	if err != nil {
@@ -534,6 +604,38 @@ func TestRoleNames(t *testing.T) {
 	for i, name := range names {
 		if name != expected[i] {
 			t.Errorf("RoleNames()[%d] = %q, want %q", i, name, expected[i])
+		}
+	}
+}
+
+func TestRenderRole_BootUsesNudgeNotRawTmux(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	output, err := tmpl.RenderRole("boot", RoleData{
+		Role:          "boot",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/deacon/dogs/boot",
+		DefaultBranch: "main",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	})
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	if !strings.Contains(output, `gt nudge --mode=immediate deacon "Boot wake: check your inbox"`) {
+		t.Fatalf("boot template missing immediate nudge wake guidance:\n%s", output)
+	}
+	if !strings.Contains(output, "Boot hooks block it") {
+		t.Fatalf("boot template missing raw tmux block rationale:\n%s", output)
+	}
+	for _, forbidden := range []string{"Escape +", "tmux send-keys -t"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("boot template contains forbidden raw tmux guidance %q:\n%s", forbidden, output)
 		}
 	}
 }

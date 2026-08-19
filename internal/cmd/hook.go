@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -154,6 +153,15 @@ var (
 	hookDryRun  bool
 	hookForce   bool
 	hookClear   bool
+
+	// hookConfirmHumanApproved confirms a human has freshly reviewed and
+	// approved THIS dispatch of an hq-1s4w hard-prohibition-labeled bead
+	// (gt-cpdg, mirroring gt-b2qi's --confirm-human-approved on gt sling).
+	// gt hook is documented as "just attach, no action", but an already-
+	// running agent picks up hooked work on its next gt prime with no
+	// further nudge — the same practical dispatch outcome as gt sling for a
+	// live target, so it needs the same gate.
+	hookConfirmHumanApproved bool
 )
 
 func init() {
@@ -163,6 +171,7 @@ func init() {
 	hookCmd.Flags().BoolVarP(&hookDryRun, "dry-run", "n", false, "Show what would be done")
 	hookCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Replace existing incomplete hooked bead")
 	hookCmd.Flags().BoolVar(&hookClear, "clear", false, "Clear your hook (alias for 'gt unhook')")
+	hookCmd.Flags().BoolVar(&hookConfirmHumanApproved, "confirm-human-approved", false, "Confirm fresh human approval to dispatch an hq-1s4w hard-prohibition-labeled bead (required per-dispatch, not inherited from a prior approval)")
 
 	// --json flag for status output (used when no args, i.e., gt hook --json)
 	hookCmd.Flags().BoolVar(&moleculeJSON, "json", false, "Output as JSON (for status)")
@@ -171,6 +180,7 @@ func init() {
 
 	// Flags for attach subcommand
 	hookAttachCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Replace existing incomplete hooked bead")
+	hookAttachCmd.Flags().BoolVar(&hookConfirmHumanApproved, "confirm-human-approved", false, "Confirm fresh human approval to dispatch an hq-1s4w hard-prohibition-labeled bead (required per-dispatch, not inherited from a prior approval)")
 
 	// Flags for detach subcommand (mirror unsling flags)
 	hookDetachCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Detach even if work is incomplete")
@@ -242,14 +252,26 @@ func runHook(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("polecats cannot hook work (use gt done for handoff)")
 	}
 
-	// Verify the bead exists
-	if err := verifyBeadExists(beadID); err != nil {
+	// Verify the bead exists and fetch its details for the hard-prohibition
+	// check below.
+	info, err := getBeadInfo(beadID)
+	if err != nil {
 		return err
+	}
+
+	// hq-1s4w hard-prohibition guard (gt-cpdg, following the gt-b2qi
+	// pattern). gt hook attaches beads to a live agent's hook with no gate,
+	// even though an idle agent picks up hooked work on its next gt prime
+	// with no further nudge needed — the same practical dispatch outcome as
+	// gt sling. Unconditional: not gated by --force, which is a routine
+	// stale-hook escape hatch and must never silently double as approval to
+	// dispatch credentials/production/money-policy/human-decision work.
+	if err := checkHardProhibition(info.Title, info.Description, info.Labels, hookConfirmHumanApproved); err != nil {
+		return fmt.Errorf("%w\nTo hook: re-run with --confirm-human-approved", err)
 	}
 
 	// Determine agent identity (target or self)
 	var agentID string
-	var err error
 	if targetAgent != "" {
 		agentID, _, _, err = resolveTargetAgent(targetAgent)
 		if err != nil {
@@ -323,15 +345,7 @@ func runHook(_ *cobra.Command, args []string) error {
 			fmt.Printf("%s Replacing completed bead %s...\n", style.Dim.Render("ℹ"), existing.ID)
 			if !hookDryRun {
 				if hasAttachment {
-					// Close completed molecule bead (use bd close --force for pinned)
-					closeArgs := []string{"close", existing.ID, "--force",
-						"--reason=Auto-replaced by gt hook (molecule complete)"}
-					if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
-						closeArgs = append(closeArgs, "--session="+sessionID)
-					}
-					closeCmd := exec.Command("bd", closeArgs...)
-					closeCmd.Stderr = os.Stderr
-					if err := closeCmd.Run(); err != nil {
+					if err := closeCompletedHookedMolecule(workDir, existing.ID); err != nil {
 						return fmt.Errorf("closing completed bead %s: %w", existing.ID, err)
 					}
 				} else {
@@ -442,6 +456,14 @@ func runHook(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+func closeCompletedHookedMolecule(workDir, beadID string) error {
+	closeArgs := []string{"close", beadID, "--force", "--reason=Auto-replaced by gt hook (molecule complete)"}
+	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
+		closeArgs = append(closeArgs, "--session="+sessionID)
+	}
+	return BdCmd(closeArgs...).Dir(workDir).WithAutoCommit().Run()
+}
+
 // checkPinnedBeadComplete checks if a pinned bead's attached molecule is 100% complete.
 // Returns (isComplete, hasAttachment):
 // - isComplete=true if no molecule attached OR all molecule steps are closed
@@ -496,32 +518,17 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}
-	if len(args) > 0 && !isTownLevelRole(target) {
+	if len(args) > 0 {
 		townRoot, townErr := workspace.FindFromCwd()
 		if townErr == nil && townRoot != "" {
-			agentBeadID := agentIDToBeadID(target, townRoot)
-			if agentBeadID != "" {
-				rigName := strings.Split(target, "/")[0]
-				var fallbackPath string
-				if rigName == "mayor" || rigName == "deacon" {
-					fallbackPath = townRoot
-				} else {
-					fallbackPath = filepath.Join(townRoot, rigName, "mayor", "rig")
-				}
-				workDir = beads.ResolveHookDir(townRoot, agentBeadID, fallbackPath)
-			}
+			workDir = resolveHookLookupWorkDir(workDir, target, townRoot)
 		}
 	}
 
 	b := beads.New(workDir)
-	// Query for hooked beads assigned to the target
-	hookedBeads, err := b.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: target,
-		Priority: -1,
-	})
+	hookedBeads, err := listAssignedActiveWork(b, target)
 	if err != nil {
-		return fmt.Errorf("listing hooked beads: %w", err)
+		return fmt.Errorf("listing active hook work: %w", err)
 	}
 
 	// If nothing found in local beads, also check town beads for hooked convoys.
@@ -534,13 +541,8 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 			townBeadsDir := filepath.Join(townRoot, ".beads")
 			if _, err := os.Stat(townBeadsDir); err == nil {
 				townBeads := beads.New(townBeadsDir)
-				townHooked, err := townBeads.List(beads.ListOptions{
-					Status:   beads.StatusHooked,
-					Assignee: target,
-					Priority: -1,
-				})
-				if err == nil && len(townHooked) > 0 {
-					hookedBeads = townHooked
+				if townWork, err := listAssignedActiveWork(townBeads, target); err == nil && len(townWork) > 0 {
+					hookedBeads = townWork
 				}
 			}
 
@@ -606,6 +608,9 @@ func normalizeHookShowTarget(target string) string {
 	if target == "" {
 		return target
 	}
+	if target == "." || target == ".." || (strings.ContainsAny(target, `/\\`) && !safeAgentTargetPath(target)) {
+		return target
+	}
 
 	// Use the same role/path resolver as dispatching commands, then convert
 	// the resulting tmux session back to a canonical assignee address.
@@ -625,7 +630,7 @@ func normalizeHookShowTarget(target string) string {
 	// This handles the case where the session name roundtrip fails due to
 	// uninitialized prefix registry. See GH#2371.
 	parts := strings.Split(target, "/")
-	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+	if len(parts) == 2 && safeAgentPathSegment(parts[0]) && safeAgentPathSegment(parts[1]) {
 		name := parts[1]
 		// Check for known roles — don't expand those
 		switch strings.ToLower(name) {

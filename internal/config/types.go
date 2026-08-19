@@ -68,6 +68,22 @@ type TownSettings struct {
 	// Example: {"mayor": "claude-opus", "witness": "claude-haiku", "polecat": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
+	// RoleAgentBackups maps each role to its ordered fallback agent aliases.
+	// The primary remains in RoleAgents; entries here are tried strictly in
+	// order when the active provider reports a hard quota/usage limit.
+	// Example: {"mayor": ["codex-sol-high", "openrouter-qwen38-max"]}
+	RoleAgentBackups map[string][]string `json:"role_agent_backups,omitempty"`
+
+	// AgentBackups defines ordered fallback aliases for explicitly selected
+	// agents that are not acting as the role default (for example an Expeditor
+	// formula or council convergence chair running in a polecat session).
+	// Example: {"claude-opus-5": ["codex-sol-high", "openrouter-qwen38-max"]}
+	AgentBackups map[string][]string `json:"agent_backups,omitempty"`
+
+	// AgentFailover controls automatic cross-provider fallback. It is opt-in;
+	// declaring backup chains alone never restarts a session.
+	AgentFailover *AgentFailoverConfig `json:"agent_failover,omitempty"`
+
 	// CrewAgents maps individual crew worker names to agent aliases at the town level.
 	// This allows town-wide per-crew agent assignment without modifying each rig's config.
 	// Resolution: --agent flag > rig WorkerAgents > town CrewAgents > role agents > defaults.
@@ -129,12 +145,34 @@ type TownSettings struct {
 // NewTownSettings creates a new TownSettings with defaults.
 func NewTownSettings() *TownSettings {
 	return &TownSettings{
-		Type:         "town-settings",
-		Version:      CurrentTownSettingsVersion,
-		DefaultAgent: "claude",
-		Agents:       make(map[string]*RuntimeConfig),
-		RoleAgents:   make(map[string]string),
+		Type:             "town-settings",
+		Version:          CurrentTownSettingsVersion,
+		DefaultAgent:     "claude",
+		Agents:           make(map[string]*RuntimeConfig),
+		RoleAgents:       make(map[string]string),
+		RoleAgentBackups: make(map[string][]string),
+		AgentBackups:     make(map[string][]string),
 	}
+}
+
+// AgentFailoverConfig controls provider-aware runtime fallback.
+type AgentFailoverConfig struct {
+	// Enabled allows gt quota failover (and the opt-in quota dog) to restart a
+	// hard-limited session with the next configured agent.
+	Enabled bool `json:"enabled"`
+
+	// ProviderCooldown is how long a provider is skipped after a hard quota
+	// signal. Default: "1h".
+	ProviderCooldown string `json:"provider_cooldown,omitempty"`
+
+	// MaxPerSession caps provider changes for one live tmux session. Default: 2.
+	MaxPerSession int `json:"max_per_session,omitempty"`
+
+	// IncludeNearLimit lets failover act on near-limit warning signals
+	// (approaching, not yet at, the hard quota wall), not just confirmed
+	// hard limits. Off by default: a session only fails over once it has
+	// actually hit the wall.
+	IncludeNearLimit bool `json:"include_near_limit,omitempty"`
 }
 
 // WebTimeoutsConfig configures command execution timeouts for the web dashboard.
@@ -696,6 +734,14 @@ type RigSettings struct {
 	// Example: {"witness": "claude-haiku", "polecat": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
+	// RoleAgentBackups overrides the town's ordered backup chain for a role in
+	// this rig. If a role is absent, the town chain is inherited.
+	RoleAgentBackups map[string][]string `json:"role_agent_backups,omitempty"`
+
+	// AgentBackups overrides town fallback aliases for explicitly selected
+	// agents in this rig (for example formula-level model selection).
+	AgentBackups map[string][]string `json:"agent_backups,omitempty"`
+
 	// WorkerAgents maps individual crew worker names to agent aliases.
 	// Allows per-worker agent selection, overriding RoleAgents["crew"].
 	// Takes precedence over RoleAgents["crew"] but is overridden by explicit --agent flags.
@@ -731,6 +777,11 @@ type RuntimeConfig struct {
 	// Known values: "claude", "codex", "generic". Default: "claude".
 	Provider string `json:"provider,omitempty"`
 
+	// QuotaProvider identifies the shared billing/allocation pool used for
+	// provider-aware fallback (for example "anthropic", "openai", or
+	// "openrouter"). Unlike Provider, this does not control runtime behavior.
+	QuotaProvider string `json:"quota_provider,omitempty"`
+
 	// Command is the CLI command to invoke (e.g., "claude", "aider").
 	// Default: "claude"
 	Command string `json:"command,omitempty"`
@@ -752,7 +803,7 @@ type RuntimeConfig struct {
 
 	// PromptMode controls how prompts are passed to the runtime.
 	// Supported values: "arg" (append prompt arg), "none" (ignore prompt).
-	// Default: "arg" for claude/generic, "none" for codex.
+	// Default: "arg" for built-in interactive runtimes.
 	PromptMode string `json:"prompt_mode,omitempty"`
 
 	// Session config controls environment integration for runtime session IDs.
@@ -972,6 +1023,7 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	if rc.Args == nil {
 		rc.Args = defaultRuntimeArgs(rc.Provider)
 	}
+	rc.Args = ensureCodexAutomationArgs(rc.Command, rc.Args)
 
 	if rc.PromptMode == "" {
 		rc.PromptMode = defaultPromptMode(rc.Provider)
@@ -1037,6 +1089,32 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	}
 
 	return rc
+}
+
+const codexUpdateCheckKey = "check_for_update_on_startup"
+const codexUpdateCheckConfig = codexUpdateCheckKey + "=false"
+
+func ensureCodexAutomationArgs(command string, args []string) []string {
+	if !isCodexRuntime(command) || hasCodexUpdateCheckConfig(args) {
+		return args
+	}
+	result := make([]string, 0, len(args)+2)
+	result = append(result, "-c", codexUpdateCheckConfig)
+	result = append(result, args...)
+	return result
+}
+
+func isCodexRuntime(command string) bool {
+	return filepath.Base(command) == string(AgentCodex)
+}
+
+func hasCodexUpdateCheckConfig(args []string) bool {
+	for _, arg := range args {
+		if arg == codexUpdateCheckKey || strings.HasPrefix(arg, codexUpdateCheckKey+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func defaultRuntimeCommand(provider string) string {
@@ -1542,6 +1620,30 @@ type QuotaState struct {
 	// keychain entry — not the target's. SyncSwappedTokens uses this map
 	// to propagate fresh tokens to all target keychain entries.
 	ActiveSwaps map[string]string `json:"active_swaps,omitempty"` // targetConfigDir -> sourceAccountHandle
+
+	// Providers tracks temporary cross-provider cooldowns after hard quota
+	// signals. This is separate from Claude account rotation above.
+	Providers map[string]ProviderQuotaState `json:"providers,omitempty"`
+
+	// AgentSessions records successful cross-provider transitions per tmux
+	// session so bounded fallback survives daemon restarts.
+	AgentSessions map[string]AgentFailoverSessionState `json:"agent_sessions,omitempty"`
+}
+
+// ProviderQuotaState records a provider-wide hard-quota cooldown.
+type ProviderQuotaState struct {
+	LimitedAt     string `json:"limited_at,omitempty"`
+	CooldownUntil string `json:"cooldown_until,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	SourceSession string `json:"source_session,omitempty"`
+}
+
+// AgentFailoverSessionState records the current fallback position for a tmux session.
+type AgentFailoverSessionState struct {
+	CurrentAgent   string `json:"current_agent,omitempty"`
+	FailoverCount  int    `json:"failover_count,omitempty"`
+	LastFailoverAt string `json:"last_failover_at,omitempty"`
+	LastCause      string `json:"last_cause,omitempty"`
 }
 
 // AccountQuotaStatus is the rate-limit status of an account.

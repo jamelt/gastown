@@ -73,7 +73,7 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 	cmd.Dir = workDir
 	util.SetDetachedProcessGroup(cmd)
 
-	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, extraEnv)
+	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -119,31 +119,22 @@ func firstArg(args []string) string {
 	return ""
 }
 
-func bdSubprocessEnv(baseEnv []string, beadsDir string, extraEnv []string) []string {
-	env := filterBdTargetEnv(baseEnv)
+func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv []string) []string {
+	base := append(append([]string{}, baseEnv...), extraEnv...)
+	mode := beads.MutationRouting
+	if readOnly {
+		mode = beads.ReadOnlyRouting
+	}
 	if beadsDir != "" {
-		env = append(env, "BEADS_DIR="+beadsDir)
-		if dbEnv := beads.DatabaseEnv(beadsDir); dbEnv != "" {
-			env = append(env, dbEnv)
+		if readOnly {
+			mode = beads.ReadOnlyPinned
+		} else {
+			mode = beads.MutationPinned
 		}
 	}
-	env = append(env, "BEADS_NO_AUTO_IMPORT=1")
-	env = append(env, extraEnv...)
+	env := beads.EnvForSubprocessMode(base, beadsDir, mode)
 	env = append(env, telemetry.OTELEnvForSubprocess()...)
 	return env
-}
-
-func filterBdTargetEnv(env []string) []string {
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		if strings.HasPrefix(entry, "BEADS_DIR=") ||
-			strings.HasPrefix(entry, "BEADS_DB=") ||
-			strings.HasPrefix(entry, "BEADS_DOLT_SERVER_DATABASE=") {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	return filtered
 }
 
 // bdReadCtx returns a context with the standard bd read timeout.

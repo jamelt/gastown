@@ -9,10 +9,11 @@ these commands, inspects results, and uses judgment for anomalies.
 
 This is infrastructure cleanup work:
 1. Scan all production databases for candidates
-2. Reap (close) wisps past max_age whose parent is closed/missing
+2. Reap (close) wisps past max_age whose parent is closed/missing, plus step-wisps whose parent molecule is already closed
 3. Purge (delete) closed wisps past purge_age + old closed mail
-4. Auto-close stale issues (>stale_issue_age, not P0/P1, not epics, no active deps)
-5. Report findings and flag anomalies
+4. Auto-close stale issues (>stale_issue_age, not P0/P1, not epics/convoys, no active deps)
+5. Close completed convoys via `gt convoy check` (tracked-bead status, never staleness)
+6. Report findings and flag anomalies
 
 ## Variables
 
@@ -22,10 +23,9 @@ This is infrastructure cleanup work:
 | purge_age | config | Max closed wisp age before purging (default 7d) |
 | stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
 | mail_delete_age | config | Max closed mail age before purging (default 7d) |
-| alert_threshold | config | Open wisp count that triggers escalation (default 500) |
+| alert_threshold | config | Reap-candidate backlog count, per database, that triggers escalation (default 150) |
 | dry_run | config | If "true", report without acting |
 | databases | config | Comma-separated DB list (default: auto-discover) |
-| dolt_port | config | Dolt server port (default 3307) |
 | db_delay | config | Delay between databases to reduce Dolt load (default 250ms) |
 
 ## Safety
@@ -38,16 +38,27 @@ issues that are not P0/P1, not epics, and have no active dependencies.
 
 The Dog should watch for and flag:
 - Dangling parent references (wisps referencing purged parents)
-- Sudden spikes in reap candidates (suggests a wisp lifecycle problem)
-- Open wisp counts exceeding alert_threshold
+- `reap_candidate_spike` anomalies (a database's `reap_candidates` exceeds
+  alert_threshold — suggests stale wisps aren't getting cleaned up)
 - Dolt commit failures (data may not be persisted)
+
+Total open wisp volume (`open_wisps`) is NOT by itself an anomaly — it scales
+with healthy town activity and stays high in a normal, busy town. Two prior
+fixes tried alerting on it directly (500->800->3000) and each was outgrown by
+normal growth, producing a recurring false-alarm escalation flood (see
+gt-reaper-alert-flood-root-cause). Only flag `open_wisps` if a single database
+looks like truly unbounded/runaway growth — e.g. far beyond any plausible
+healthy volume for this town, suggesting a leak of wisps stuck behind a
+parent that never closes (those are invisible to reap_candidates by design).
+This is a judgment call, not a hard threshold — when in doubt, don't escalate
+on volume alone.
 
 NOT anomalies (do NOT escalate these):
 - Scan/reap count mismatch (scan finds N, reap closes M < N): this is a benign
   race condition — the witness closes wisps for dead sessions concurrently.
   This is expected behavior, not a bug."""
 formula = "mol-dog-reaper"
-version = 2
+version = 3
 
 [squash]
 trigger = "on_complete"
@@ -62,13 +73,13 @@ Discover databases and count candidates for each operation.
 
 **1. List databases to scan:**
 ```bash
-gt reaper databases --port={{dolt_port}} --json
+gt reaper databases --json
 ```
 Or use configured database list from {{databases}} variable.
 
 **2. Scan each database:**
 ```bash
-gt reaper scan --db=<name> --port={{dolt_port}} \\
+gt reaper scan --db=<name> \\
   --max-age={{max_age}} --purge-age={{purge_age}} \\
   --mail-age={{mail_delete_age}} --stale-age={{stale_issue_age}} \\
   --db-delay={{db_delay}} \\
@@ -76,13 +87,18 @@ gt reaper scan --db=<name> --port={{dolt_port}} \\
 ```
 
 **3. Inspect results for anomalies:**
-- Check the `anomalies` array in the JSON output
+- Check the `anomalies` array in the JSON output (per database)
+- Treat an absent `molecule_step_candidates` field as zero
 - Flag any `dangling_parent_ref` anomalies — these indicate wisps with
   parent dependency records pointing to purged/missing parents
-- If `open_wisps` exceeds {{alert_threshold}}, escalate
+- Flag any `reap_candidate_spike` anomalies — this database's `reap_candidates`
+  exceeded {{alert_threshold}}, i.e. stale wisps are backing up
+- Do NOT flag `open_wisps` alone — see "Anomaly Detection" above. Only note
+  it if a single database's volume looks like genuine unbounded/runaway
+  growth (use judgment, not a threshold)
 
 **4. Decide whether to proceed:**
-- If no candidates found across all databases, skip remaining steps
+- If no candidates found across all databases, including `molecule_step_candidates`, skip remaining steps
 - If anomalies are severe, consider escalating before proceeding
 
 **Exit criteria:** Scan complete, candidates identified, anomalies flagged."""
@@ -92,24 +108,24 @@ id = "reap"
 title = "Reap stale wisps"
 needs = ["scan"]
 description = """
-Close wisps past max_age whose parent molecule is closed or missing.
+Close wisps past max_age whose parent molecule is closed or missing, and close
+step-wisps immediately when their parent molecule is already closed.
 
-**1. For each database with reap candidates:**
+**1. For each database with `reap_candidates` or `molecule_step_candidates`:**
 ```bash
-gt reaper reap --db=<name> --port={{dolt_port}} \\
+gt reaper reap --db=<name> \\
   --max-age={{max_age}} --db-delay={{db_delay}} {{#if dry_run}}--dry-run{{/if}} --json
 ```
 
 **2. Inspect results:**
-- Compare reaped count to scan candidates. A mismatch (scan > reap) is NORMAL
+- Compare reaped and molecule-step counts to scan candidates. A mismatch (scan > reap) is NORMAL
   and expected — the witness may close wisps for dead polecat sessions between
   scan and reap. Do NOT escalate scan/reap count mismatches.
 - Only escalate if reap returns an actual error (not a zero count).
 - Check for any anomalies in the response
 
-**3. Alert check:**
-If total open wisps across all databases exceed {{alert_threshold}},
-log a warning and consider escalating.
+Anomalies (including `reap_candidate_spike`) are already identified during
+the scan step — no separate alert check is needed here.
 
 **Exit criteria:** All stale wisps closed (or dry-run counts reported)."""
 
@@ -122,7 +138,7 @@ Delete closed wisps past purge_age and closed mail past mail_delete_age.
 
 **1. For each database with purge candidates:**
 ```bash
-gt reaper purge --db=<name> --port={{dolt_port}} \\
+gt reaper purge --db=<name> \\
   --purge-age={{purge_age}} --mail-age={{mail_delete_age}} \\
   --db-delay={{db_delay}} \\
   {{#if dry_run}}--dry-run{{/if}} --json
@@ -147,7 +163,7 @@ Close issues that have been open with no status change past stale_issue_age.
 
 **1. For each database with stale candidates:**
 ```bash
-gt reaper auto-close --db=<name> --port={{dolt_port}} \\
+gt reaper auto-close --db=<name> \\
   --stale-age={{stale_issue_age}} \\
   --db-delay={{db_delay}} \\
   {{#if dry_run}}--dry-run{{/if}} --json
@@ -161,9 +177,39 @@ gt reaper auto-close --db=<name> --port={{dolt_port}} \\
 **Exit criteria:** All eligible stale issues auto-closed."""
 
 [[steps]]
+id = "convoy-check"
+title = "Close completed convoys (tracked-bead status, not staleness)"
+needs = ["auto-close"]
+description = """
+Close convoys whose tracked beads are ALL closed. Convoy lifecycle is driven
+by tracked-bead status, never by staleness — `gt reaper auto-close` therefore
+excludes convoys entirely, and this step is what retires them (hq-jnap).
+
+The refinery closes convoys post-merge, but tracked beads closed by other
+paths (manual close, audits/sweeps, `gt done --status DEFERRED`) leave the
+convoy open with nothing left to track. This step bridges that gap.
+
+**1. Run convoy check (cross-prefix aware, town-level):**
+```bash
+gt convoy check {{#if dry_run}}# dry_run set: run 'gt convoy list' and report instead of closing{{/if}}
+```
+
+`gt convoy check` closes every open convoy whose tracked issues are all
+closed and notifies subscribers. It NEVER closes a convoy with open tracked
+issues — if a convoy looks stale but its tracked beads are open, that is a
+dispatch problem to flag, not a cleanup target.
+
+**2. Inspect results:**
+- Note which convoys were closed and why
+- If a convoy has been open >7d with all tracked issues open and unassigned,
+  flag it in the report (stranded convoy — needs feeding, not closing)
+
+**Exit criteria:** All completed convoys closed; stranded convoys flagged."""
+
+[[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["auto-close"]
+needs = ["convoy-check"]
 description = """
 Generate summary and signal completion.
 
@@ -175,17 +221,45 @@ Generate summary and signal completion.
 **Wisps reaped**: (total closed stale open wisps)
 **Wisps purged**: (total deleted old closed wisps)
 **Mail purged**: (total deleted old closed mail)
-**Issues auto-closed**: (stale > stale_issue_age, excl. epics/P0-P1/deps)
+**Issues auto-closed**: (stale > stale_issue_age, excl. epics/convoys/P0-P1/deps)
+**Convoys closed**: (all tracked beads closed, via gt convoy check)
 **Open wisps remaining**: (total)
 **Anomalies**: (list any anomalies found)
 ```
 
-**2. If anomalies were found, escalate:**
+**2. If anomalies were found, escalate — one call per (database, anomaly type):**
 ```bash
-gt escalate "Reaper anomalies detected" -s MEDIUM -m "<anomaly details>"
+gt escalate "Reaper: <anomaly-type> in <database>" -s MEDIUM -m "<anomaly details>" \\
+  --fingerprint "reaper:<database>:<anomaly-type>"
 ```
 
-**Exit criteria:** Report generated, anomalies escalated if any."""
+The fingerprint MUST be stable across runs of the SAME underlying condition
+(no counts, no timestamps) so a persistent/recurring condition collapses into
+ONE open escalation instead of flooding a new bead + Mayor mail every cycle
+(`gt escalate` suppresses duplicates against any still-open bead with the
+same fingerprint). It MUST also be scoped to the specific database and
+anomaly type — a bare "reaper" fingerprint would silently swallow a NEW
+problem in a different database or of a different type. Example:
+`reaper:hq:reap_candidate_spike`.
+
+**Exit criteria:** Report generated, anomalies escalated (deduplicated) if any."""
+
+[[steps]]
+id = "return-to-kennel"
+title = "Return to kennel"
+needs = ["report"]
+description = """
+Return to available pool (MANDATORY — this formula does not otherwise change
+dog state):
+```bash
+gt dog done
+```
+This atomically clears your work assignment and returns you to idle. It is
+idempotent — safe to run even if state is already idle. Without this
+command you remain shown as "working" until a patrol force-clears you,
+which is the exact lifecycle regression this formula must not reproduce.
+
+**Exit criteria:** `gt dog status` shows this dog idle with no work."""
 
 [vars]
 [vars.max_age]
@@ -205,8 +279,8 @@ description = "Max closed mail age before purging (e.g., '168h' = 7 days)"
 default = "168h"
 
 [vars.alert_threshold]
-description = "Open wisp count that triggers escalation warning"
-default = "800"
+description = "Reap-candidate backlog count, per database, that triggers escalation (NOT open wisp volume — see reaper.DefaultAlertThreshold)"
+default = "150"
 
 [vars.dry_run]
 description = "If 'true', report without modifying data"
@@ -215,10 +289,6 @@ default = ""
 [vars.databases]
 description = "Comma-separated database names (empty = auto-discover)"
 default = ""
-
-[vars.dolt_port]
-description = "Dolt server port"
-default = "3307"
 
 [vars.db_delay]
 description = "Delay between databases to reduce Dolt load"

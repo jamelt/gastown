@@ -70,6 +70,7 @@ func NewMergedMessage(rig, polecat, branch, issue, targetBranch, mergeCommit str
 	)
 	msg.Priority = mail.PriorityHigh
 	msg.Type = mail.TypeNotification
+	msg.ResponsePolicy = mail.ResponsePolicyNone
 
 	return msg
 }

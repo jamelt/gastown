@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func captureConvoyStdoutErr(t *testing.T, fn func() error) (string, error) {
@@ -96,23 +98,23 @@ if [ "$*" = "--allow-stale version" ]; then
   exit 0
 fi
 
-if [ -n "$BEADS_DIR" ]; then
-  echo "BEADS_DIR leaked: $BEADS_DIR" >&2
+if [ "$BEADS_DIR" != "%s/.beads" ]; then
+  echo "expected hardened BEADS_DIR, got $BEADS_DIR" >&2
   exit 1
 fi
 
 case "$*" in
-	  "list --label=gt:convoy --json --limit=0 --all")
+	  "list --label=gt:convoy --json --limit=0 --all --flat")
 	    if [ "$PWD" != "%s" ]; then
 	      echo "expected town root, got $PWD" >&2
 	      exit 1
 	    fi
 	    echo '[{"id":"hq-cv-town","title":"Town convoy","status":"open","created_at":"2026-03-09T00:00:00Z","labels":["gt:convoy"]}]'
 	    ;;
-	  "list --json --limit=0 --all")
+	  "list --json --limit=0 --all --flat")
 	    echo '[]'
 	    ;;
-  "dep list hq-cv-town --direction=down --type=tracks --allow-stale --json")
+  "dep list hq-cv-town --direction=down --type=tracks --json")
     if [ "$PWD" != "%s" ]; then
       echo "expected town root, got $PWD" >&2
       exit 1
@@ -131,7 +133,7 @@ case "$*" in
     exit 1
     ;;
 esac
-`, expectedWD, expectedWD, expectedWD)
+`, expectedWD, expectedWD, expectedWD, expectedWD)
 	writeRoutingBdStub(t, scriptBody)
 
 	oldJSON, oldAll, oldStatus, oldTree := convoyListJSON, convoyListAll, convoyListStatus, convoyListTree
@@ -172,8 +174,8 @@ if [ "$*" = "--allow-stale version" ]; then
   exit 0
 fi
 
-if [ -n "$BEADS_DIR" ]; then
-  echo "BEADS_DIR leaked: $BEADS_DIR" >&2
+if [ "$BEADS_DIR" != "%s/.beads" ]; then
+  echo "expected hardened BEADS_DIR, got $BEADS_DIR" >&2
   exit 1
 fi
 
@@ -185,7 +187,7 @@ case "$*" in
     fi
     echo '[{"id":"hq-cv-status","title":"Status convoy","status":"open","issue_type":"convoy","created_at":"2026-03-09T00:00:00Z","labels":[],"dependencies":[]}]'
     ;;
-  "dep list hq-cv-status --direction=down --type=tracks --allow-stale --json")
+  "dep list hq-cv-status --direction=down --type=tracks --json")
     if [ "$PWD" != "%s" ]; then
       echo "expected town root, got $PWD" >&2
       exit 1
@@ -197,7 +199,7 @@ case "$*" in
     exit 1
     ;;
 esac
-`, expectedWD, expectedWD)
+`, expectedWD, expectedWD, expectedWD)
 	writeRoutingBdStub(t, scriptBody)
 
 	oldJSON := convoyStatusJSON
@@ -228,8 +230,7 @@ func TestConvoyCreate_UsesTrackingHelper(t *testing.T) {
 	// Write sentinel files to skip EnsureCustomTypes/Statuses (they call bd
 	// config set/get which isn't relevant to routing).
 	beadsDir := filepath.Join(townRoot, ".beads")
-	typesList := "agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request"
-	_ = os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(typesList), 0644)
+	_ = os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()), 0644)
 	_ = os.WriteFile(filepath.Join(beadsDir, ".gt-statuses-configured"), []byte("staged_ready,staged_warnings"), 0644)
 
 	var helperTownRoot, helperConvoyID, helperIssueID string

@@ -1,6 +1,8 @@
 package mail
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -29,10 +31,10 @@ func TestMatchPattern(t *testing.T) {
 		{"gastown/crew/*", "gastown/polecats/Toast", false},
 
 		// Different path lengths
-		{"gastown/*", "gastown/crew/max", false},      // * matches single segment
-		{"gastown/*/*", "gastown/crew/max", true},     // Multiple wildcards
-		{"*/*", "gastown/witness", true},              // Both wildcards
-		{"*/*/*", "gastown/crew/max", true},           // Three-level wildcard
+		{"gastown/*", "gastown/crew/max", false},  // * matches single segment
+		{"gastown/*/*", "gastown/crew/max", true}, // Multiple wildcards
+		{"*/*", "gastown/witness", true},          // Both wildcards
+		{"*/*/*", "gastown/crew/max", true},       // Three-level wildcard
 	}
 
 	for _, tt := range tests {
@@ -57,6 +59,9 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 		// Town-level agents (hq- prefix)
 		{"hq-mayor", "mayor/"},
 		{"hq-deacon", "deacon/"},
+		{"hq-dog-alpha", "deacon/dogs/alpha"},
+		{"hq-dog-my-dog", "deacon/dogs/my-dog"},
+		{"gt-dog-alpha", "deacon/dogs/alpha"},
 
 		// Rig singletons
 		{"gt-gastown-witness", "gastown/witness"},
@@ -65,16 +70,17 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 
 		// Named agents
 		{"gt-gastown-crew-max", "gastown/crew/max"},
-		{"gt-gastown-polecat-Toast", "gastown/polecat/Toast"},
+		{"gt-gastown-polecat-Toast", "gastown/polecats/Toast"},
 		{"gt-beads-crew-wolf", "beads/crew/wolf"},
 
 		// Agent with hyphen in name
 		{"gt-gastown-crew-max-v2", "gastown/crew/max-v2"},
-		{"gt-gastown-polecat-my-agent", "gastown/polecat/my-agent"},
+		{"gt-gastown-polecat-my-agent", "gastown/polecats/my-agent"},
 
 		// Invalid
 		{"invalid", ""},
 		{"not-gt-prefix", ""},
+		{"hq-dog", ""},
 		{"", ""},
 	}
 
@@ -83,6 +89,41 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 			got := AgentBeadIDToAddress(tt.id)
 			if got != tt.want {
 				t.Errorf("AgentBeadIDToAddress(%q) = %q, want %q", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolverValidateAgentAddressDogGuards(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon", "dogs", "fido"), 0755); err != nil {
+		t.Fatalf("creating dog dir: %v", err)
+	}
+
+	resolver := NewResolver(nil, townRoot)
+	tests := []struct {
+		name    string
+		address string
+		wantErr bool
+	}{
+		{"valid dog", "deacon/dogs/fido", false},
+		{"dog pool", "deacon/dogs", true},
+		{"empty dog name", "deacon/dogs/", true},
+		{"nested dog path", "deacon/dogs/fido/extra", true},
+		{"dot dog name", "deacon/dogs/.", true},
+		{"dotdot dog name", "deacon/dogs/..", true},
+		{"unknown deacon subpath", "deacon/foo", true},
+		{"unknown mayor subpath", "mayor/foo", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := resolver.validateAgentAddress(tt.address)
+			if tt.wantErr && err == nil {
+				t.Fatalf("validateAgentAddress(%q) expected error", tt.address)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("validateAgentAddress(%q) unexpected error: %v", tt.address, err)
 			}
 		})
 	}

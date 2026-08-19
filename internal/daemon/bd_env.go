@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"os"
-	"strings"
+	"path/filepath"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 )
 
 // bdReadOnlyEnv returns an environment slice for read-only bd/gt subprocess
@@ -17,12 +20,33 @@ import (
 // the authoritative "off" value, because glibc getenv() returns the first
 // matching entry — a stale "on" earlier in the slice would otherwise win.
 func bdReadOnlyEnv() []string {
+	return beads.BuildReadOnlyRoutingBDEnv(os.Environ(), "")
+}
+
+func bdReadOnlyRoutingEnv(townRoot string) []string {
+	fallback := ""
 	base := os.Environ()
-	filtered := make([]string, 0, len(base)+1)
-	for _, e := range base {
-		if !strings.HasPrefix(e, "BD_DOLT_AUTO_COMMIT=") {
-			filtered = append(filtered, e)
-		}
+	if townRoot != "" {
+		fallback = filepath.Join(townRoot, ".beads")
+		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
 	}
-	return append(filtered, "BD_DOLT_AUTO_COMMIT=off")
+	return beads.BuildReadOnlyRoutingBDEnv(base, fallback)
+}
+
+func bdMutationRoutingEnv(townRoot string) []string {
+	fallback := ""
+	base := os.Environ()
+	if townRoot != "" {
+		fallback = filepath.Join(townRoot, ".beads")
+		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
+	}
+	return beads.BuildMutationRoutingBDEnv(base, fallback)
+}
+
+func bdReadOnlyPinnedEnv(beadsDir string) []string {
+	base := os.Environ()
+	if townRoot := beads.FindTownRoot(filepath.Dir(beads.ResolveBeadsDir(beadsDir))); townRoot != "" {
+		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
+	}
+	return beads.BuildReadOnlyPinnedBDEnv(base, beadsDir)
 }

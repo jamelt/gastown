@@ -8,20 +8,28 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
+// gasTownIgnorePatterns returns the patterns every fresh worktree's .gitignore
+// needs. The agent-tool directories (.claude/, .opencode/, .codex/, .agents/)
+// come from git.AgentRuntimeDirs — the same list checkpoint_dog/gt done use to
+// exclude agent scaffolding from "real work" detection — so a new agent tool
+// only needs to be added in one place (see git.AgentRuntimeDirs' doc comment).
 func gasTownIgnorePatterns() []string {
-	return []string{
-		".runtime/",
-		".claude/",
+	patterns := []string{".runtime/"}
+	for _, dir := range git.AgentRuntimeDirs {
+		patterns = append(patterns, dir+"/")
+	}
+	return append(patterns,
 		".logs/",
 		"__pycache__/",
 		"state.json",
 		"CLAUDE.md",
 		"CLAUDE.local.md",
 		"GEMINI.md",
-	}
+	)
 }
 
 // CopyOverlay copies files from <rigPath>/.runtime/overlay/ to the destination path.

@@ -105,7 +105,7 @@ func (b *Beads) EnsureRigBead(name string, fields *RigFields) (*Issue, error) {
 	id := RigBeadIDWithPrefix(prefix, name)
 
 	// Try to find existing bead first
-	if existing, err := b.Show(id); err == nil {
+	if existing, err := b.Show(id); err == nil && existing != nil && existing.ID == id {
 		return existing, nil
 	}
 
@@ -116,7 +116,7 @@ func (b *Beads) EnsureRigBead(name string, fields *RigFields) (*Issue, error) {
 	}
 
 	// Create failed (likely duplicate key from race or Dolt hiccup) — retry Show
-	if existing, err := b.Show(id); err == nil {
+	if existing, err := b.Show(id); err == nil && existing != nil && existing.ID == id {
 		return existing, nil
 	}
 
@@ -144,17 +144,15 @@ func (b *Beads) CreateRigBead(name string, fields *RigFields) (*Issue, error) {
 	id := RigBeadIDWithPrefix(prefix, name)
 	description := FormatRigDescription(name, fields)
 
-	// Ensure target database has custom types configured (including "rig").
-	// This matches what CreateAgentBead does — without it, bd rejects
-	// --type=rig on databases that haven't registered custom types yet.
-	_ = EnsureCustomTypes(b.getResolvedBeadsDir())
-
 	args := []string{"create", "--json",
 		"--id=" + id,
 		"--title=" + name,
 		"--description=" + description,
 		"--labels=gt:rig",
-		"--type=rig",
+		// Rig identity is a durable built-in task distinguished by gt:rig.
+		// Custom type availability differs across supported Beads schemas, and
+		// --type=rig can reject a clean rig before its identity is written.
+		"--type=task",
 	}
 	if NeedsForceForID(id) {
 		args = append(args, "--force")
@@ -244,8 +242,7 @@ func (b *Beads) UpdateRigBead(name string, fields *RigFields) (*Issue, error) {
 // DeleteRigBead permanently deletes a rig bead.
 func (b *Beads) DeleteRigBead(name string) error {
 	id := RigBeadID(name)
-	_, err := b.run("delete", id, "--hard", "--force")
-	return err
+	return b.deleteBead(id)
 }
 
 // ListRigBeads returns all rig beads.

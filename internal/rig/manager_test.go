@@ -677,7 +677,7 @@ exit 1
 	if err != nil {
 		t.Fatalf("reading config.yaml: %v", err)
 	}
-	want := "prefix: gt\nissue-prefix: gt\ndolt.idle-timeout: \"0\"\n"
+	want := "prefix: gt\nissue-prefix: gt\ndolt.idle-timeout: \"0\"\nexport.auto: \"false\"\n"
 	if string(config) != want {
 		t.Fatalf("config.yaml = %q, want %q", string(config), want)
 	}
@@ -775,7 +775,7 @@ exit 0
 		t.Fatalf("reading command log: %v", err)
 	}
 	cmds := string(logData)
-	if !strings.Contains(cmds, "args=init --prefix xx --database my_project --server") {
+	if !strings.Contains(cmds, "args=init --skip-agents --skip-hooks --prefix xx --database my_project --server") {
 		t.Fatalf("bd init did not use canonical database; log:\n%s", cmds)
 	}
 	if strings.Contains(cmds, "env=stale_prefix_db") || strings.Contains(cmds, "wrong.db") || strings.Contains(cmds, filepath.Join(rigPath, "wrong", ".beads")) {
@@ -784,6 +784,155 @@ exit 0
 	if !strings.Contains(cmds, "env=my_project") {
 		t.Fatalf("bd subprocess did not receive canonical database env; log:\n%s", cmds)
 	}
+}
+
+func TestBdSubprocessEnvUsesHardenedBDEnv(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"metadata_db","dolt_server_host":"metadata-host","dolt_server_port":3307}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DIR", "/wrong")
+	t.Setenv("BEADS_DB", "/wrong.db")
+	t.Setenv("BD_DB", "/wrong.bd")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrongdb")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_DATA_DIR", "/wrong/data")
+	t.Setenv("BEADS_DOLT_AUTO_START", "1")
+	t.Setenv("GT_DOLT_DATA", "/wrong/gt-data")
+	t.Setenv("GT_DOLT_HOST", "127.0.0.2")
+	t.Setenv("GT_DOLT_PORT", "5507")
+
+	env := bdSubprocessEnv(beadsDir, "explicit_db")
+	got := rigEnvMap(env)
+	if got["BEADS_DIR"] != beadsDir {
+		t.Fatalf("BEADS_DIR = %q, want %q in %v", got["BEADS_DIR"], beadsDir, env)
+	}
+	if got["BEADS_DOLT_SERVER_DATABASE"] != "explicit_db" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want explicit_db in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
+	}
+	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want GT host in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
+		t.Fatalf("ports = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	}
+	if got["BEADS_DOLT_AUTO_START"] != "0" || got["BD_DOLT_AUTO_COMMIT"] != "on" {
+		t.Fatalf("bd mutation guardrails missing in %v", env)
+	}
+	for _, key := range []string{"BEADS_DB", "BD_DB", "BEADS_DOLT_DATA_DIR", "GT_DOLT_DATA"} {
+		if value, ok := got[key]; ok {
+			t.Fatalf("%s leaked as %q in %v", key, value, env)
+		}
+	}
+}
+
+func TestBdSubprocessEnvUsesTownConfigBeforeMetadataExists(t *testing.T) {
+	townRoot := t.TempDir()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test-town"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.2\n  port: 5507\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := filepath.Join(townRoot, "rig", ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	t.Setenv("GT_DOLT_HOST", "stale-host")
+	t.Setenv("GT_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
+
+	env := bdSubprocessEnv(beadsDir, "explicit_db")
+	got := rigEnvMap(env)
+	if got["BEADS_DOLT_SERVER_DATABASE"] != "explicit_db" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want explicit_db in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
+	}
+	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want config host in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
+		t.Fatalf("ports = server:%q legacy:%q, want config port in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	}
+}
+
+func TestBdSubprocessEnvClearsStaleHostWhenConfigHasNoHost(t *testing.T) {
+	townRoot := t.TempDir()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test-town"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  port: 5507\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := filepath.Join(townRoot, "rig", ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	t.Setenv("GT_DOLT_HOST", "stale-host")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	t.Setenv("GT_DOLT_PORT", "9999")
+
+	env := bdSubprocessEnv(beadsDir, "explicit_db")
+	got := rigEnvMap(env)
+	if _, ok := got["BEADS_DOLT_SERVER_HOST"]; ok {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST leaked from config without host: %v", env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
+		t.Fatalf("ports = server:%q legacy:%q, want config port in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	}
+}
+
+func TestBdInitServerPortConfigBeatsStaleEnv(t *testing.T) {
+	townRoot := t.TempDir()
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	t.Setenv("GT_DOLT_PORT", "9999")
+	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  port: 5507\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := bdInitServerPort(townRoot); got != 5507 {
+		t.Fatalf("bdInitServerPort() = %d, want 5507", got)
+	}
+}
+
+func rigEnvMap(env []string) map[string]string {
+	out := make(map[string]string)
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func TestInitAgentBeadsUsesRigBeadsDir(t *testing.T) {
@@ -818,8 +967,17 @@ cmd="$1"
 shift
 case "$cmd" in
   show)
-    # Return empty to indicate agent doesn't exist yet
-    echo "[]"
+    id="$1"
+    if [[ -f "$AGENT_LOG" ]] && grep -Fxq "$id" "$AGENT_LOG"; then
+      labels='["gt:rig"]'; description='Rig identity'
+      case "$id" in
+        *-witness) labels='["gt:agent"]'; description='role_type: witness\nrig: demo\nagent_state: idle' ;;
+        *-refinery) labels='["gt:agent"]'; description='role_type: refinery\nrig: demo\nagent_state: idle' ;;
+      esac
+      printf '[{"id":"%s","title":"%s","description":"%s","issue_type":"task","status":"open","labels":%s}]' "$id" "$id" "$description" "$labels"
+    else
+      echo "[]"
+    fi
     ;;
   create)
     id=""
@@ -832,7 +990,12 @@ case "$cmd" in
     done
     # Log the created agent ID for verification
     echo "$id" >> "$AGENT_LOG"
-    printf '{"id":"%s","title":"%s","description":"","issue_type":"agent"}' "$id" "$title"
+    labels='["gt:rig"]'; description='Rig identity'
+    case "$id" in
+      *-witness) labels='["gt:agent"]'; description='role_type: witness\nrig: demo\nagent_state: idle' ;;
+      *-refinery) labels='["gt:agent"]'; description='role_type: refinery\nrig: demo\nagent_state: idle' ;;
+    esac
+    printf '{"id":"%s","title":"%s","description":"%s","issue_type":"task","status":"open","labels":%s}' "$id" "$title" "$description" "$labels"
     ;;
   slot)
     # Accept slot commands
@@ -871,8 +1034,9 @@ esac
 	}
 	createdAgents = strings.Split(strings.TrimSpace(string(data)), "\n")
 
-	// Should create witness and refinery for the rig
+	// Should create the rig plus Witness and Refinery in the rig database.
 	expectedAgents := map[string]bool{
+		"gt-rig-demo":      false,
 		"gt-demo-witness":  false,
 		"gt-demo-refinery": false,
 	}
@@ -1666,26 +1830,48 @@ func createTestGitRepoForRig(t *testing.T, name string) string {
 func fakeBDForAddRig(t *testing.T) {
 	t.Helper()
 	script := `#!/bin/bash
-# no-op bd shim for AddRig tests
+set -e
 cmd="$1"
 [[ "$cmd" == "--allow-stale" ]] && { shift; cmd="$1"; }
 shift
 case "$cmd" in
   init|config|slot) exit 0 ;;
-  show) echo "[]" ;;
+  show)
+    id="$1"
+    if [[ -f "$FAKE_BD_STATE/$id" ]]; then
+      printf '['; cat "$FAKE_BD_STATE/$id"; printf ']\n'
+    else
+      echo "[]"
+    fi
+    ;;
   create)
     id=""; title=""
     for arg in "$@"; do
       case "$arg" in --id=*) id="${arg#--id=}" ;; --title=*) title="${arg#--title=}" ;; esac
     done
-    printf '{"id":"%s","title":"%s","description":"","issue_type":"agent"}' "$id" "$title"
+    [[ ! -f "$FAKE_BD_STATE/$id" ]] || exit 1
+    labels='["gt:rig"]'; description='Rig identity'
+    case "$id" in
+      *-witness)
+        role=witness; rig="${id#*-}"; rig="${rig%-witness}"
+        labels='["gt:agent"]'; description="role_type: witness\\nrig: $rig\\nagent_state: idle"
+        ;;
+      *-refinery)
+        role=refinery; rig="${id#*-}"; rig="${rig%-refinery}"
+        labels='["gt:agent"]'; description="role_type: refinery\\nrig: $rig\\nagent_state: idle"
+        ;;
+    esac
+    printf '{"id":"%s","title":"%s","description":"%s","issue_type":"task","status":"open","labels":%s}' "$id" "$title" "$description" "$labels" | tee "$FAKE_BD_STATE/$id"
     ;;
+  update|reopen) exit 0 ;;
   *) exit 0 ;;
 esac
 `
 	windowsScript := "@echo off\r\nif \"%1\"==\"init\" exit /b 0\r\nif \"%1\"==\"config\" exit /b 0\r\nif \"%1\"==\"slot\" exit /b 0\r\nif \"%1\"==\"--allow-stale\" shift\r\nif \"%1\"==\"show\" echo [] & exit /b 0\r\nif \"%1\"==\"create\" echo {\"id\":\"x\",\"title\":\"x\"} & exit /b 0\r\nexit /b 0\r\n"
 	binDir := writeFakeBD(t, script, windowsScript)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stateDir := t.TempDir()
+	t.Setenv("FAKE_BD_STATE", stateDir)
 }
 
 func TestAddRig_UpstreamURL(t *testing.T) {
@@ -1965,12 +2151,12 @@ func TestBeadsConfigHasSyncRemote_MissingFile(t *testing.T) {
 	}
 }
 
-func TestAddRig_TrackedBeadsWithSyncRemote_PassesReinitFlags(t *testing.T) {
+func TestAddRig_TrackedBeadsWithSyncRemote_FailsClosedOnBootstrapError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based bd shim not reliable on Windows CI")
 	}
 
-	// Fake bd that succeeds on all subcommands and logs bd init args.
+	// Fake bd that logs the bootstrap arguments and rejects the remote clone.
 	cmdLog := filepath.Join(t.TempDir(), "bd-cmds.log")
 	script := `#!/usr/bin/env bash
 cmd="$1"
@@ -1978,6 +2164,8 @@ cmd="$1"
 shift
 if [[ "$cmd" == "init" ]]; then
   echo "init $*" >> "$BD_CMD_LOG"
+  echo "remote clone failed" >&2
+  exit 42
 fi
 case "$cmd" in
   init|config|migrate) exit 0 ;;
@@ -2022,14 +2210,15 @@ esac
 	root, rigsConfig := setupTestTown(t)
 	manager := NewManager(root, rigsConfig, git.NewGit(root))
 
-	// AddRig may fail after the bd init step (e.g. Dolt not running); that's fine.
-	// We only care that bd init was called with the right flags.
-	_, _ = manager.AddRig(AddRigOptions{
+	_, addErr := manager.AddRig(AddRigOptions{
 		Name:          "testrip",
 		GitURL:        repoDir,
 		BeadsPrefix:   "gt",
 		SkipDoltCheck: true,
 	})
+	if addErr == nil || !strings.Contains(addErr.Error(), "bootstrapping Beads database from configured remote") {
+		t.Fatalf("AddRig error = %v, want fail-closed remote bootstrap error", addErr)
+	}
 
 	logData, err := os.ReadFile(cmdLog)
 	if err != nil {
@@ -2037,14 +2226,13 @@ esac
 	}
 	cmds := string(logData)
 
-	if !strings.Contains(cmds, "--reinit-local") {
-		t.Errorf("bd init missing --reinit-local; full log:\n%s", cmds)
+	if !strings.Contains(cmds, "--remote git+https://github.com/steveyegge/gastown.git") {
+		t.Errorf("bd init missing configured remote bootstrap; full log:\n%s", cmds)
 	}
-	if !strings.Contains(cmds, "--discard-remote") {
-		t.Errorf("bd init missing --discard-remote; full log:\n%s", cmds)
-	}
-	if !strings.Contains(cmds, "--destroy-token=DESTROY-gt") {
-		t.Errorf("bd init missing --destroy-token=DESTROY-gt; full log:\n%s", cmds)
+	for _, destructive := range []string{"--reinit-local", "--discard-remote", "--destroy-token"} {
+		if strings.Contains(cmds, destructive) {
+			t.Errorf("bd init must not use destructive flag %s; full log:\n%s", destructive, cmds)
+		}
 	}
 }
 

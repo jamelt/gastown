@@ -95,6 +95,7 @@ Formula overlay checks (fixable):
 
 Migration checks:
   - town-claude-md           Check town-root CLAUDE.md matches embedded version (fixable)
+  - role-claude-md-guard     Verify role CLAUDE.md files are absent or exactly @AGENTS.md (fixable)
 
 Session hook checks:
   - session-hooks            Check settings.json use session-start.sh
@@ -105,6 +106,7 @@ Session hook checks:
 Dolt checks:
   - dolt-binary              Check that dolt is installed and meets minimum version
   - dolt-metadata            Check dolt metadata tables exist
+  - dolt-lineage             Detect rig Beads histories with no common ancestor
   - dolt-server-reachable    Check dolt sql-server is reachable
   - dolt-orphaned-databases  Detect orphaned dolt databases
 
@@ -113,6 +115,7 @@ Patrol checks:
   - patrol-hooks-wired       Verify daemon triggers patrols
   - patrol-not-stuck         Detect stale wisps (>1h)
   - patrol-plugins-accessible Verify plugin directories
+  - town-unfed-work          Detect dispatchable-looking beads stuck in the town database
 
 Use --fix to attempt automatic fixes for issues that support it.
 Use --no-start with --fix to suppress starting the daemon and agents.
@@ -149,7 +152,39 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		NoStart:         doctorNoStart,
 	}
 
-	// Create doctor and register checks
+	d := newDoctorForCommand(doctorRig)
+
+	// Parse slow threshold (0 = disabled)
+	var slowThreshold time.Duration
+	if doctorSlow != "" {
+		var err error
+		slowThreshold, err = time.ParseDuration(doctorSlow)
+		if err != nil {
+			return fmt.Errorf("invalid --slow duration %q: %w", doctorSlow, err)
+		}
+	}
+
+	// Run checks with streaming output
+	fmt.Println() // Initial blank line
+	var report *doctor.Report
+	if doctorFix {
+		report = d.FixStreaming(ctx, os.Stdout, slowThreshold)
+	} else {
+		report = d.RunStreaming(ctx, os.Stdout, slowThreshold)
+	}
+
+	// Print summary (checks were already printed during streaming)
+	report.PrintSummaryOnly(os.Stdout, doctorVerbose, slowThreshold)
+
+	// Exit with error code if there are errors
+	if report.HasErrors() {
+		return fmt.Errorf("doctor found %d error(s)", report.Summary.Errors)
+	}
+
+	return nil
+}
+
+func newDoctorForCommand(rig string) *doctor.Doctor {
 	d := doctor.NewDoctor()
 
 	// Register workspace-level checks first (fundamental)
@@ -185,6 +220,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// start with missing PATH exports. See gt-99u.
 	d.Register(doctor.NewClaudeSettingsCheck())
 	d.Register(doctor.NewDaemonCheck())
+	d.Register(doctor.NewDaemonBinaryStaleCheck())
 	d.Register(doctor.NewTmuxGlobalEnvCheck())
 	d.Register(doctor.NewBootHealthCheck())
 	d.Register(doctor.NewTownBeadsConfigCheck())
@@ -200,6 +236,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewStaleSQLServerInfoCheck()) // Check for stale sql-server.info files (GH#2770)
 	d.Register(doctor.NewPrefixMismatchCheck())
 	d.Register(doctor.NewDatabasePrefixCheck())
+	d.Register(doctor.NewMisroutedBeadIDCheck())
 	d.Register(doctor.NewIdleTimeoutCheck()) // Verify dolt.idle-timeout: "0" for all rigs
 	d.Register(doctor.NewRoutesCheck())
 	d.Register(doctor.NewRigRoutesJSONLCheck())
@@ -208,6 +245,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewOrphanSessionCheck())
 	d.Register(doctor.NewZombieSessionCheck())
 	d.Register(doctor.NewStalledPolecatCheck())
+	d.Register(newRigCapacityStallCheck()) // Silent stall: rig has ready work, zero usable polecat capacity (gt-yl9q)
+	d.Register(newTownUnfedWorkCheck())    // Silent stall: town DB has dispatchable work, gt scheduler feed never sees it (gt-1g4w)
+	d.Register(doctor.NewNudgeQueueBacklogCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
 	d.Register(doctor.NewWispGCCheck())
 	d.Register(doctor.NewCheckMisclassifiedWisps())
@@ -257,6 +297,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// Town-root CLAUDE.md version check (migration check for behavioral norms)
 	d.Register(doctor.NewTownCLAUDEmdCheck())
 
+	// Role CLAUDE.md guard check (prevent bd init from polluting source repos)
+	d.Register(doctor.NewRoleClaudeMdCheck())
+
 	// Crew workspace checks
 	d.Register(doctor.NewCrewStateCheck())
 	d.Register(doctor.NewCrewWorktreeCheck())
@@ -278,6 +321,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	// Dolt data health checks (binary + server reachability moved to top as prerequisites)
 	d.Register(doctor.NewDoltMetadataCheck())
+	d.Register(doctor.NewDoltLineageCheck())
 	d.Register(doctor.NewDoltOrphanedDatabaseCheck())
 	d.Register(doctor.NewUnregisteredBeadsDirsCheck())
 	d.Register(doctor.NewNullAssigneeCheck())
@@ -286,36 +330,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewWorktreeGitdirCheck())
 
 	// Rig-specific checks (only when --rig is specified)
-	if doctorRig != "" {
+	if rig != "" {
 		d.RegisterAll(doctor.RigChecks()...)
 	}
 
-	// Parse slow threshold (0 = disabled)
-	var slowThreshold time.Duration
-	if doctorSlow != "" {
-		var err error
-		slowThreshold, err = time.ParseDuration(doctorSlow)
-		if err != nil {
-			return fmt.Errorf("invalid --slow duration %q: %w", doctorSlow, err)
-		}
-	}
-
-	// Run checks with streaming output
-	fmt.Println() // Initial blank line
-	var report *doctor.Report
-	if doctorFix {
-		report = d.FixStreaming(ctx, os.Stdout, slowThreshold)
-	} else {
-		report = d.RunStreaming(ctx, os.Stdout, slowThreshold)
-	}
-
-	// Print summary (checks were already printed during streaming)
-	report.PrintSummaryOnly(os.Stdout, doctorVerbose, slowThreshold)
-
-	// Exit with error code if there are errors
-	if report.HasErrors() {
-		return fmt.Errorf("doctor found %d error(s)", report.Summary.Errors)
-	}
-
-	return nil
+	return d
 }
