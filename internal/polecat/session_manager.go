@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/quota"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -383,7 +384,22 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		}
 		runtimeConfig = rc
 	} else {
-		runtimeConfig = config.ResolveRoleAgentConfig("polecat", townRoot, m.rig.Path)
+		// Consult provider cooldown state (mayor/quota.json) so a fresh
+		// dispatch doesn't spawn straight into a hard-limited provider that
+		// the reactive failover engine would otherwise have to rescue
+		// (gt-lovb). Defers with a clear error when every agent in the
+		// role's configured backup chain is cooling down.
+		rc, reason, err := quota.SelectRoleAgent("polecat", townRoot, m.rig.Path, time.Now())
+		if err != nil {
+			return fmt.Errorf("selecting agent for polecat dispatch: %w", err)
+		}
+		runtimeConfig = rc
+		if reason != "" {
+			if recErr := quota.RecordDispatchFailover(townRoot, sessionID, rc.ResolvedAgent, reason, time.Now()); recErr != nil {
+				debugSession("recording dispatch failover", recErr)
+			}
+			style.PrintWarning("%s", reason)
+		}
 	}
 
 	// Ensure runtime settings exist in the shared polecats parent directory.

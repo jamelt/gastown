@@ -465,7 +465,11 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 			runtimeConfig = rc
 		}
 	} else {
-		runtimeConfig = config.ResolveRoleAgentConfig("polecat", spawnTownRoot, r.Path)
+		// Mirrors the cooldown-aware choice SessionManager.Start already made
+		// for this session (gt-lovb), so readiness polling uses the agent
+		// that's actually running rather than the (possibly cooled-down)
+		// primary role agent.
+		runtimeConfig = quota.SelectRoleAgentOrDefault("polecat", spawnTownRoot, r.Path, time.Now())
 	}
 	if err := t.WaitForRuntimeReady(s.SessionName, runtimeConfig, 30*time.Second); err != nil {
 		style.PrintWarning("runtime may not be fully ready: %v", err)
