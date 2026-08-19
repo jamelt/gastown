@@ -68,7 +68,7 @@ func (c *townUnfedWorkCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 		Status:  doctor.StatusWarning,
 		Message: fmt.Sprintf("%d dispatchable-looking bead(s) open in the town database, invisible to gt scheduler feed", len(details)),
 		Details: details,
-		FixHint: "gt scheduler feed does not survey town-level (hq-*) beads; manually route each to the rig that owns the code with gt sling <id> <rig>, or close it if it's coordination-only",
+		FixHint: "gt scheduler feed does not survey town-level (hq-*) beads; manually route each to the rig that owns the code with gt bead move <id> <target-prefix> (e.g. gt-), or close it if it's coordination-only",
 	}
 }
 

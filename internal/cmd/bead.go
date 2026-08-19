@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var beadCmd = &cobra.Command{
@@ -115,10 +115,24 @@ func runBeadMove(cmd *cobra.Command, args []string) error {
 		targetPrefix = targetPrefix + "-"
 	}
 
+	// Resolve the target rig's directory from its prefix via routes.jsonl.
+	// bd create has no cross-rig routing of its own (beads v0.62 removed
+	// built-in multi-rig routing from bd; see resolveBeadDir) so gt must
+	// pick the working directory itself.
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("resolving town root: %w", err)
+	}
+	targetDir := beads.GetRigPathForPrefix(townRoot, targetPrefix)
+	if targetDir == "" {
+		return fmt.Errorf("no rig registered for prefix %q; cannot resolve target repository", targetPrefix)
+	}
+
 	// Get source bead details — resolve rig directory from prefix so that
 	// rig-prefixed beads are found in their rig database (GH#2126).
+	sourceDir := resolveBeadDir(sourceID)
 	output, err := BdCmd("show", sourceID, "--json").
-		Dir(resolveBeadDir(sourceID)).
+		Dir(sourceDir).
 		StripBeadsDir().
 		Output()
 	if err != nil {
@@ -156,18 +170,15 @@ func runBeadMove(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Build create command for target.
-	// Skip --prefix for empty or bare "-" (normalization above turns "" into "-").
-	createArgs := []string{"create"}
-	if targetPrefix != "" && targetPrefix != "-" {
-		createArgs = append(createArgs, "--prefix", targetPrefix)
-	}
-	createArgs = append(createArgs,
-		"--title="+source.Title,
+	// Build create command for the target rig. The target repository is
+	// selected by running bd from targetDir (resolved above), not by a
+	// bd create flag — bd has no cross-database --prefix/--repo routing.
+	createArgs := []string{"create",
+		"--title=" + source.Title,
 		"--type", source.Type,
 		"--priority", fmt.Sprintf("%d", source.Priority),
 		"--silent", // Only output the ID
-	)
+	}
 
 	if source.Description != "" {
 		createArgs = append(createArgs, "--description", source.Description)
@@ -179,10 +190,8 @@ func runBeadMove(cmd *cobra.Command, args []string) error {
 		createArgs = append(createArgs, "--label", label)
 	}
 
-	// Create the new bead
-	createCmd := exec.Command("bd", createArgs...)
-	createCmd.Stderr = os.Stderr
-	newIDBytes, err := createCmd.Output()
+	// Create the new bead in the target rig's database
+	newIDBytes, err := BdCmd(createArgs...).Dir(targetDir).StripBeadsDir().Output()
 	if err != nil {
 		return fmt.Errorf("creating new bead: %w", err)
 	}
@@ -192,13 +201,11 @@ func runBeadMove(cmd *cobra.Command, args []string) error {
 
 	// Close the source bead with reference
 	closeReason := fmt.Sprintf("Moved to %s", newID)
-	closeCmd := exec.Command("bd", "close", sourceID, "--reason", closeReason)
-	closeCmd.Stderr = os.Stderr
-	if err := closeCmd.Run(); err != nil {
+	if err := BdCmd("close", sourceID, "--reason", closeReason).Dir(sourceDir).StripBeadsDir().Run(); err != nil {
 		// Clean up the new bead since we couldn't close the source
 		fmt.Fprintf(os.Stderr, "Warning: failed to close source bead: %v\n", err)
-		cleanupCmd := exec.Command("bd", "close", newID, "--reason", "Cleanup: source bead close failed during move")
-		if cleanupErr := cleanupCmd.Run(); cleanupErr != nil {
+		cleanupErr := BdCmd("close", newID, "--reason", "Cleanup: source bead close failed during move").Dir(targetDir).StripBeadsDir().Run()
+		if cleanupErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: also failed to clean up new bead %s: %v\n", newID, cleanupErr)
 			fmt.Fprintf(os.Stderr, "Both %s and %s remain open - manual cleanup needed\n", sourceID, newID)
 		} else {
