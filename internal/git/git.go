@@ -1003,9 +1003,37 @@ func (g *Git) CleanDefaultBranchBaseRef(remote, defaultBranch string) string {
 	fetchURL, fetchErr := g.RemoteURL(remote)
 	upstreamURL, upstreamErr := g.GetUpstreamURL()
 	if fetchErr == nil && upstreamErr == nil && upstreamURL != "" && !sameGitRemoteURL(fetchURL, upstreamURL) {
+		// hq-sz6wa: basing on upstream is correct only for a rig that actually
+		// contributes UP to its parent. If pushes to upstream are disabled, work
+		// can never integrate there, so upstream is not this rig's trunk and
+		// basing on it strands every polecat at whatever the parent last
+		// published. Observed: upstream/main was 157 commits and 27 days behind
+		// origin/main, and polecats spawned today branched from July.
+		//
+		// A remote you cannot push to cannot be your integration target, so it
+		// cannot be your base. Fall through to the fetch remote in that case.
+		if !g.upstreamAcceptsPushes() {
+			return remote + "/" + defaultBranch
+		}
 		return "upstream/" + defaultBranch
 	}
 	return remote + "/" + defaultBranch
+}
+
+// disabledPushURL is the sentinel Gas Town writes to remote.<name>.pushurl to
+// fail closed on pushes to a remote that must never receive them.
+const disabledPushURL = "DISABLED"
+
+// upstreamAcceptsPushes reports whether the upstream remote can actually receive
+// work. Fails OPEN — if the push URL cannot be read we assume upstream is usable
+// and preserve the existing fork-aware behaviour, so this narrows the special
+// case rather than removing it.
+func (g *Git) upstreamAcceptsPushes() bool {
+	pushURL, err := g.GetPushURL("upstream")
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(pushURL), disabledPushURL)
 }
 
 // CleanBaseRef returns a fully qualified base ref for a target branch. Explicit
