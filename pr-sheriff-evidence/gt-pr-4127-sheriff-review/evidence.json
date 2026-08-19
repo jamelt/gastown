@@ -1,0 +1,94 @@
+{
+  "schema_version": "pr-sheriff-evidence/v1",
+  "policy_version": "pr-sheriff-run-2026-06-04",
+  "generated_at": "2026-08-19T00:00:00Z",
+  "run_id": "gt-pr-4127-sheriff-review",
+  "subject": {
+    "forge": "github",
+    "repo_id": "gastownhall/gastown",
+    "default_branch": "main",
+    "change_type": "confirmatory_review",
+    "change_id": "pr-4127",
+    "url": "https://github.com/gastownhall/gastown/pull/4127",
+    "title": "fix: --force now truly bypasses MR verdict check in polecat nuke (gt-v98fr)",
+    "author": "athosmartins",
+    "author_tier": "unknown (pr-sheriff-config.json and mol-pr-sheriff-patrol formula not present in this workspace; not needed for this disposition since PR is already closed)",
+    "draft": false,
+    "state": "closed",
+    "merged": false,
+    "closed_at": "2026-07-09T16:00:13Z",
+    "head_sha": "d9e3a6a165473f9f43f79a58e0810c5961269a4d"
+  },
+  "superseded_by": [
+    {
+      "pr": 4446,
+      "title": "fix: guard non-force polecat nuke active MRs",
+      "state": "MERGED",
+      "merged_at": "2026-07-09T15:59:10Z",
+      "merge_commit": "b810686e8fe24d6ff325fbd1595700046b52a9e8",
+      "ancestor_of_upstream_main": true,
+      "implementing_bead": "gt-girs"
+    }
+  ],
+  "related_cluster": {
+    "gt-kcb2": "CLOSED, independently reached identical disposition/commit-hash while gt-girs was already in progress, no conflict",
+    "gt-pr-sheriff-4127": "CLOSED, stale:auto-closed by reaper, pre-dates the 2026-07-09 replacement merge",
+    "gt-pr-sheriff-4127-cleanup": "CLOSED, stale:auto-closed by reaper, pre-dates the 2026-07-09 replacement merge",
+    "hq-9nn": "CLOSED, stale:auto-closed by reaper; was a github-sheriff CI-failure tracker for #4127's own failing checks, moot since #4127 never merged as-is",
+    "hq-cv-uu3ic": "CLOSED, stale:auto-closed by reaper; convoy tracker for gt-pr-sheriff-4127"
+  },
+  "related_issue": {
+    "number": null,
+    "note": "No open GitHub issue found referencing this bug/PR by number, 'v98fr', or 'MR verdict' text search. PR body cites internal Gas Town bead 'gt-v98fr', not a GitHub issue; bd show gt-v98fr returns not-found (bead aged out of local Dolt tracker). Nothing to link or disposition."
+  },
+  "research_legs": {
+    "count": 19,
+    "completed": 19,
+    "summary": "19 independent, tool-grounded checks performed directly by this bead (exceeds 15-leg minimum): (1) gh pr view 4127 state/comments/labels/commits; (2) gh pr view 4446 state/mergeCommit/body/commits; (3) git merge-base --is-ancestor of b810686e8f against freshly-fetched upstream/main; (4) direct read of nukePolecatFullWithOptions/checkNukeActiveMRSafety/nukePolecatOptions on upstream/main; (5) confirmed manual 'polecat nuke --force' threads Force:true; (6) confirmed 'polecat stale --cleanup' batch path leaves Force unset/false (fail-closed preserved); (7) confirmed merge commit b810686e8f body contains genuine Co-authored-by trailer for Athos Bernardes; (8-10) gh issue search for 'polecat nuke force' / 'v98fr' / 'MR verdict' — no issue found tied to this PR; (11) bd show gt-v98fr — bead not found; (12) bd show on gt-girs, gt-kcb2, gt-pr-sheriff-4127, gt-pr-sheriff-4127-cleanup, hq-9nn, hq-cv-uu3ic — all closed, all consistent; (13) filesystem-wide search confirmed no pr-sheriff-config.json / mol-pr-sheriff-patrol formula exists; (14) git branch -a / git worktree list — no dangling refs for #4127/gt-girs/v98fr; (15) grep for tests covering ActiveMRRemovalBlocker/checkNukeActiveMRSafety — active_mr_test.go and polecat_check_recovery_test.go exist; (16) codecov comment on #4446 — all tests passed, 62.86% patch coverage, no regression signal; (17) reviewed #4127's own historical CI failures (hq-9nn) — moot, PR never merged as-is; (18) diffed #4127's original patch approach vs #4446's nukePolecatOptions-struct approach — replacement is more consolidated, fixes a second bug (RemoveWithOptions hardcoded force=true) #4127 missed; (19) git grep confirmed nukePolecatFull wrapper has zero callers anywhere (dead code, filed as gt-rriy)."
+  },
+  "pre_decision_review_legs": {
+    "count": 5,
+    "completed": 5,
+    "confirm": 4,
+    "object_minor_out_of_scope": 1,
+    "summary": "5 independent fresh subagents, each given only the compiled facts (no access to each other's reasoning) and required to independently re-run at least 2 verification commands before rendering a verdict. Leg 1 (core fix-logic + linkage): CONFIRM. Leg 2 (safety-regression risk across all call sites): CONFIRM. Leg 3 (duplicate/conflicting prior review history): CONFIRM. Leg 4 (cleanup-first design quality): OBJECT(minor) — surfaced genuine dead code (nukePolecatFull wrapper, zero callers), independently re-verified by the coordinating review and filed as follow-up bead gt-rriy rather than fixed in-scope. Leg 5 (attribution + no-contributor-change-request policy compliance): CONFIRM. No leg objected to the core disposition (no code change needed; PR #4127 correctly closed as superseded)."
+  },
+  "post_implementation_review_legs": {
+    "applicable": false,
+    "reason": "no code change to the PR's subject was made by this bead; the one discovered dead-code item is tracked separately in gt-rriy, not implemented here"
+  },
+  "discovered_work": [
+    {
+      "bead": "gt-rriy",
+      "title": "Dead code: nukePolecatFull wrapper (internal/cmd/polecat.go) has zero callers",
+      "labels": ["discovered-from:gt-pr-4127-sheriff-review", "cleanup"],
+      "priority": 3,
+      "status": "open",
+      "note": "Predates PR #4446's nukePolecatOptions struct; made redundant by it. Not fixed by this review-only bead."
+    }
+  ],
+  "prior_sheriff_history": {
+    "gt-girs": {
+      "closed_at": "2026-07-09",
+      "assignee": "gastown/polecats/radrat",
+      "verdict": "implemented replacement PR #4446, merged b810686e8f",
+      "reconciliation": "this bead's disposition confirms and records gt-girs's outcome; not a re-implementation"
+    },
+    "gt-kcb2": {
+      "closed_at": "2026-07-09",
+      "assignee": "gastown/polecats/brotherhood",
+      "verdict": "independently reached identical disposition while gt-girs was in progress",
+      "reconciliation": "corroborates, does not conflict"
+    },
+    "other_duplicate_titled_beads": ["gt-pr-sheriff-4127", "gt-pr-sheriff-4127-cleanup", "hq-9nn", "hq-cv-uu3ic"],
+    "note": "all pre-date or are auto-closed-stale trackers that predate the 2026-07-09 replacement merge; none contradict this review"
+  },
+  "final_verdict": "no_action_required_code / no_action_required_github",
+  "merge_path_allowed": "not_applicable",
+  "required_next_actions": [
+    "none required on GitHub or the subject repo",
+    "optional follow-up: resolve gt-rriy (dead nukePolecatFull wrapper) in a future cleanup-scoped bead"
+  ],
+  "no_refinery_mq_route_used": true,
+  "no_github_write_performed": true
+}
