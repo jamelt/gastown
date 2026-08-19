@@ -505,7 +505,7 @@ exit 0
 		t.Fatalf("reading command log: %v", err)
 	}
 	cmds := string(logData)
-	if !strings.Contains(cmds, "args=init --prefix tr --database testrig --server --server-port") {
+	if !strings.Contains(cmds, "args=init --skip-agents --skip-hooks --prefix tr --database testrig --server --server-port") {
 		t.Fatalf("bd init did not use canonical database; log:\n%s", cmds)
 	}
 	if !strings.Contains(cmds, "env=testrig") {

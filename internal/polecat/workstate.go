@@ -208,16 +208,24 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	return d
 }
 
-// CanIgnoreStaleCleanupStatus returns true when a dirty persisted
-// cleanup_status is older than the direct predicates proving no work is at risk.
-// The status remains unsafe globally; callers must opt into this reconciliation
-// path only after gathering live git, hook, work, and active-MR facts.
+// CanIgnoreStaleCleanupStatus returns true when a dirty, missing, or unknown
+// persisted cleanup_status is superseded by direct predicates proving no work
+// is at risk. The status remains unsafe globally; callers must opt into this
+// reconciliation path only after gathering live git, hook, work, and
+// active-MR facts.
+//
+// A missing ("") or CleanupUnknown status is included alongside the known-dirty
+// statuses: it represents the same "cached value cannot be trusted, defer to
+// live evidence" case, and excluding it made --reconcile-cleanup a no-op in
+// exactly the case it exists to backfill, since a missing/unknown status was
+// simultaneously the value it needed to repair and the predicate refusing the
+// repair (gt-daff).
 func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
 	if !workTerminal || !hookSafe || !activeMRSafe || !gitSafe {
 		return false
 	}
 	switch status {
-	case CleanupUncommitted, CleanupStash, CleanupUnpushed:
+	case CleanupUncommitted, CleanupStash, CleanupUnpushed, CleanupUnknown, "":
 		return true
 	default:
 		return false

@@ -287,6 +287,23 @@ Examples:
 	RunE: runDoltReconcile,
 }
 
+var doltReconcileVerifyCmd = &cobra.Command{
+	Use:   "reconcile-verify",
+	Short: "Verify no issues were lost reconstructing from a reconciliation bundle",
+	Long: `Compare every issue ID preserved on both heads of a reconciliation bundle
+(written by 'gt dolt reconcile') against the issue IDs currently live in the
+named database, and fail loudly if any are missing. Read-only.
+
+Run this after manually reconstructing a database per a bundle's
+receipt.json next_step. The 2026-08-17 incident dropped 31 gastown issues,
+including 3 open P0s, during reconstruction with no automated check to catch
+it — this command is that check.
+
+Examples:
+  gt dolt reconcile-verify --db gastown --bundle .runtime/dolt-reconciliation/gastown-20260817T045548Z`,
+	RunE: runDoltReconcileVerify,
+}
+
 var doltCleanupCmd = &cobra.Command{
 	Use:   "cleanup",
 	Short: "Remove orphaned databases from .dolt-data/",
@@ -365,6 +382,9 @@ var (
 	doltReconcileAuthority string
 	doltReconcileApproval  string
 	doltReconcileOutput    string
+
+	doltReconcileVerifyDB     string
+	doltReconcileVerifyBundle string
 )
 
 func init() {
@@ -384,6 +404,7 @@ func init() {
 	doltCmd.AddCommand(doltRecoverCmd)
 	doltCmd.AddCommand(doltCleanupCmd)
 	doltCmd.AddCommand(doltReconcileCmd)
+	doltCmd.AddCommand(doltReconcileVerifyCmd)
 	doltCmd.AddCommand(doltRollbackCmd)
 	doltCmd.AddCommand(doltSyncCmd)
 	doltCmd.AddCommand(doltPullCmd)
@@ -409,6 +430,8 @@ func init() {
 	doltReconcileCmd.Flags().StringVar(&doltReconcileAuthority, "authoritative", "", "Authoritative history: local or remote")
 	doltReconcileCmd.Flags().StringVar(&doltReconcileApproval, "approve", "", "Head-bound approval token printed by the diagnostic run")
 	doltReconcileCmd.Flags().StringVar(&doltReconcileOutput, "output", "", "Preservation bundle directory (default: .runtime/dolt-reconciliation/...)")
+	doltReconcileVerifyCmd.Flags().StringVar(&doltReconcileVerifyDB, "db", "", "Database to verify (required)")
+	doltReconcileVerifyCmd.Flags().StringVar(&doltReconcileVerifyBundle, "bundle", "", "Reconciliation bundle directory to verify against (required)")
 
 	doltPullCmd.Flags().BoolVar(&doltPullDry, "dry-run", false, "Preview what would be pulled without pulling")
 	doltPullCmd.Flags().StringVar(&doltPullDB, "db", "", "Pull a single database instead of all")
@@ -1771,7 +1794,44 @@ func runDoltReconcile(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("%s Preservation bundle and audit receipt written to %s\n", style.Bold.Render("✓"), bundle)
 	fmt.Printf("No Dolt branch or remote was mutated. Follow receipt.json for the reviewed reconstruction step.\n")
+	fmt.Printf("After reconstructing, verify nothing was lost:\n")
+	fmt.Printf("  gt dolt reconcile-verify --db %s --bundle %s\n", doltReconcileDB, bundle)
 	return nil
+}
+
+func runDoltReconcileVerify(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	if doltReconcileVerifyDB == "" {
+		return fmt.Errorf("--db is required")
+	}
+	if doltReconcileVerifyBundle == "" {
+		return fmt.Errorf("--bundle is required")
+	}
+	if !doltserver.DatabaseExists(townRoot, doltReconcileVerifyDB) {
+		return fmt.Errorf("database %q not found in .dolt-data/", doltReconcileVerifyDB)
+	}
+	if running, _, _ := doltserver.IsRunning(townRoot); !running {
+		return fmt.Errorf("Dolt server must be running for read-only verification")
+	}
+
+	report, err := doltserver.VerifyReconciliationImport(townRoot, doltReconcileVerifyBundle, doltReconcileVerifyDB)
+	if err != nil {
+		return err
+	}
+	if report.OK() {
+		fmt.Printf("%s No losses: %d preserved issue(s) all present in %s (%d live).\n",
+			style.Bold.Render("✓"), report.ExpectedCount, report.Database, report.CurrentCount)
+		return nil
+	}
+	fmt.Printf("%s %d of %d preserved issue(s) are MISSING from %s (%d live):\n",
+		style.Bold.Render("✗"), len(report.MissingIDs), report.ExpectedCount, report.Database, report.CurrentCount)
+	for _, id := range report.MissingIDs {
+		fmt.Printf("  - %s\n", id)
+	}
+	return fmt.Errorf("reconciliation verification failed: %d issue(s) missing from %s", len(report.MissingIDs), report.Database)
 }
 
 func runDoltPull(cmd *cobra.Command, args []string) error {

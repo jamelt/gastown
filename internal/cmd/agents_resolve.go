@@ -97,10 +97,7 @@ func runAgentsResolve(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	match, err := pickBestAgentBead(matches)
-	if err != nil {
-		return err
-	}
+	match := pickBestAgentBead(matches)
 	if match == nil {
 		message := fmt.Sprintf("no agent bead found for role %q", role)
 		if rig != "" {
@@ -244,7 +241,13 @@ func agentBeadMatches(issue *beads.Issue, role, rig string) bool {
 	return idRig == rig
 }
 
-func pickBestAgentBead(candidates []agentBeadCandidate) (*agentBeadCandidate, error) {
+// pickBestAgentBead picks the single authoritative candidate. When several
+// candidates tie for the best source rank — e.g. a legacy bead ID that
+// predates the prefix-rig-role convention coexists with the canonical one
+// registered under the current convention — it canonicalizes deterministically
+// rather than blocking resolution. Losing candidates are left untouched in
+// beads storage; this only decides which one resolve() reports.
+func pickBestAgentBead(candidates []agentBeadCandidate) *agentBeadCandidate {
 	open := candidates[:0]
 	for _, candidate := range candidates {
 		if strings.EqualFold(candidate.Status, "closed") {
@@ -253,7 +256,7 @@ func pickBestAgentBead(candidates []agentBeadCandidate) (*agentBeadCandidate, er
 		open = append(open, candidate)
 	}
 	if len(open) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	sort.Slice(open, func(i, j int) bool {
@@ -262,22 +265,24 @@ func pickBestAgentBead(candidates []agentBeadCandidate) (*agentBeadCandidate, er
 		if leftRank != rightRank {
 			return leftRank < rightRank
 		}
+		if leftRank2, rightRank2 := agentBeadIDRank(open[i].ID), agentBeadIDRank(open[j].ID); leftRank2 != rightRank2 {
+			return leftRank2 < rightRank2
+		}
 		return open[i].ID < open[j].ID
 	})
 
-	bestRank := agentBeadSourceRank(open[0].Source)
-	var sameRank []string
-	for _, candidate := range open {
-		if agentBeadSourceRank(candidate.Source) != bestRank {
-			break
-		}
-		sameRank = append(sameRank, candidate.ID)
-	}
-	if len(sameRank) > 1 {
-		return nil, fmt.Errorf("multiple matching agent beads in %s: %s", open[0].Source, strings.Join(sameRank, ", "))
-	}
+	return &open[0]
+}
 
-	return &open[0], nil
+// agentBeadIDRank ranks bead IDs by conformance to the structured
+// prefix-rig-role[-name] agent ID convention: 0 for IDs that parse
+// successfully, 1 for legacy IDs (e.g. a bare "rig-role" predating the
+// convention) that only matched via description fields.
+func agentBeadIDRank(id string) int {
+	if _, _, _, ok := beads.ParseAgentBeadID(id); ok {
+		return 0
+	}
+	return 1
 }
 
 func agentBeadSourceRank(source agentBeadSource) int {

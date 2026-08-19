@@ -1,8 +1,33 @@
 package tmux
 
 import (
+	"os"
 	"testing"
 )
+
+// preserveSocketEnv saves and restores defaultSocket plus the socket-related
+// env vars that resolvedSocketName() consults, so tests can freely mutate
+// them without leaking state into other tests.
+func preserveSocketEnv(t *testing.T) {
+	t.Helper()
+	orig := defaultSocket
+	origTownSocket, hadTownSocket := os.LookupEnv("GT_TOWN_SOCKET")
+	origTmuxSocket, hadTmuxSocket := os.LookupEnv("GT_TMUX_SOCKET")
+	t.Cleanup(func() {
+		defaultSocket = orig
+		restoreEnv(t, "GT_TOWN_SOCKET", origTownSocket, hadTownSocket)
+		restoreEnv(t, "GT_TMUX_SOCKET", origTmuxSocket, hadTmuxSocket)
+	})
+}
+
+func restoreEnv(t *testing.T, key, value string, ok bool) {
+	t.Helper()
+	if ok {
+		_ = os.Setenv(key, value)
+		return
+	}
+	_ = os.Unsetenv(key)
+}
 
 func TestSetGetDefaultSocket(t *testing.T) {
 	// Save and restore
@@ -32,6 +57,51 @@ func TestNewTmuxInheritsSocket(t *testing.T) {
 	}
 }
 
+func TestNewTmuxUsesExplicitGTTmuxSocketFallback(t *testing.T) {
+	preserveSocketEnv(t)
+
+	SetDefaultSocket("")
+	_ = os.Unsetenv("GT_TOWN_SOCKET")
+	_ = os.Setenv("GT_TMUX_SOCKET", "gastown-test-afa2e3")
+
+	tmx := NewTmux()
+	if tmx.socketName != "gastown-test-afa2e3" {
+		t.Errorf("NewTmux() socketName = %q, want %q", tmx.socketName, "gastown-test-afa2e3")
+	}
+}
+
+func TestNewTmuxIgnoresAutoGTTmuxSocketFallback(t *testing.T) {
+	preserveSocketEnv(t)
+
+	SetDefaultSocket("")
+	_ = os.Unsetenv("GT_TOWN_SOCKET")
+	_ = os.Setenv("GT_TMUX_SOCKET", "auto")
+
+	tmx := NewTmux()
+	if tmx.socketName != "" {
+		t.Errorf("NewTmux() socketName = %q, want empty for auto fallback", tmx.socketName)
+	}
+}
+
+func TestBuildCommandUsesExplicitGTTmuxSocketFallback(t *testing.T) {
+	preserveSocketEnv(t)
+
+	SetDefaultSocket("")
+	_ = os.Unsetenv("GT_TOWN_SOCKET")
+	_ = os.Setenv("GT_TMUX_SOCKET", "gastown-test-afa2e3")
+
+	cmd := BuildCommand("has-session", "-t", "gt-crew-auction_watcher")
+	expected := []string{"tmux", "-u", "-L", "gastown-test-afa2e3", "has-session", "-t", "gt-crew-auction_watcher"}
+	if len(cmd.Args) != len(expected) {
+		t.Fatalf("args = %v, want %v", cmd.Args, expected)
+	}
+	for i, a := range cmd.Args {
+		if a != expected[i] {
+			t.Errorf("args[%d] = %q, want %q", i, a, expected[i])
+		}
+	}
+}
+
 func TestNewTmuxWithSocket(t *testing.T) {
 	tmx := NewTmuxWithSocket("custom")
 	if tmx.socketName != "custom" {
@@ -40,10 +110,11 @@ func TestNewTmuxWithSocket(t *testing.T) {
 }
 
 func TestBuildCommandNoSocket(t *testing.T) {
-	orig := defaultSocket
-	defer func() { defaultSocket = orig }()
+	preserveSocketEnv(t)
 
 	SetDefaultSocket("")
+	_ = os.Unsetenv("GT_TOWN_SOCKET")
+	_ = os.Unsetenv("GT_TMUX_SOCKET")
 	cmd := BuildCommand("list-sessions")
 	args := cmd.Args
 	// Should be: tmux -u list-sessions

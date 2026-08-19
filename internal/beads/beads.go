@@ -18,6 +18,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
+	"github.com/steveyegge/gastown/internal/testguard"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -85,10 +86,12 @@ func BdSupportsAllowStaleWithEnv(env []string) bool {
 	cmd.Stdout = &combinedOut
 	cmd.Stderr = &combinedOut
 	err = cmd.Run()
-	// bd v0.60+ exits 0 even on unknown flags, printing the error to stderr.
-	// Check output for "unknown flag" to detect lack of support. Treat probe
-	// errors/timeouts as unsupported so higher-level commands fail closed
-	// instead of hanging on a wedged bd subprocess.
+	// bd's exit behavior on an unknown flag has varied across versions: some
+	// exit 0 and print the error to stderr, others (e.g. 1.2.1) exit non-zero.
+	// Check both the exit status and output for "unknown flag" so either
+	// behavior is detected as unsupported. Treat probe errors/timeouts as
+	// unsupported so higher-level commands fail closed instead of hanging on
+	// a wedged bd subprocess.
 	probeOut := strings.TrimSpace(combinedOut.String())
 	supported := err == nil && probeOut != "" && !strings.Contains(probeOut, "unknown flag")
 
@@ -565,11 +568,34 @@ type Beads struct {
 	// and forIssueID() skip ResolveRoutingTarget and operate against
 	// beadsDir directly.
 	noRoute bool
+
+	// ctx, when set, is used as the parent context for bd subprocess calls.
+	// Lets callers impose an aggregate deadline across many bd invocations
+	// (e.g. a multi-rig inventory loop) on top of the per-call subprocess
+	// timeout. Set via WithContext; nil means context.Background().
+	ctx context.Context
 }
 
 // New creates a new Beads wrapper for the given directory.
 func New(workDir string) *Beads {
 	return &Beads{workDir: workDir}
+}
+
+// WithContext returns a copy of b whose bd subprocess calls use ctx as their
+// parent context. This bounds the aggregate time a caller spends across many
+// bd invocations (e.g. querying several rig databases in a loop) in addition
+// to the fixed per-call subprocess timeout, so a caller holding a lock across
+// the calls cannot block indefinitely on a slow or wedged backend.
+func (b *Beads) WithContext(ctx context.Context) *Beads {
+	return &Beads{
+		workDir:    b.workDir,
+		beadsDir:   b.beadsDir,
+		isolated:   b.isolated,
+		serverPort: b.serverPort,
+		store:      b.store,
+		noRoute:    b.noRoute,
+		ctx:        ctx,
+	}
 }
 
 // NewIsolated creates a Beads wrapper for test isolation.
@@ -797,13 +823,32 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
 	// (e.g., after daemon is killed during shutdown). Only if bd supports it.
 	beadsDir := b.getResolvedBeadsDir()
+
+	// Fail closed before a test binary can mutate a non-isolated (i.e. live)
+	// beads directory. b.isolated instances (NewIsolatedWithPort etc.) are
+	// explicitly trusted; everything else must resolve to a recognized
+	// isolated sandbox. See gt-8ik.
+	if !b.isolated && !ArgsAreReadOnly(args) {
+		if err := testguard.RequireIsolated(fmt.Sprintf("bd %s", strings.Join(args, " ")), beadsDir); err != nil {
+			return nil, err
+		}
+	}
+
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
 
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
 	// The context covers both the initial attempt and the --flat retry.
-	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
+	// If the caller supplied a parent context (WithContext), the effective
+	// deadline is the earlier of the parent's and this per-call timeout —
+	// letting a caller bound the aggregate time across many bd calls (e.g.
+	// a multi-rig inventory loop) on top of the per-call bound.
+	parentCtx := b.ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, resolveBdSubprocessTimeout())
 	defer cancel()
 
 	// Always explicitly set BEADS_DIR to prevent inherited env vars from

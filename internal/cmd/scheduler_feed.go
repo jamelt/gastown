@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -289,6 +290,9 @@ func feedSkipReason(issue *beads.Issue) (string, bool) {
 	if issue.Status == "blocked" {
 		return "status: blocked", true
 	}
+	if hasLabel(issue.Labels, capacity.LabelSchedulerCleared) {
+		return "explicitly cleared from scheduler, needs fresh sling", true
+	}
 	if isDeferredBead(&beadInfo{
 		Status:      issue.Status,
 		Description: issue.Description,
@@ -399,4 +403,32 @@ func platformIncompatible(issue *beads.Issue) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// checkHardProhibition is the hq-1s4w gate for every dispatch entry point
+// that hooks a bead to an agent, not just the feeder. requiresHumanDecision
+// was originally consulted only by feedSkipReason (gt-j3xq), which the
+// feeder calls before scheduleBead — a gap its own doc comment named
+// explicitly: "gt sling itself does not consult it". gt-b2qi: a human or
+// automation running gt sling (or anything that reaches scheduleBead,
+// runSling's direct-dispatch path, or executeSling) could dispatch a
+// credentials/production/money-policy/human-decision bead with no gate at
+// all. confirmed must come from an explicit, single-bead
+// --confirm-human-approved flag — never honored for batch/convoy/epic/queue
+// dispatch (executeSling always passes false), because hq-1s4w requires
+// fresh, per-dispatch approval and a bulk operation cannot attest that for
+// each bead it touches. platformIncompatible is never overridable: the work
+// cannot run on this host regardless of approval.
+func checkHardProhibition(title, description string, labels []string, confirmed bool) error {
+	issue := &beads.Issue{Title: title, Description: description, Labels: labels}
+	if reason, incompatible := platformIncompatible(issue); incompatible {
+		return fmt.Errorf("cannot dispatch: %s", reason)
+	}
+	if confirmed {
+		return nil
+	}
+	if reason, blocked := requiresHumanDecision(issue); blocked {
+		return fmt.Errorf("bead requires fresh human approval before dispatch (%s); a human must review this exact bead and re-run with --confirm-human-approved", reason)
+	}
+	return nil
 }

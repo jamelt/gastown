@@ -64,6 +64,12 @@ type ScheduleOptions struct {
 	Agent        string   // Agent override (e.g., "gemini", "codex")
 	HookRawBead  bool     // Hook raw bead without default formula
 	Ralph        bool     // Ralph Wiggum loop mode
+
+	// ConfirmHumanApproved confirms a human has freshly reviewed and approved
+	// THIS dispatch of an hq-1s4w hard-prohibition-labeled bead (gt-b2qi).
+	// Not bypassed by Force — --force is the routine stale-hook escape hatch
+	// and must never silently double as hard-prohibition approval.
+	ConfirmHumanApproved bool
 }
 
 type deferredPolecatTarget struct {
@@ -245,6 +251,14 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
 	}
 
+	// hq-1s4w hard-prohibition guard (gt-b2qi). Mirrors the closed/tombstone
+	// guard above: independently re-validated here, in runSling's direct
+	// path (sling.go), and in executeSling (sling_dispatch.go) rather than
+	// trusted from an upstream caller — see those files for the same guard.
+	if err := checkHardProhibition(info.Title, info.Description, info.Labels, opts.ConfirmHumanApproved); err != nil {
+		return err
+	}
+
 	if (info.Status == "pinned" || info.Status == "hooked" || info.Status == "in_progress") && !opts.Force {
 		return fmt.Errorf("bead %s is already %s to %s\nUse --force to override", beadID, info.Status, info.Assignee)
 	}
@@ -323,6 +337,14 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	ctxBead, err := rigBeads.CreateSlingContext(info.Title, beadID, fields)
 	if err != nil {
 		return fmt.Errorf("creating sling context: %w", err)
+	}
+
+	// A fresh explicit sling is the only thing that may lift a prior
+	// `gt scheduler clear` on this bead (gt-5ti). Best-effort: the context
+	// is already live either way, and RemoveLabels on an absent label is a
+	// no-op for beads without a prior clear.
+	if err := rigBeads.Update(beadID, beads.UpdateOptions{RemoveLabels: []string{capacity.LabelSchedulerCleared}}); err != nil {
+		fmt.Printf("%s Could not clear scheduler-cleared marker on %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
 	}
 
 	// Auto-convoy (unless --no-convoy)

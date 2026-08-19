@@ -1529,9 +1529,6 @@ func cleanupStatusReconcileCandidate(status *RecoveryStatus, p *polecat.Polecat,
 	if previous == polecat.CleanupClean {
 		return previous, false
 	}
-	if previous == "" && status.CleanupProvenance != legacyCleanupReadOnlyProvenance {
-		return previous, false
-	}
 	if !legacyCleanupLifecycleDormant(p.State, beads.AgentState(fields.AgentState)) {
 		return previous, false
 	}
@@ -1893,11 +1890,18 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Batch-fetch agent beads and open MRs once per distinct rig so a scan
+	// over many targets (e.g. --all on a recovery-heavy rig) doesn't reissue
+	// the same full agent-bead/merge-request list queries once per polecat.
+	// See gt-j2lu: this per-polecat redundancy is why `--all --dry-run`
+	// timed out.
+	safetyCtxByRig := buildSafetyCheckContexts(targets)
+
 	// Safety checks: refuse to nuke polecats with active work unless --force is set
 	if !polecatNukeForce && !polecatNukeDryRun {
 		var blocked []*SafetyCheckResult
 		for _, p := range targets {
-			result := checkPolecatSafety(p)
+			result := checkPolecatSafety(p, safetyCtxByRig[p.r.Path])
 			if result.Blocked {
 				blocked = append(blocked, result)
 			}
@@ -1918,10 +1922,10 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 
 	for _, p := range targets {
 		if polecatNukeDryRun {
-			blocked := !polecatNukeForce && checkPolecatSafety(p).Blocked
+			result := checkPolecatSafety(p, safetyCtxByRig[p.r.Path])
+			blocked := !polecatNukeForce && result.Blocked
 			if blocked {
 				fmt.Printf("Would refuse to nuke %s/%s without --force:\n", p.rigName, p.polecatName)
-				dryRunBlocked++
 			} else {
 				fmt.Printf("Would nuke %s/%s:\n", p.rigName, p.polecatName)
 			}
@@ -1930,7 +1934,8 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  - Delete branch (if exists)\n")
 			fmt.Printf("  - Reset agent bead: %s\n", polecatBeadIDForRig(p.r, p.rigName, p.polecatName))
 
-			if displayDryRunSafetyCheck(p) && !blocked {
+			displayDryRunSafetyCheck(result)
+			if result.Blocked {
 				dryRunBlocked++
 			}
 			fmt.Println()
@@ -2022,8 +2027,9 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	if !opts.Force {
 		// Re-run the same decision used by dry-run immediately before the first
 		// destructive action. Agent fields can be stale, so live git state is
-		// authoritative at this point.
-		result := checkPolecatSafety(polecatTarget{rigName: rigName, polecatName: polecatName, mgr: mgr, r: r})
+		// authoritative at this point. Pass nil (no shared batch context) so
+		// this check always hits bd live, not a possibly-stale cached scan.
+		result := checkPolecatSafety(polecatTarget{rigName: rigName, polecatName: polecatName, mgr: mgr, r: r}, nil)
 		if result.Blocked {
 			return fmt.Errorf("refusing to nuke %s/%s: %s", rigName, polecatName, strings.Join(result.Reasons, "; "))
 		}

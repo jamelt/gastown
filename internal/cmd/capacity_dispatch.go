@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // crossRigEscalationDebounce is the minimum interval between cross-rig prefix
@@ -62,10 +64,22 @@ func resetCrossRigEscalationStateForTest() {
 
 // fireCrossRigEscalation invokes `gt escalate` with a MEDIUM severity. Best
 // effort — escalation failure is logged but does not block the dispatch path.
+// Bounded (gt-vyik): `gt escalate` can itself block on an unbounded SMTP/HTTP
+// notification call, and this runs from Validate, before Execute — an
+// unbounded escalation subprocess here would wedge the whole dispatch cycle,
+// not just this one bead's notification.
 var fireCrossRigEscalation = func(rig, prefix, beadID string) {
 	msg := fmt.Sprintf("cross-rig dispatch refused: rig=%s prefix=%s bead=%s — see gt-el4", rig, prefix, beadID)
-	cmd := exec.Command("gt", "escalate", "--severity", "medium", "--reason", "cross-rig-prefix", msg)
+	timeout := resolveBdCmdTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", "escalate", "--severity", "medium", "--reason", "cross-rig-prefix", msg)
+	util.SetProcessGroup(cmd)
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr, "%s cross-rig escalation timed out after %v\n", style.Warning.Render("⚠"), timeout)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "%s cross-rig escalation failed: %v\n", style.Warning.Render("⚠"), err)
 	}
 }
@@ -73,6 +87,67 @@ var fireCrossRigEscalation = func(rig, prefix, beadID string) {
 // maxDispatchFailures is the maximum number of consecutive dispatch failures
 // before a sling context is closed as circuit-broken.
 const maxDispatchFailures = 3
+
+// capacityStarvationEscalationDebounce is the minimum interval between
+// capacity-starvation alarms. Prevents alert spam when the town sits at zero
+// reusable_idle with ready work waiting across many consecutive dispatch
+// ticks — this is expected to persist for a while during real outages, so we
+// only need to be told once per window, not once per tick.
+const capacityStarvationEscalationDebounce = time.Hour
+
+var (
+	capacityStarvationEscalationMu   sync.Mutex
+	capacityStarvationEscalationLast time.Time
+)
+
+// resetCapacityStarvationEscalationStateForTest clears the debounce timestamp. Test-only.
+func resetCapacityStarvationEscalationStateForTest() {
+	capacityStarvationEscalationMu.Lock()
+	defer capacityStarvationEscalationMu.Unlock()
+	capacityStarvationEscalationLast = time.Time{}
+}
+
+// shouldFireCapacityStarvationEscalation reports whether enough time has
+// elapsed since the last capacity-starvation alarm to fire a new one. Updates
+// the timestamp on a positive answer.
+func shouldFireCapacityStarvationEscalation(now time.Time) bool {
+	capacityStarvationEscalationMu.Lock()
+	defer capacityStarvationEscalationMu.Unlock()
+	if !capacityStarvationEscalationLast.IsZero() && now.Sub(capacityStarvationEscalationLast) < capacityStarvationEscalationDebounce {
+		return false
+	}
+	capacityStarvationEscalationLast = now
+	return true
+}
+
+// fireCapacityStarvationEscalation invokes `gt escalate` with a HIGH severity.
+// Best effort — escalation failure is logged but does not block dispatch.
+var fireCapacityStarvationEscalation = func(skipped int, snapshot polecatCapacitySnapshot) {
+	msg := fmt.Sprintf(
+		"capacity starvation: %d ready bead(s) waiting, reusable_idle=0 (working=%d recovery_blocked=%d reservations=%d pending_mr=%d) — see gt-zpfn",
+		skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.PendingMR)
+	cmd := exec.Command("gt", "escalate", "--severity", "high", "--reason", "capacity-starvation", msg)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s capacity-starvation escalation failed: %v\n", style.Warning.Render("⚠"), err)
+	}
+}
+
+// checkCapacityStarvation raises an alarm (escalation + feed event) when ready
+// work is waiting for dispatch but there is no reusable idle polecat and no
+// free spawn capacity to absorb it. Left unaddressed, this state is
+// indistinguishable from "silently retrying forever" to an operator watching
+// only the per-cycle dispatch log (gt-zpfn: capacity exhaustion must alarm,
+// not just retry quietly).
+func checkCapacityStarvation(actor string, report capacity.DispatchReport, snapshot polecatCapacitySnapshot) {
+	if report.Reason != "capacity" || report.Skipped <= 0 || snapshot.ReusableIdle != 0 {
+		return
+	}
+	_ = events.LogFeed(events.TypeSchedulerCapacityStarved, actor,
+		events.SchedulerCapacityStarvedPayload(report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.ReusableIdle))
+	if shouldFireCapacityStarvationEscalation(time.Now()) {
+		fireCapacityStarvationEscalation(report.Skipped, snapshot)
+	}
+}
 
 type schedulerDispatchPlan struct {
 	State       *capacity.SchedulerState
@@ -315,6 +390,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		fmt.Printf("\n%s Dispatched %d, failed %d (reason: %s)\n",
 			style.Bold.Render("✓"), report.Dispatched, report.Failed, report.Reason)
 	} else if report.Skipped > 0 {
+		checkCapacityStarvation(actor, report, dispatchPlan.Capacity)
 		printDispatchNoOp(report, dispatchPlan.Capacity)
 	} else if !isDaemonDispatch() {
 		printDispatchNoOp(report, dispatchPlan.Capacity)
@@ -873,14 +949,77 @@ func recordDispatchFailure(contextBeads *beads.Beads, b capacity.PendingBead, di
 			style.Warning.Render("⚠"), b.ID, err)
 	}
 
+	// gt-c2lp: surface the REASON on every failure, not only at circuit-break.
+	// Previously the first two failures were silent and the visible log line was
+	// "Dispatched 0, failed 3 (reason: batch)" — a capacity-shaped message for a
+	// cause that had nothing to do with capacity. Operators and agents chased
+	// capacity for hours while the real reason sat in a context bead nobody reads.
+	fmt.Printf("  %s dispatch_failed bead=%s context=%s attempt=%d/%d: %v\n",
+		style.Warning.Render("⚠"), b.WorkBeadID, b.ID, b.Context.DispatchFailures, maxDispatchFailures, dispatchErr)
+
+	// gt-c2lp: a respawn-limit block is an operator-actionable condition, not a
+	// transient dispatch error — it stays latched until someone runs
+	// `gt sling respawn-reset`. The witness recovery path already escalates this
+	// to the Mayor (handlers.go, SPAWN_BLOCKED); the scheduler path did not, so
+	// every production occurrence was silent. Zero SPAWN_BLOCKED messages had
+	// ever been sent despite the limit firing repeatedly.
+	if isRespawnLimitError(dispatchErr) {
+		notifySpawnBlocked(b, dispatchErr)
+	}
+
 	if b.Context.DispatchFailures >= maxDispatchFailures {
 		if err := contextBeads.CloseSlingContext(b.ID, "circuit-broken"); err != nil {
 			fmt.Printf("  %s Failed to close circuit-broken context %s: %v\n",
 				style.Warning.Render("⚠"), b.ID, err)
 		}
-		fmt.Printf("  %s Context %s (work: %s) failed %d times, circuit-broken\n",
-			style.Warning.Render("⚠"), b.ID, b.WorkBeadID, b.Context.DispatchFailures)
+		fmt.Print(circuitBrokenMessage(b.ID, b.WorkBeadID, b.Context.DispatchFailures, b.Context.LastFailure))
 	}
+}
+
+// isRespawnLimitError reports whether a dispatch failure is the per-bead respawn
+// guard rather than a transient error. Matched on the message because the guard
+// returns a formatted error rather than a sentinel (internal/cmd/polecat_spawn.go);
+// a sentinel would be better and is worth doing when that path is next touched.
+func isRespawnLimitError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "respawn limit reached")
+}
+
+// notifySpawnBlocked escalates a respawn-limit block to the Mayor, mirroring the
+// witness recovery path so both callers alert identically. Best-effort: dispatch
+// must continue even if the notification fails, and a failed notification is
+// logged rather than swallowed so the silence itself is visible.
+func notifySpawnBlocked(b capacity.PendingBead, dispatchErr error) {
+	subject := fmt.Sprintf("SPAWN_BLOCKED %s (respawn limit reached)", b.WorkBeadID)
+	body := fmt.Sprintf(`Bead %s hit the respawn limit during SCHEDULER dispatch and will not be re-dispatched.
+
+Target rig: %s
+Context:    %s
+Error:      %v
+
+This is latched state, not a transient failure: it persists until someone runs
+  gt sling respawn-reset %s
+and it will re-latch immediately if the underlying cause is unfixed. Verify the
+bead actually dispatches after a reset — a successful reset command is not
+evidence that the bead recovered.`,
+		b.WorkBeadID, b.TargetRig, b.ID, dispatchErr, b.WorkBeadID)
+
+	cmd := exec.Command("gt", "mail", "send", "mayor/", "--subject", subject, "--body", body)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s could not send SPAWN_BLOCKED notification for %s: %v\n",
+			style.Warning.Render("⚠"), b.WorkBeadID, err)
+	}
+}
+
+// circuitBrokenMessage formats the operator-facing line printed when a sling
+// context circuit-breaks. It must include the underlying dispatch error
+// (lastFailure), not just the failure count: the count alone tells an
+// operator that dispatch is broken but not why, which sends them chasing the
+// wrong symptom (gt-zpfn — a capacity-shaped failure count was chased for
+// hours while the real cause, a Dolt lineage refusal, sat unread in this
+// same field).
+func circuitBrokenMessage(contextID, workBeadID string, failures int, lastFailure string) string {
+	return fmt.Sprintf("  %s Context %s (work: %s) failed %d times, circuit-broken: %s\n",
+		style.Warning.Render("⚠"), contextID, workBeadID, failures, lastFailure)
 }
 
 // listAllSlingContexts returns all open sling context beads across all rig

@@ -2493,7 +2493,7 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 	// paused for resumption". Close them on DEFERRED so the convoy can advance.
 	isWorkflowStep := strings.Contains(hookedBeadID, "-wfs-")
 
-	if hookedBeadID != "" && (exitType == ExitCompleted || (exitType == ExitDeferred && isWorkflowStep)) {
+	if hookedBeadID != "" {
 		// BUG FIX (gt-pftz): Close hooked bead unless already terminal (closed/tombstone).
 		// Previously checked hookedBead.Status == StatusHooked, but polecats update
 		// their work bead to in_progress during work. The exact-match check caused
@@ -2515,6 +2515,19 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 			// infrastructure. Skip close and fall through to idle state update.
 			if beads.HasLabel(hookedBead, "gt:rig") {
 				fmt.Fprintf(os.Stderr, "Note: hooked bead %s is a rig identity bead (gt:rig) — skipping close\n", hookedBeadID)
+				goto doneStateUpdate
+			}
+
+			if exitType != ExitCompleted && !(exitType == ExitDeferred && isWorkflowStep) {
+				// ESCALATED, or DEFERRED on a non-workflow-step bead: never close
+				// the bead here (gt-mvlg) — work is paused or blocked on a human,
+				// not done. But it must stop being "assigned" to this polecat:
+				// Manager.loadFromBeads (internal/polecat) derives a polecat's
+				// displayed state from whether any bead is still assigned to it,
+				// independent of the polecat's own agent_state, so a stranded
+				// assignee reports the polecat as working forever and holds its
+				// capacity slot even after the session exits (gt-k2ab).
+				releaseHookedBeadOwnership(hookBd, hookedBeadID, hookedBead)
 				goto doneStateUpdate
 			}
 
@@ -2616,6 +2629,25 @@ doneStateUpdate:
 	clearDoneIntentLabel(agentBd, agentBeadID)
 	clearDoneCheckpoints(agentBd, agentBeadID)
 	return nil
+}
+
+// releaseHookedBeadOwnership clears the assignee on a hooked bead that gt done
+// is intentionally leaving open (ESCALATED, or DEFERRED on a non-workflow-step
+// bead — see gt-mvlg for why these exits never close the bead). If the bead is
+// still stuck in the exclusive-ownership "hooked" status, it is moved back to
+// "open" too, mirroring gt unsling — any other status (open, in_progress,
+// blocked) is left as-is, since e.g. ESCALATED work may be intentionally
+// blocked pending a human and must not be silently reopened for redispatch.
+func releaseHookedBeadOwnership(hookBd *beads.Beads, hookedBeadID string, hookedBead *beads.Issue) {
+	emptyAssignee := ""
+	opts := beads.UpdateOptions{Assignee: &emptyAssignee}
+	if hookedBead.Status == beads.StatusHooked {
+		openStatus := "open"
+		opts.Status = &openStatus
+	}
+	if err := hookBd.Update(hookedBeadID, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't release hooked bead %s: %v\n", hookedBeadID, err)
+	}
 }
 
 // ensureAgentBeadExists recreates a missing agent bead so done-intent labels,

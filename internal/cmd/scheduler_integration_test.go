@@ -471,6 +471,84 @@ func TestSchedulerAutoConvoyCreation(t *testing.T) {
 	}
 }
 
+// TestSchedulerDefaultFormulaSlingEndToEnd verifies the default-formula `gt sling
+// <bead> <rig>` CLI path (no --hook-raw-bead) against a redirected rig root: it
+// must cook the default formula, create exactly one sling context via
+// CreateSlingContext, and dispatch normally with the formula attached. Every
+// other CLI-level sling regression test in this file drives dispatch through
+// --hook-raw-bead (see slingToScheduler), leaving the default-formula path
+// (CookFormula -> scheduleBead -> CreateSlingContext, matching a bare
+// `gt sling <bead> <rig>` invocation) uncovered end-to-end (gt-76w).
+func TestSchedulerDefaultFormulaSlingEndToEnd(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	beadID := createTestBead(t, rigPath, "Default formula sling test")
+
+	// Bare `gt sling <bead> <rig>` — no --hook-raw-bead, no --formula. This is
+	// the exact form of the reported failing command (gt-76w RCA).
+	out := runGTCmdOutput(t, gtBinary, hqPath, env, "sling", beadID, "testrig")
+	t.Logf("gt sling output: %s", out)
+
+	contexts, err := listAllSlingContexts(hqPath)
+	if err != nil {
+		t.Fatalf("listAllSlingContexts: %v", err)
+	}
+	matches := 0
+	var fields *capacity.SlingContextFields
+	for _, ctx := range contexts {
+		f := beads.ParseSlingContextFields(ctx.Description)
+		if f != nil && f.WorkBeadID == beadID {
+			matches++
+			fields = f
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("sling contexts for %s = %d, want exactly 1", beadID, matches)
+	}
+	if fields.TargetRig != "testrig" {
+		t.Errorf("target_rig = %q, want %q", fields.TargetRig, "testrig")
+	}
+	if fields.Formula != "mol-polecat-work" {
+		t.Errorf("formula = %q, want %q (default formula resolution)", fields.Formula, "mol-polecat-work")
+	}
+
+	// Dispatch normally from the canonical town.
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		if rigName != "testrig" {
+			t.Fatalf("spawn rig = %q, want testrig", rigName)
+		}
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "defaultformula",
+			ClonePath:   rigPath,
+			Pane:        "test-pane",
+		}, nil
+	}
+
+	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	if err != nil {
+		t.Fatalf("dispatchScheduledWork: %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want 1", dispatched)
+	}
+
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	issue, err := rigBeads.Show(beadID)
+	if err != nil {
+		t.Fatalf("rig bead show after dispatch: %v", err)
+	}
+	if issue.Status != "hooked" || issue.Assignee != "testrig/polecats/defaultformula" {
+		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked testrig/polecats/defaultformula", issue.Status, issue.Assignee)
+	}
+	attachment := beads.ParseAttachmentFields(issue)
+	if attachment == nil || attachment.AttachedFormula != "mol-polecat-work" || attachment.AttachedMolecule == "" {
+		t.Fatalf("attachment fields = %#v, want mol-polecat-work with attached molecule (description: %s)", attachment, issue.Description)
+	}
+}
+
 // TestSchedulerBlockedStatusReporting verifies that scheduler list correctly reports
 // blocked:true/false and scheduler status reports correct queued_ready count.
 func TestSchedulerBlockedStatusReporting(t *testing.T) {
@@ -1975,5 +2053,58 @@ func TestScheduleBead_ClosedForceDoesNotBypass(t *testing.T) {
 	}
 	if !strings.Contains(out, "closed") || !strings.Contains(out, "work already completed") {
 		t.Errorf("--force should not bypass closed guard; got: %s", out)
+	}
+}
+
+// TestScheduleBead_RefusesHardProhibition verifies that scheduleBead
+// (deferred dispatch path) refuses to schedule an hq-1s4w hard-prohibition
+// labeled bead without --confirm-human-approved, and allows it through with
+// the flag. Regression test for gt-b2qi: scheduleBead was the only sling
+// entry point (alongside runSling's direct path and executeSling) missing
+// the hard-prohibition guard the feeder already had via feedSkipReason.
+func TestScheduleBead_RefusesHardProhibition(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	createArgs := []string{"create", "--title=Credentials bead refused by scheduleBead", "--type=task",
+		"--description=Integration test bead", "--labels=human,area:security", "--json"}
+	createCmd := exec.Command("bd", createArgs...)
+	createCmd.Dir = rigPath
+	out, err := createCmd.Output()
+	if err != nil {
+		combined, _ := exec.Command("bd", createArgs...).CombinedOutput()
+		t.Fatalf("bd create failed: %v\n%s", err, combined)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &issue); err != nil {
+		t.Fatalf("parse bd create output: %v\nraw: %s", err, out)
+	}
+	beadID := issue.ID
+	if beadID == "" {
+		t.Fatalf("bd create returned empty ID\nraw: %s", out)
+	}
+
+	// Without --confirm-human-approved: rejected, no sling context created.
+	slingOut, err := runGTCmdMayFail(t, gtBinary, hqPath, env,
+		"sling", beadID, "testrig", "--hook-raw-bead")
+	if err == nil {
+		t.Fatalf("expected gt sling to fail for hard-prohibition-labeled bead, got success\noutput: %s", slingOut)
+	}
+	if !strings.Contains(slingOut, "fresh human approval") {
+		t.Errorf("expected error to mention fresh human approval, got: %s", slingOut)
+	}
+	if hasSlingContext(t, hqPath, beadID) {
+		t.Errorf("scheduleBead should not have created a sling context for hard-prohibition-labeled bead %s", beadID)
+	}
+
+	// With --confirm-human-approved: allowed through, sling context created.
+	slingOut, err = runGTCmdMayFail(t, gtBinary, hqPath, env,
+		"sling", beadID, "testrig", "--hook-raw-bead", "--confirm-human-approved")
+	if err != nil {
+		t.Fatalf("expected gt sling --confirm-human-approved to succeed, got error: %v\noutput: %s", err, slingOut)
+	}
+	if !hasSlingContext(t, hqPath, beadID) {
+		t.Errorf("scheduleBead should have created a sling context once --confirm-human-approved was set")
 	}
 }

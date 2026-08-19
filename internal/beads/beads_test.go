@@ -5067,7 +5067,7 @@ exit 0
 	}
 	log := string(data)
 	checks := []string{
-		"args=init --prefix covertest --quiet --server --server-port 19999",
+		"args=init --skip-agents --skip-hooks --prefix covertest --quiet --server --server-port 19999",
 		"BEADS_DIR=" + filepath.Join(workDir, ".beads"),
 		"GT_DOLT_PORT=19999",
 		"BEADS_DOLT_SERVER_PORT=19999",
@@ -5554,5 +5554,67 @@ func TestResolveBdSubprocessTimeout(t *testing.T) {
 				t.Errorf("resolveBdSubprocessTimeout() = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// writeFlatRetryThenHangBDStub writes a fake bd that fails any call carrying
+// "--flat" with the "unknown flag" error runWithStdin retries on, and hangs
+// (via exec, not a background fork, so killing the tracked pid stops it) on
+// the retried call without --flat. Used to verify that a caller-supplied
+// WithContext deadline bounds both the initial attempt and the --flat retry
+// combined, not each attempt's own fresh per-call budget (gt-5p9).
+func writeFlatRetryThenHangBDStub(t *testing.T, dir string) {
+	t.Helper()
+	scriptPath := filepath.Join(dir, "bd")
+	script := `#!/bin/sh
+case "$*" in
+  *--flat*)
+    echo "unknown flag: --flat" >&2
+    exit 1
+    ;;
+  *)
+    exec sleep 30
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+}
+
+// TestWithContextBoundsRetryAttempt verifies that WithContext's parent
+// context bounds the aggregate time runWithStdin spends across BOTH the
+// initial attempt and the "--flat unsupported" retry, not just one of them.
+// Without this, a caller looping over many bd calls under its own deadline
+// (e.g. a multi-rig inventory loop) could still be blocked well past that
+// deadline by a single call that hits the retry path (gt-5p9).
+func TestWithContextBoundsRetryAttempt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix shell stub")
+	}
+	dir := t.TempDir()
+	writeFlatRetryThenHangBDStub(t, dir)
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+origPath)
+	// Leave the per-call subprocess timeout generous so only the
+	// caller-supplied context (not the existing per-call bound) can explain
+	// a fast return.
+	t.Setenv("GT_BD_TIMEOUT_SEC", "20")
+
+	workDir := t.TempDir()
+	b := NewIsolated(workDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	b = b.WithContext(ctx)
+
+	start := time.Now()
+	_, err := b.Run("list", "--flat", "--json")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from hanging retry attempt, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("call took %v, want bounded by the ~500ms WithContext deadline (not the 20s per-call timeout)", elapsed)
 	}
 }

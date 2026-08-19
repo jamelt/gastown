@@ -248,7 +248,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the restart command
-	restartCmd, err := buildRestartCommand(targetSession)
+	restartCmd, _, err := buildRestartCommand(targetSession)
 	if err != nil {
 		return err
 	}
@@ -749,9 +749,16 @@ var claudeEnvVars = []string{
 	"GT_OTEL_LOGS_URL",
 }
 
-// buildRestartCommand creates the command to run when respawning a session's pane.
-// This needs to be the actual command to execute (e.g., claude), not a session attach command.
-// The command includes a cd to the correct working directory for the role.
+// buildRestartCommand creates the command to run when respawning a session's pane,
+// along with the working directory it must run in. This needs to be the actual
+// command to execute (e.g., claude), not a session attach command.
+//
+// The working directory is returned separately rather than embedded as a shell
+// `cd` in the command string, so callers pass it to tmux's native -c flag
+// (Tmux.RespawnPaneWithWorkDir) instead of string-concatenating it into the
+// command. That way there is exactly one directory-setting mechanism to keep
+// in sync with the working directory the caller actually wants (gt-w51h),
+// and no shell-quoting workaround is needed for exec-argv-safe values.
 //
 // buildRestartCommandOpts controls restart command generation.
 type buildRestartCommandOpts struct {
@@ -769,37 +776,29 @@ type buildRestartCommandOpts struct {
 	// transcript continuation. This is used when durable bead/worktree state,
 	// rather than provider-specific conversation state, is the handoff contract.
 	StartupPrompt string
-	// WorkDirOverride replaces the session's canonical work directory
-	// (normally resolved via sessionWorkDir) when set. Used by
-	// respawnSessionPane to keep the command's embedded `cd` in sync with
-	// the directory tmux actually respawns the pane into (gt-gd7j).
-	WorkDirOverride string
 }
 
-func buildRestartCommand(sessionName string) (string, error) {
+func buildRestartCommand(sessionName string) (cmd string, workDir string, err error) {
 	return buildRestartCommandWithOpts(sessionName, buildRestartCommandOpts{})
 }
 
-func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpts) (string, error) {
+func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpts) (cmd string, workDir string, err error) {
 	// Detect town root from current directory
 	townRoot := detectTownRootFromCwd()
 	if townRoot == "" {
-		return "", fmt.Errorf("cannot detect town root - run from within a Gas Town workspace")
+		return "", "", fmt.Errorf("cannot detect town root - run from within a Gas Town workspace")
 	}
 
 	// Determine the working directory for this session type
-	workDir, err := sessionWorkDir(sessionName, townRoot)
+	workDir, err = sessionWorkDir(sessionName, townRoot)
 	if err != nil {
-		return "", err
-	}
-	if opts.WorkDirOverride != "" {
-		workDir = opts.WorkDirOverride
+		return "", "", err
 	}
 
 	// Parse the session name to get the identity (used for GT_ROLE and beacon)
 	identity, err := session.ParseSessionName(sessionName)
 	if err != nil {
-		return "", fmt.Errorf("cannot parse session name %q: %w", sessionName, err)
+		return "", "", fmt.Errorf("cannot parse session name %q: %w", sessionName, err)
 	}
 	gtRole := identity.GTRole()
 	simpleRole := config.ExtractSimpleRole(gtRole)
@@ -872,7 +871,7 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 		var err error
 		runtimeCmd, err = config.GetRuntimeCommandWithPromptAndAgentOverride(rigPath, beacon, currentAgent)
 		if err != nil {
-			return "", fmt.Errorf("resolving agent config: %w", err)
+			return "", "", fmt.Errorf("resolving agent config: %w", err)
 		}
 	} else if simpleRole != "" {
 		// Preserve role_agents model selection across self-handoff by resolving
@@ -975,58 +974,43 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	}
 	config.SanitizeAgentEnv(envMap, agentEnv)
 
-	// Build the full command with OS-appropriate env prefix.
-	// workDir is shell-quoted so it can never merge with adjacent command
-	// text (e.g. the continuation prompt) into a single broken `cd` argument
-	// if the value it holds ever contains whitespace (gt-16rc).
-	var cdPrefix string
-	if runtime.GOOS == "windows" {
-		cdPrefix = fmt.Sprintf("cd %s; ", config.PSQuote(workDir))
-	} else {
-		cdPrefix = fmt.Sprintf("cd %s && ", config.ShellQuote(workDir))
-	}
-
+	// Build the full command with OS-appropriate env prefix. workDir is
+	// returned separately (not embedded here) so callers pass it to tmux's
+	// native -c flag via RespawnPaneWithWorkDir instead of concatenating a
+	// shell `cd` into the command text (gt-w51h).
 	var execPrefix string
 	if runtime.GOOS != "windows" {
 		execPrefix = "exec "
 	}
 
 	envCmd := config.PrependEnv(execPrefix+runtimeCmd, envMap)
-	return cdPrefix + envCmd, nil
+	return envCmd, workDir, nil
 }
 
-// respawnSessionPane builds the restart command for sessionName and respawns
-// pane with it. If the pane's actual working directory has been deleted
-// (e.g. an orphaned worktree), the restart command is rebuilt targeting the
-// town root instead of the session's usual work directory, and tmux is told
-// to respawn into that same town root via -c.
+// respawnSessionPane builds the restart command and canonical working
+// directory for sessionName, then respawns pane targeting that directory via
+// tmux's native -c flag (RespawnPaneWithWorkDir). If the canonical directory
+// has been deleted (e.g. an orphaned worktree), the town root is used instead.
 //
-// Previously the fallback reused a restartCmd whose embedded `cd <dir> &&`
-// still pointed at the deleted directory while tmux's own -c pointed at the
-// town root; the embedded `cd` failed, `&&` short-circuited, and the pane's
-// shell exited immediately — leaving a dead pane (gt-gd7j). Rebuilding the
-// command with the same directory used for -c keeps both in sync.
+// The restart command never embeds its own `cd`; -c is the single source of
+// truth for the pane's working directory, so it can't drift out of sync with
+// what the command actually runs against (gt-w51h; previously an embedded
+// `cd <dir> &&` could target a different, deleted directory than tmux's -c,
+// fail, and leave a dead pane — gt-gd7j).
 func respawnSessionPane(t *tmux.Tmux, pane, sessionName string, opts buildRestartCommandOpts) error {
-	paneWorkDir, _ := t.GetPaneWorkDir(sessionName)
-	if paneWorkDir != "" {
-		if _, statErr := os.Stat(paneWorkDir); statErr != nil {
-			if townRoot := detectTownRootFromCwd(); townRoot != "" {
-				style.PrintWarning("pane working directory deleted, using town root")
-				opts.WorkDirOverride = townRoot
-				restartCmd, err := buildRestartCommandWithOpts(sessionName, opts)
-				if err != nil {
-					return err
-				}
-				return t.RespawnPaneWithWorkDir(pane, townRoot, restartCmd)
-			}
-		}
-	}
-
-	restartCmd, err := buildRestartCommandWithOpts(sessionName, opts)
+	restartCmd, workDir, err := buildRestartCommandWithOpts(sessionName, opts)
 	if err != nil {
 		return err
 	}
-	return t.RespawnPane(pane, restartCmd)
+	if workDir != "" {
+		if _, statErr := os.Stat(workDir); statErr != nil {
+			if townRoot := detectTownRootFromCwd(); townRoot != "" {
+				style.PrintWarning("working directory deleted, using town root")
+				workDir = townRoot
+			}
+		}
+	}
+	return t.RespawnPaneWithWorkDir(pane, workDir, restartCmd)
 }
 
 // updateSessionEnvForHandoff updates the tmux session environment with the

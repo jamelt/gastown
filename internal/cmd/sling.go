@@ -137,6 +137,13 @@ var (
 	slingFormula       string // --formula: override formula for dispatch (default: mol-polecat-work)
 	slingCrew          string // --crew: target a crew member in the specified rig
 	slingReviewOnly    bool   // --review-only: mark work as review-only (no merge/commit/push)
+
+	// slingConfirmHumanApproved confirms a human has freshly reviewed and
+	// approved THIS dispatch of an hq-1s4w hard-prohibition-labeled bead
+	// (gt-b2qi). Deliberately separate from --force, which is a routine
+	// stale-hook escape hatch and must never silently double as approval
+	// for dispatching credentials/production/money-policy/human-decision work.
+	slingConfirmHumanApproved bool
 )
 
 func init() {
@@ -167,6 +174,7 @@ func init() {
 	slingCmd.Flags().StringVar(&slingFormula, "formula", "", "Formula to apply (default: mol-polecat-work for polecat targets)")
 	slingCmd.Flags().StringVar(&slingCrew, "crew", "", "Target a crew member in the specified rig (e.g., --crew mel with target gastown → gastown/crew/mel)")
 	slingCmd.Flags().BoolVar(&slingReviewOnly, "review-only", false, "Mark work as review-only: assignee evaluates and reports back, must NOT merge/commit/push")
+	slingCmd.Flags().BoolVar(&slingConfirmHumanApproved, "confirm-human-approved", false, "Confirm fresh human approval to dispatch an hq-1s4w hard-prohibition-labeled bead (required per-dispatch, not inherited from a prior approval; single-bead sling only)")
 
 	slingCmd.AddCommand(slingRespawnResetCmd)
 	rootCmd.AddCommand(slingCmd)
@@ -380,23 +388,24 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				formulaName = ""
 			}
 			return scheduleBeadForSling(slingOnTarget, target.RigName, ScheduleOptions{
-				Formula:      formulaName,
-				Args:         slingArgs,
-				Vars:         slingVars,
-				Merge:        slingMerge,
-				BaseBranch:   slingBaseBranch,
-				ResumeBranch: slingResumeBranch,
-				TargetAgent:  target.Agent,
-				NoConvoy:     slingNoConvoy,
-				Owned:        slingOwned,
-				DryRun:       slingDryRun,
-				Force:        slingForce,
-				NoMerge:      slingNoMerge,
-				ReviewOnly:   slingReviewOnly,
-				Account:      slingAccount,
-				Agent:        slingAgent,
-				HookRawBead:  slingHookRawBead,
-				Ralph:        slingRalph,
+				Formula:              formulaName,
+				Args:                 slingArgs,
+				Vars:                 slingVars,
+				Merge:                slingMerge,
+				BaseBranch:           slingBaseBranch,
+				ResumeBranch:         slingResumeBranch,
+				TargetAgent:          target.Agent,
+				NoConvoy:             slingNoConvoy,
+				Owned:                slingOwned,
+				DryRun:               slingDryRun,
+				Force:                slingForce,
+				NoMerge:              slingNoMerge,
+				ReviewOnly:           slingReviewOnly,
+				Account:              slingAccount,
+				Agent:                slingAgent,
+				HookRawBead:          slingHookRawBead,
+				Ralph:                slingRalph,
+				ConfirmHumanApproved: slingConfirmHumanApproved,
 			})
 		}
 		return targetErr
@@ -423,22 +432,23 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			formulaName = ""
 		}
 		return scheduleBeadForSling(slingOnTarget, rigName, ScheduleOptions{
-			Formula:      formulaName,
-			Args:         slingArgs,
-			Vars:         slingVars,
-			Merge:        slingMerge,
-			BaseBranch:   slingBaseBranch,
-			ResumeBranch: slingResumeBranch,
-			NoConvoy:     slingNoConvoy,
-			Owned:        slingOwned,
-			DryRun:       slingDryRun,
-			Force:        slingForce,
-			NoMerge:      slingNoMerge,
-			ReviewOnly:   slingReviewOnly,
-			Account:      slingAccount,
-			Agent:        slingAgent,
-			HookRawBead:  slingHookRawBead,
-			Ralph:        slingRalph,
+			Formula:              formulaName,
+			Args:                 slingArgs,
+			Vars:                 slingVars,
+			Merge:                slingMerge,
+			BaseBranch:           slingBaseBranch,
+			ResumeBranch:         slingResumeBranch,
+			NoConvoy:             slingNoConvoy,
+			Owned:                slingOwned,
+			DryRun:               slingDryRun,
+			Force:                slingForce,
+			NoMerge:              slingNoMerge,
+			ReviewOnly:           slingReviewOnly,
+			Account:              slingAccount,
+			Agent:                slingAgent,
+			HookRawBead:          slingHookRawBead,
+			Ralph:                slingRalph,
+			ConfirmHumanApproved: slingConfirmHumanApproved,
 		})
 	}
 
@@ -473,23 +483,24 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			beadID := args[0]
 			formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, target.RigName)
 			return scheduleBeadForSling(beadID, target.RigName, ScheduleOptions{
-				Formula:      formula,
-				Args:         slingArgs,
-				Vars:         slingVars,
-				Merge:        slingMerge,
-				BaseBranch:   slingBaseBranch,
-				ResumeBranch: slingResumeBranch,
-				TargetAgent:  target.Agent,
-				NoConvoy:     slingNoConvoy,
-				Owned:        slingOwned,
-				DryRun:       slingDryRun,
-				Force:        slingForce,
-				NoMerge:      slingNoMerge,
-				ReviewOnly:   slingReviewOnly,
-				Account:      slingAccount,
-				Agent:        slingAgent,
-				HookRawBead:  slingHookRawBead,
-				Ralph:        slingRalph,
+				Formula:              formula,
+				Args:                 slingArgs,
+				Vars:                 slingVars,
+				Merge:                slingMerge,
+				BaseBranch:           slingBaseBranch,
+				ResumeBranch:         slingResumeBranch,
+				TargetAgent:          target.Agent,
+				NoConvoy:             slingNoConvoy,
+				Owned:                slingOwned,
+				DryRun:               slingDryRun,
+				Force:                slingForce,
+				NoMerge:              slingNoMerge,
+				ReviewOnly:           slingReviewOnly,
+				Account:              slingAccount,
+				Agent:                slingAgent,
+				HookRawBead:          slingHookRawBead,
+				Ralph:                slingRalph,
+				ConfirmHumanApproved: slingConfirmHumanApproved,
 			})
 		}
 		// Dog targets (deacon/dogs, deacon/dogs/<name>, dog:, dog:<name>) fall through
@@ -756,6 +767,16 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			fmt.Printf("%s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, newPolecatInfo.PolecatName)
 			rollbackSlingArtifactsFn(newPolecatInfo, beadID, hookWorkDir, "")
 		}
+		// resolveTarget's dog path (delayedDogInfo) already marks the dog
+		// "working" via AssignWorkIfIdle before this closure can ever run —
+		// same cleanup runSlingFormula uses on its own failure paths.
+		// clearWorkIfMatches is a no-op unless this exact dispatch owns that
+		// assignment, so it's safe to call unconditionally here.
+		if delayedDogInfo != nil {
+			if err := delayedDogInfo.clearWorkIfMatches(); err != nil {
+				fmt.Printf("%s %s, could not clear dog %s's work assignment: %v\n", style.Warning.Render("⚠"), reason, delayedDogInfo.DogName, err)
+			}
+		}
 		restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir, info)
 		// Under --force, rollback's unhook can clear a pinned bead's original state.
 		if force && originalStatus == "pinned" {
@@ -782,6 +803,21 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			rollbackSpawnedPolecat("Cross-rig guard failed")
 			return err
 		}
+	}
+
+	// hq-1s4w hard-prohibition guard (gt-b2qi). Mirrors the closed/tombstone
+	// guard pattern: independently re-validated here, in scheduleBead
+	// (sling_schedule.go), and in executeSling (sling_dispatch.go) rather
+	// than trusted from an upstream caller. Unconditional — unlike the
+	// cross-rig guard above, this must not exempt mayor/crew/dog targets or
+	// self-sling: hq-1s4w's concern is any unsupervised agent starting
+	// credentials/production/money-policy/human-decision work, not just
+	// polecats. Not gated by force either — --force is the routine
+	// stale-hook escape hatch and must never silently double as hard-
+	// prohibition approval.
+	if err := checkHardProhibition(info.Title, info.Description, info.Labels, slingConfirmHumanApproved); err != nil {
+		rollbackSpawnedPolecat("Hard-prohibition guard failed")
+		return err
 	}
 
 	// Display what we're doing
