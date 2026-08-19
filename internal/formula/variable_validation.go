@@ -11,6 +11,10 @@ import (
 // It captures the variable name (alphanumeric + underscore, starting with letter/underscore).
 var variablePattern = regexp.MustCompile(`\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
 
+// invalidDotPattern matches Go-template style {{.variable}} which is not supported.
+// We need to detect these and provide a helpful error message.
+var invalidDotPattern = regexp.MustCompile(`\{\{\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
+
 // ExtractTemplateVariables finds all {{variable}} patterns in text.
 // Returns a deduplicated, sorted list of variable names.
 // Handlebars helpers like {{#if}}, {{/each}}, {{else}} are excluded.
@@ -60,6 +64,9 @@ func isHandlebarsKeyword(name string) bool {
 // with "missing required variables" error.
 //
 // Variables with any definition in [vars] (even with default="") are considered valid.
+//
+// Also rejects Go-template style {{.variable}} which are not supported and will
+// not be substituted.
 func (f *Formula) ValidateTemplateVariables() error {
 	// Collect all text that might contain variables
 	var allText strings.Builder
@@ -136,8 +143,32 @@ func (f *Formula) ValidateTemplateVariables() error {
 		allText.WriteString("\n")
 	}
 
+	allTextStr := allText.String()
+
+	// Check for invalid Go-template style {{.variable}} placeholders
+	if invalidMatches := invalidDotPattern.FindAllStringSubmatch(allTextStr, -1); len(invalidMatches) > 0 {
+		var invalidVars []string
+		seen := make(map[string]bool)
+		for _, match := range invalidMatches {
+			if len(match) < 2 {
+				continue
+			}
+			varName := match[1]
+			if !seen[varName] {
+				seen[varName] = true
+				invalidVars = append(invalidVars, varName)
+			}
+		}
+		sort.Strings(invalidVars)
+		var suggestions []string
+		for _, v := range invalidVars {
+			suggestions = append(suggestions, fmt.Sprintf("{{.%s}} → {{%s}}", v, v))
+		}
+		return fmt.Errorf("unsupported Go-template style placeholders: %s", strings.Join(suggestions, ", "))
+	}
+
 	// Extract all variables used
-	usedVars := ExtractTemplateVariables(allText.String())
+	usedVars := ExtractTemplateVariables(allTextStr)
 
 	// Check each against defined vars and inputs
 	var undefined []string

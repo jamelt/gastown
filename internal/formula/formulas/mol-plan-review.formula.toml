@@ -54,22 +54,22 @@ base = """
 You are a specialized reviewer participating in a parallel plan review convoy.
 
 ## Context
-- **Formula**: {{.formula_name}}
-- **Plan under review**: {{.plan}}
-- **Original problem**: {{.problem}}
+- **Formula**: {{formula_name}}
+- **Plan under review**: {{plan}}
+- **Original problem**: {{problem}}
 - **Your dimension**: {{.leg.focus}}
 - **Leg ID**: {{.leg.id}}
 
 {{if .prd_review}}
 ## PRD Review Context (from earlier analysis)
-See: {{.prd_review}}
+See: {{prd_review}}
 {{end}}
 
 ## Your Task
 {{.leg.description}}
 
 ## Output Requirements
-Write your review to: **{{.output_path}}**
+Write your review to: **{{output_path}}**
 
 Structure your output as follows:
 ```markdown
@@ -95,7 +95,7 @@ Be specific. Reference plan sections or bead IDs where possible.
 """
 
 [output]
-directory = ".plan-reviews/{{.review_id}}"
+directory = ".plan-reviews/{{review_id}}"
 leg_pattern = "{{.leg.id}}.md"
 synthesis = "plan-review.md"
 
@@ -253,7 +253,7 @@ All leg reviews from: {{.output.directory}}/
 
 **Structure:**
 ```markdown
-# Plan Review: {{.problem}}
+# Plan Review: {{problem}}
 
 ## Overall Verdict
 **GO / GO WITH FIXES / NO-GO** — one paragraph rationale
@@ -293,7 +293,7 @@ All leg reviews from: {{.output.directory}}/
 
 **After writing the file, mail the coordinator (whoever poured this formula):**
 ```bash
-gt mail send --human -s "Plan Review Complete: {{.problem}}" -m "
+gt mail send --human -s "Plan Review Complete: {{problem}}" -m "
 Review is ready: {{.output.directory}}/plan-review.md
 
 Overall verdict: <GO / GO WITH FIXES / NO-GO>
@@ -307,3 +307,15 @@ Overall verdict: <GO / GO WITH FIXES / NO-GO>
 ```
 """
 depends_on = ["completeness", "sequencing", "risk", "scope-creep", "testability"]
+
+[vars.formula_name]
+description = "Name of the formula being executed"
+default = ""
+
+[vars.output_path]
+description = "Output path for review findings"
+default = ""
+
+[vars.review_id]
+description = "Unique identifier for this review"
+default = ""

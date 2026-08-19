@@ -144,6 +144,71 @@ required = true
 			wantError: true,
 			errorMsg:  "b", // Should mention at least one undefined
 		},
+		{
+			name: "Go-template style dot prefix rejected",
+			formula: `
+formula = "test"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "step1"
+title = "Decision: {{.decision_id}}"
+
+[vars.decision_id]
+description = "The decision ID"
+required = true
+`,
+			wantError: true,
+			errorMsg:  "Go-template", // Should mention unsupported style
+		},
+		{
+			name: "multiple dot-prefixed variables",
+			formula: `
+formula = "test"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "step1"
+title = "Value: {{.foo}} and {{.bar}}"
+`,
+			wantError: true,
+			errorMsg:  "Go-template",
+		},
+		{
+			name: "dot prefix in various places",
+			formula: `
+formula = "test"
+type = "workflow"
+version = 1
+description = "Description with {{.var1}}"
+
+[[steps]]
+id = "step1"
+title = "Title with {{.var2}}"
+description = "Desc with {{.var3}}"
+`,
+			wantError: true,
+			errorMsg:  "Go-template",
+		},
+		{
+			name: "spaces in braces not caught by dot check",
+			formula: `
+formula = "test"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "step1"
+title = "Value: {{ foo }}"
+
+[vars.foo]
+description = "A variable"
+default = ""
+`,
+			wantError: false, // {{ foo }} doesn't match our patterns, so it's not substituted but not flagged as error
+		},
 	}
 
 	for _, tc := range tests {

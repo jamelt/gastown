@@ -62,22 +62,22 @@ base = """
 You are a specialized design analyst participating in a convoy design exploration.
 
 ## Context
-- **Formula**: {{.formula_name}}
-- **Problem**: {{.problem}}
+- **Formula**: {{formula_name}}
+- **Problem**: {{problem}}
 - **Your dimension**: {{.leg.focus}}
 - **Leg ID**: {{.leg.id}}
-- **Scope**: {{.scope}}
+- **Scope**: {{scope}}
 
 {{if .context}}
 ## Additional Context
-{{.context}}
+{{context}}
 {{end}}
 
 ## Your Task
 {{.leg.description}}
 
 ## Output Requirements
-Write your analysis to: **{{.output_path}}**
+Write your analysis to: **{{output_path}}**
 
 Structure your output as follows:
 ```markdown
@@ -117,7 +117,7 @@ Be thorough but actionable. Flag decisions needing human input.
 
 # Output configuration
 [output]
-directory = ".designs/{{.review_id}}"
+directory = ".designs/{{review_id}}"
 leg_pattern = "{{.leg.id}}.md"
 synthesis = "design-doc.md"
 
@@ -280,7 +280,7 @@ A synthesized design at: {{.output.directory}}/{{.output.synthesis}}
 
 **Structure:**
 ```markdown
-# Design: {{.problem}}
+# Design: {{problem}}
 
 ## Executive Summary
 (2-3 paragraph overview of proposed design)
@@ -331,3 +331,15 @@ Identify conflicts between dimensions. Flag decisions needing human input.
 Be concrete and actionable.
 """
 depends_on = ["api", "data", "ux", "scale", "security", "integration"]
+
+[vars.formula_name]
+description = "Name of the formula being executed"
+default = ""
+
+[vars.output_path]
+description = "Output path for design findings"
+default = ""
+
+[vars.review_id]
+description = "Unique identifier for this review"
+default = ""
