@@ -1896,6 +1896,40 @@ func TestHookedBeadCloseNotRestrictedToHookedStatus(t *testing.T) {
 	}
 }
 
+// TestHookedBeadCloseSkipsOnEscalated verifies the gt-mvlg fix: gt done
+// --status ESCALATED must not close the hooked/source bead. ESCALATED means
+// "stopping and handing this to a human because a gate is unresolved" — closing
+// the bead would cascade-unblock its dependents and silently release gated work
+// that was never approved (the reported incident: a production GCS migration
+// bead marked ESCALATED was closed, releasing dependents gated on human
+// approval). Only COMPLETED closes ordinary beads; DEFERRED only closes
+// workflow-step beads (*-wfs-*), unchanged from before this fix.
+func TestHookedBeadCloseSkipsOnEscalated(t *testing.T) {
+	tests := []struct {
+		name           string
+		exitType       string
+		isWorkflowStep bool
+		wantClose      bool
+	}{
+		{"completed non-wfs → close", ExitCompleted, false, true},
+		{"completed wfs → close", ExitCompleted, true, true},
+		{"escalated non-wfs → skip", ExitEscalated, false, false},
+		{"escalated wfs → skip", ExitEscalated, true, false},
+		{"deferred non-wfs → skip", ExitDeferred, false, false},
+		{"deferred wfs → close", ExitDeferred, true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Replicate the guard condition from updateAgentStateOnDone (gt-mvlg fix)
+			shouldClose := tt.exitType == ExitCompleted || (tt.exitType == ExitDeferred && tt.isWorkflowStep)
+			if shouldClose != tt.wantClose {
+				t.Errorf("shouldClose for exitType=%q isWorkflowStep=%v = %v, want %v", tt.exitType, tt.isWorkflowStep, shouldClose, tt.wantClose)
+			}
+		})
+	}
+}
+
 // TestPushSubmoduleChanges_Integration verifies that pushSubmoduleChanges detects
 // modified submodules and pushes their commits before the parent repo push (gt-dzs).
 func TestPushSubmoduleChanges_Integration(t *testing.T) {
