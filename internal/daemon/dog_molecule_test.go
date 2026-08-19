@@ -1,9 +1,91 @@
 package daemon
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
+
+// nopLogger satisfies the dogMol logger interface without emitting output.
+type nopLogger struct{}
+
+func (nopLogger) Printf(string, ...interface{}) {}
+
+// TestCloseRemainingStepsForcesClose is the regression guard for gt-adaz:
+// mol-dog-reaper feeds itself because sequenced step wisps are blocked-by their
+// predecessors, so a plain `bd close` is refused and the wisp leaks, keeping the
+// root open and triggering the next pour. The teardown backstop must close its
+// own ephemeral children unconditionally (--force) so the residue never forms.
+func TestCloseRemainingStepsForcesClose(t *testing.T) {
+	var closeCalls [][]string
+	dm := &dogMol{
+		rootID:  "gt-wisp-root",
+		stepIDs: make(map[string]string),
+		logger:  nopLogger{},
+		runner: func(args ...string) (string, error) {
+			switch {
+			case len(args) >= 1 && args[0] == "show":
+				// Two sequenced, still-open step wisps under the root.
+				return `{"gt-wisp-root":[` +
+					`{"id":"gt-wisp-a","title":"Scan","status":"open"},` +
+					`{"id":"gt-wisp-b","title":"Report","status":"open"}` +
+					`],"schema_version":1}`, nil
+			case len(args) >= 1 && args[0] == "close":
+				closeCalls = append(closeCalls, args)
+				return "", nil
+			}
+			return "", fmt.Errorf("unexpected bd args: %v", args)
+		},
+	}
+
+	dm.closeRemainingSteps()
+
+	if len(closeCalls) != 2 {
+		t.Fatalf("expected 2 close calls, got %d: %v", len(closeCalls), closeCalls)
+	}
+	for _, call := range closeCalls {
+		if !hasArg(call, "--force") {
+			t.Errorf("close call %v is missing --force; a sequenced step wisp blocked by its predecessor would leak", call)
+		}
+	}
+}
+
+func hasArg(s []string, want string) bool {
+	for _, v := range s {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDogMolCloseClosesRootAfterChildren verifies the full teardown: children
+// are force-closed, then the root is closed, leaving no residue.
+func TestDogMolCloseClosesRootAfterChildren(t *testing.T) {
+	var closed []string
+	dm := &dogMol{
+		rootID:  "gt-wisp-root",
+		stepIDs: make(map[string]string),
+		logger:  nopLogger{},
+		runner: func(args ...string) (string, error) {
+			switch args[0] {
+			case "show":
+				return `{"gt-wisp-root":[{"id":"gt-wisp-a","title":"Scan","status":"open"}],"schema_version":1}`, nil
+			case "close":
+				closed = append(closed, args[1])
+				return "", nil
+			}
+			return "", fmt.Errorf("unexpected bd args: %v", args)
+		},
+	}
+
+	dm.close()
+
+	want := []string{"gt-wisp-a", "gt-wisp-root"}
+	if !reflect.DeepEqual(closed, want) {
+		t.Errorf("close order = %v, want child then root %v", closed, want)
+	}
+}
 
 func TestParseWispID(t *testing.T) {
 	tests := []struct {

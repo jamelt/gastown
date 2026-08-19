@@ -53,6 +53,11 @@ type dogMol struct {
 	bdPath   string
 	townRoot string
 	logger   interface{ Printf(string, ...interface{}) }
+
+	// runner, when set, replaces the real `bd` invocation. Tests inject a fake
+	// to assert the exact args (e.g. that teardown passes --force) without a
+	// live Dolt-backed bd. Production leaves it nil and shells out.
+	runner func(args ...string) (string, error)
 }
 
 // pourDogMolecule creates an ephemeral wisp molecule from a formula.
@@ -170,8 +175,18 @@ func (dm *dogMol) closeRemainingSteps() {
 			continue
 		}
 		// Close any child that is still open/hooked/in_progress.
+		//
+		// Force is mandatory here: a dog formula's steps are sequenced, so each
+		// step wisp is blocked-by its predecessor. When this backstop runs, some
+		// predecessors are still open (or carry a stale is_blocked column from a
+		// merge-window recompute gap), so a plain close is refused with "blocked
+		// by [...]" and the wisp leaks. A leaked open child then keeps the root
+		// open, and that residue is exactly what triggers the next reaper pour —
+		// the self-feeding loop in gt-adaz. These are ephemeral wisps the dog
+		// poured itself and is now tearing down; dependency ordering among them
+		// is meaningless, so closing unconditionally is the correct teardown.
 		if child.Status == "open" || child.Status == "hooked" || child.Status == "in_progress" {
-			if err := dm.closeWisp(child.ID); err != nil {
+			if err := dm.closeWisp(child.ID, "--force"); err != nil {
 				dm.logger.Printf("dog_molecule: closeRemainingSteps: close %s failed after %d attempts: %v", child.ID, dogCloseMaxAttempts, err)
 			} else {
 				closed++
@@ -336,6 +351,10 @@ func (dm *dogMol) knownSteps() []string {
 
 // runBd executes a bd command and returns stdout.
 func (dm *dogMol) runBd(args ...string) (string, error) {
+	if dm.runner != nil {
+		return dm.runner(args...)
+	}
+
 	bdPath := dm.bdPath
 	if bdPath == "" {
 		bdPath = "bd"
