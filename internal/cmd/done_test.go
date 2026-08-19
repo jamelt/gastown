@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -1130,6 +1131,36 @@ func TestCleanupStatusFromWorkState(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := cleanupStatusFromWorkState(tt.status, tt.branchPushed, tt.unpushedCount, tt.pushErr); got != tt.want {
 				t.Fatalf("cleanupStatusFromWorkState() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseCleanupStatus covers the mapping runDone now persists
+// unconditionally (gt-dr8y): empty and unrecognized inputs resolve to
+// CleanupUnknown rather than a value the old guard treated as "skip the
+// write", so the agent bead always gets a verdict instead of staying null.
+func TestParseCleanupStatus(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  polecat.CleanupStatus
+	}{
+		{"clean", "clean", polecat.CleanupClean},
+		{"uncommitted", "uncommitted", polecat.CleanupUncommitted},
+		{"has_uncommitted alias", "has_uncommitted", polecat.CleanupUncommitted},
+		{"stash", "stash", polecat.CleanupStash},
+		{"has_stash alias", "has_stash", polecat.CleanupStash},
+		{"unpushed", "unpushed", polecat.CleanupUnpushed},
+		{"has_unpushed alias", "has_unpushed", polecat.CleanupUnpushed},
+		{"empty resolves to unknown, not skipped", "", polecat.CleanupUnknown},
+		{"unrecognized resolves to unknown, not skipped", "garbage", polecat.CleanupUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseCleanupStatus(tt.input); got != tt.want {
+				t.Errorf("parseCleanupStatus(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

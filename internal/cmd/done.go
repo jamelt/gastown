@@ -2469,15 +2469,15 @@ doneStateUpdate:
 	}
 
 	// ZFC #10: Self-report cleanup status
-	// Agent observes git state and passes cleanup status via --cleanup-status flag
-	if doneCleanupStatus != "" {
-		cleanupStatus := parseCleanupStatus(doneCleanupStatus)
-		if cleanupStatus != polecat.CleanupUnknown {
-			if err := agentBd.UpdateAgentCleanupStatus(agentBeadID, string(cleanupStatus)); err != nil {
-				// Non-fatal: don't return — done-intent labels still need clearing (za-o9e)
-				fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
-			}
-		}
+	// Agent observes git state and passes cleanup status via --cleanup-status flag.
+	// The write is unconditional (gt-dr8y): a derivation failure or empty flag must
+	// still persist "unknown" rather than skip the write. A skipped write leaves the
+	// field null, which is indistinguishable from "gt done never ran" and leaves the
+	// polecat permanently non-reusable with no verdict to reconcile later.
+	cleanupStatus := parseCleanupStatus(doneCleanupStatus)
+	if err := agentBd.UpdateAgentCleanupStatus(agentBeadID, string(cleanupStatus)); err != nil {
+		// Non-fatal: don't return — done-intent labels still need clearing (za-o9e)
+		fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
 	}
 
 	// Clear done-intent label and checkpoints on clean exit — gt done completed
