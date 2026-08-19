@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -158,6 +159,11 @@ switch ($cmd) {
 	} else {
 		script := `#!/bin/sh
 # Mock bd for polecat tests.
+# Optional call log for tests that assert "no bd mutation happened" — see
+# GT_TEST_BD_CALL_LOG. No-op (and no behavior change) when unset.
+if [ -n "${GT_TEST_BD_CALL_LOG:-}" ]; then
+  echo "$@" >> "$GT_TEST_BD_CALL_LOG"
+fi
 # Find the actual command (skip global flags like --allow-stale).
 cmd=""
 for arg in "$@"; do
@@ -1529,7 +1535,7 @@ func TestAllocateAndAdd_RunsWispSetupCommand(t *testing.T) {
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	writeWispSetupCommand(t, mgr, setupCommandWriteMarker("setup-marker"))
 
-	_, polecat, err := mgr.AllocateAndAdd(AddOptions{})
+	_, polecat, err := mgr.AllocateAndAdd(AddOptions{}, 0)
 	if err != nil {
 		t.Fatalf("AllocateAndAdd: %v", err)
 	}
@@ -1677,6 +1683,43 @@ func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 	}
 	if baseSHA == "" {
 		t.Fatal("base SHA unexpectedly empty")
+	}
+}
+
+// TestReuseIdlePolecat_DeletesStalePreviousBranch verifies gt-it1: replacement
+// must never inherit a stale branch. Before this fix, ReuseIdlePolecat
+// abandoned the polecat's previous local branch without deleting it — safe in
+// practice only because default branch names carry a millisecond timestamp
+// suffix. This proves the old branch is now explicitly gone after a
+// successful reuse, regardless of that accident of naming.
+func TestReuseIdlePolecat_DeletesStalePreviousBranch(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	polecat, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+	_ = git.NewGit(polecat.ClonePath).CleanForce()
+	originalBranch := polecat.Branch
+	if originalBranch == "" {
+		t.Fatal("original branch unexpectedly empty")
+	}
+
+	reused, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
+	if err != nil {
+		t.Fatalf("ReuseIdlePolecat: %v", err)
+	}
+	if reused.Branch == originalBranch {
+		t.Fatalf("reused branch %q should differ from original %q (test needs a fresh branch to be meaningful)", reused.Branch, originalBranch)
+	}
+
+	worktreeGit := git.NewGit(reused.ClonePath)
+	exists, err := worktreeGit.RefExists("refs/heads/" + originalBranch)
+	if err != nil {
+		t.Fatalf("RefExists(%s): %v", originalBranch, err)
+	}
+	if exists {
+		t.Fatalf("stale previous branch %q still exists after reuse of %s", originalBranch, "toast")
 	}
 }
 
@@ -2554,21 +2597,20 @@ esac
 	}
 }
 
-// TestAllocateAndAdd_NoDuplicateNames verifies that concurrent AllocateAndAdd
-// calls never produce duplicate polecat names (GH#2215). Each goroutine will
-// fail at worktree creation (no origin/main), but the allocated names must
-// all be unique — the race condition would show as duplicate names.
-func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
-	const concurrency = 20
+// setupWorktreeFailureManager returns a Manager whose AllocateAndAdd calls
+// always fail at worktree creation (no origin/main ref) but still create the
+// polecat's parent directory beforehand — useful for exercising allocation
+// bookkeeping (name uniqueness, directory-cap counting) without needing a
+// full successful spawn.
+func setupWorktreeFailureManager(t *testing.T) *Manager {
+	t.Helper()
 	root := t.TempDir()
 
-	// Create mayor/rig directory structure
 	mayorRig := filepath.Join(root, "mayor", "rig")
 	if err := os.MkdirAll(mayorRig, 0755); err != nil {
 		t.Fatalf("mkdir mayor/rig: %v", err)
 	}
 
-	// Initialize git repo with origin remote (will fail fetch, that's expected)
 	cmdInit := exec.Command("git", "init")
 	cmdInit.Dir = mayorRig
 	if out, err := cmdInit.CombinedOutput(); err != nil {
@@ -2594,7 +2636,16 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	return NewManager(r, git.NewGit(root), nil)
+}
+
+// TestAllocateAndAdd_NoDuplicateNames verifies that concurrent AllocateAndAdd
+// calls never produce duplicate polecat names (GH#2215). Each goroutine will
+// fail at worktree creation (no origin/main), but the allocated names must
+// all be unique — the race condition would show as duplicate names.
+func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
+	const concurrency = 20
+	m := setupWorktreeFailureManager(t)
 
 	// Launch concurrent AllocateAndAdd calls. They will fail at worktree
 	// creation (no origin/main), but the names they attempt must be unique.
@@ -2606,7 +2657,7 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 
 	for i := 0; i < concurrency; i++ {
 		go func() {
-			name, _, err := m.AllocateAndAdd(AddOptions{})
+			name, _, err := m.AllocateAndAdd(AddOptions{}, 0)
 			results <- result{name: name, err: err}
 		}()
 	}
@@ -2625,6 +2676,127 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 		if count > 1 {
 			t.Errorf("name %q allocated %d times — race condition (GH#2215)", name, count)
 		}
+	}
+}
+
+// TestAllocateAndAdd_RespectsDirectoryCap verifies gt-it1: once maxDirs
+// polecat directories exist, a further AllocateAndAdd call is rejected with
+// ErrPolecatDirCapReached and creates no additional directory.
+func TestAllocateAndAdd_RespectsDirectoryCap(t *testing.T) {
+	m, _ := setupCanonicalBranchManagerTest(t)
+
+	const cap = 2
+	for i := 0; i < cap; i++ {
+		if _, _, err := m.AllocateAndAdd(AddOptions{}, 0); err != nil {
+			t.Fatalf("allocation %d: %v", i, err)
+		}
+	}
+
+	count, err := m.countPolecatDirs()
+	if err != nil {
+		t.Fatalf("countPolecatDirs: %v", err)
+	}
+	if count != cap {
+		t.Fatalf("directory count after %d allocations = %d, want %d", cap, count, cap)
+	}
+
+	if _, _, err := m.AllocateAndAdd(AddOptions{}, cap); !errors.Is(err, ErrPolecatDirCapReached) {
+		t.Fatalf("AllocateAndAdd at cap: err = %v, want ErrPolecatDirCapReached", err)
+	}
+
+	countAfter, err := m.countPolecatDirs()
+	if err != nil {
+		t.Fatalf("countPolecatDirs: %v", err)
+	}
+	if countAfter != cap {
+		t.Fatalf("directory count changed after rejected allocation: got %d, want %d", countAfter, cap)
+	}
+}
+
+// TestAllocateAndAdd_ConcurrentRespectsDirectoryCap verifies gt-it1: the
+// per-rig directory cap is enforced under the same pool lock as allocation
+// itself, so concurrent callers (e.g. a direct sling racing the scheduler
+// daemon) can never together exceed it — closing the TOCTOU race where an
+// unlocked pre-check let each caller observe "under cap" and both allocate.
+// This validates the in-process lock; it does not simulate true multi-process
+// contention (no cross-process flock harness exists in this repo).
+func TestAllocateAndAdd_ConcurrentRespectsDirectoryCap(t *testing.T) {
+	const concurrency = 20
+	const cap = 5
+	m, _ := setupCanonicalBranchManagerTest(t)
+
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, _ = m.AllocateAndAdd(AddOptions{}, cap)
+		}()
+	}
+	wg.Wait()
+
+	count, err := m.countPolecatDirs()
+	if err != nil {
+		t.Fatalf("countPolecatDirs: %v", err)
+	}
+	if count > cap {
+		t.Fatalf("directory count %d exceeds cap %d after %d concurrent allocations — TOCTOU race (gt-it1)", count, cap, concurrency)
+	}
+}
+
+// TestRemoveWithOptions_ShellInWorktreeBlocksBeforeMutation verifies gt-it1:
+// when non-force removal is refused because the caller's shell is inside the
+// worktree being removed, the refusal is atomic — no agent-bead mutation
+// (bd update) and no worktree removal happen first. Before the fix, the
+// agent bead was reset and work beads unassigned BEFORE this check ran.
+func TestRemoveWithOptions_ShellInWorktreeBlocksBeforeMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd call-log uses a POSIX shell script")
+	}
+
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	p, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+
+	callLog := filepath.Join(t.TempDir(), "bd-calls.log")
+	t.Setenv("GT_TEST_BD_CALL_LOG", callLog)
+	t.Chdir(p.ClonePath)
+
+	err = mgr.RemoveWithOptions("toast", false, true, false)
+	if !errors.Is(err, ErrShellInWorktree) {
+		t.Fatalf("RemoveWithOptions error = %v, want ErrShellInWorktree", err)
+	}
+
+	// The blocked path still reads the agent bead (ActiveMRRemovalBlocker), so
+	// the log must be non-empty — an empty/missing log would mean this
+	// assertion silently no-ops instead of proving anything.
+	data, readErr := os.ReadFile(callLog)
+	if readErr != nil {
+		t.Fatalf("reading bd call log %s: %v", callLog, readErr)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		t.Fatal("bd call log is empty — the zero-mutation assertion below would be vacuous")
+	}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		cmd := ""
+		for _, f := range fields {
+			if strings.HasPrefix(f, "--") {
+				continue
+			}
+			cmd = f
+			break
+		}
+		if cmd == "update" {
+			t.Fatalf("bd update was called during a blocked nuke — mutation happened before the safety check: %q", line)
+		}
+	}
+	if _, statErr := os.Stat(p.ClonePath); statErr != nil {
+		t.Fatalf("worktree %s missing after blocked nuke: %v", p.ClonePath, statErr)
 	}
 }
 

@@ -487,6 +487,26 @@ func (m *Manager) polecatDir(name string) string {
 	return filepath.Join(m.rig.Path, "polecats", name)
 }
 
+// countPolecatDirs counts top-level directories under polecats/, using the
+// same predicate (IsDir, not dot-prefixed) as the cmd package's directory
+// listing so the two stay consistent.
+func (m *Manager) countPolecatDirs() (int, error) {
+	entries, err := os.ReadDir(filepath.Join(m.rig.Path, "polecats"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	count := 0
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // pendingPath returns the path of the allocation reservation marker for a name.
 // Written inside the pool lock by AllocateName; removed by AddWithOptions after
 // the polecat directory is created. Prevents concurrent processes from allocating
@@ -656,20 +676,41 @@ func (m *Manager) Add(name string) (*Polecat, error) {
 	return m.AddWithOptions(name, AddOptions{})
 }
 
+// ErrPolecatDirCapReached indicates the rig's per-rig polecat directory cap
+// has been reached; the caller must reuse an existing identity or free one up.
+var ErrPolecatDirCapReached = errors.New("polecat directory cap reached")
+
 // AllocateAndAdd atomically allocates a name and creates a polecat.
 // This eliminates the TOCTOU race between AllocateName and AddWithOptions
 // (GH#2215) by holding the pool lock through directory creation, ensuring
 // no concurrent process can allocate the same name.
-func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
-	// Hold pool lock across allocation + directory creation to close the
-	// race window where a concurrent AllocateName could miss the pending
-	// marker and reallocate the same name.
+//
+// maxDirs, when > 0, enforces a per-rig directory cap under the same pool
+// lock as the allocation itself — closing the separate TOCTOU race where two
+// concurrent callers could each observe "under cap" via an unlocked read and
+// both allocate, exceeding it. maxDirs <= 0 means no cap.
+func (m *Manager) AllocateAndAdd(opts AddOptions, maxDirs int) (string, *Polecat, error) {
+	// Hold pool lock across the cap check + allocation + directory creation to
+	// close the race window where a concurrent caller could miss the pending
+	// marker and reallocate the same name, or race past a stale cap count.
 	poolLock, err := m.lockPool()
 	if err != nil {
 		return "", nil, err
 	}
 
 	m.reconcilePoolInternal()
+
+	if maxDirs > 0 {
+		count, err := m.countPolecatDirs()
+		if err != nil {
+			_ = poolLock.Unlock()
+			return "", nil, fmt.Errorf("counting polecat directories: %w", err)
+		}
+		if count >= maxDirs {
+			_ = poolLock.Unlock()
+			return "", nil, fmt.Errorf("%w: %d directories (max %d)", ErrPolecatDirCapReached, count, maxDirs)
+		}
+	}
 
 	name, err := m.namePool.Allocate()
 	if err != nil {
@@ -1207,27 +1248,9 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 		}
 	}
 
-	// Reset agent bead FIRST, before any filesystem operations.
-	// This prevents a race where a concurrent sling allocates the same name,
-	// sets hook_bead, and then has it cleared by this cleanup. By resetting
-	// the agent bead first (clearing fields, setting agent_state="nuked"),
-	// concurrent slings see a clean bead and CreateOrReopenAgentBead can
-	// simply update it without needing close/reopen (which fails on Dolt).
-	// See gt-14b8o: close/reopen cycle breaks on Dolt backend.
-	agentID := m.agentBeadID(name)
-	if err := m.resetAgentBeadForReuse(agentID, "polecat removed"); err != nil {
-		// Only log if not "not found" - it's ok if it doesn't exist
-		if !errors.Is(err, beads.ErrNotFound) {
-			style.PrintWarning("could not reset agent bead %s: %v", agentID, err)
-		}
-	}
-
-	// Unassign any work beads still pointing at this polecat (gt-e4u1).
-	// Without this, beads remain assigned to a ghost polecat (status in_progress,
-	// assignee set) after removal, permanently stuck with no one working on them.
-	m.unassignWorkBeads(name)
-
-	// Check if user's shell is cd'd into the worktree (prevents broken shell)
+	// Check if user's shell is cd'd into the worktree (prevents broken shell).
+	// Runs before any mutation below (bead reset, worktree removal) so a
+	// blocked nuke leaves zero side effects — atomicity for nuke refusal.
 	// This check runs unless selfNuke=true (polecat deleting its own worktree).
 	// When a polecat calls `gt done`, it's inside its worktree by design - the session
 	// will be killed immediately after, so breaking the shell is expected and harmless.
@@ -1251,6 +1274,26 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 			}
 		}
 	}
+
+	// Reset agent bead FIRST, before any filesystem operations.
+	// This prevents a race where a concurrent sling allocates the same name,
+	// sets hook_bead, and then has it cleared by this cleanup. By resetting
+	// the agent bead first (clearing fields, setting agent_state="nuked"),
+	// concurrent slings see a clean bead and CreateOrReopenAgentBead can
+	// simply update it without needing close/reopen (which fails on Dolt).
+	// See gt-14b8o: close/reopen cycle breaks on Dolt backend.
+	agentID := m.agentBeadID(name)
+	if err := m.resetAgentBeadForReuse(agentID, "polecat removed"); err != nil {
+		// Only log if not "not found" - it's ok if it doesn't exist
+		if !errors.Is(err, beads.ErrNotFound) {
+			style.PrintWarning("could not reset agent bead %s: %v", agentID, err)
+		}
+	}
+
+	// Unassign any work beads still pointing at this polecat (gt-e4u1).
+	// Without this, beads remain assigned to a ghost polecat (status in_progress,
+	// assignee set) after removal, permanently stuck with no one working on them.
+	m.unassignWorkBeads(name)
 
 	// Best-effort: Push the polecat's branch to remote before removing the worktree.
 	// This preserves committed work that hasn't been pushed yet — without this,
@@ -1580,6 +1623,9 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	// Get the old clone path (may be old or new structure)
 	oldClonePath := m.clonePath(name)
 	polecatGit := git.NewGit(oldClonePath)
+	// Captured before any worktree operation touches this path — used to delete
+	// the stale branch below once it's no longer checked out anywhere.
+	oldBranch, _ := polecatGit.CurrentBranch()
 
 	// New clone path uses new structure
 	polecatDir := m.polecatDir(name)
@@ -1669,6 +1715,15 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 			_ = repoGit.WorktreeRemove(tmpClonePath, true)
 			_ = os.RemoveAll(tmpClonePath)
 			return nil, fmt.Errorf("removing old clone path: %w", removeErr)
+		}
+	}
+
+	// Delete the polecat's previous local branch now that its worktree is gone —
+	// replacement must never inherit a stale branch. Local-only, best-effort
+	// (mirrors nuke's gt-v5ku fix: never touch the remote).
+	if oldBranch != "" && oldBranch != branchName {
+		if err := repoGit.DeleteBranch(oldBranch, true); err != nil {
+			style.PrintWarning("could not delete stale branch %s on repair of %s: %v", oldBranch, name, err)
 		}
 	}
 
@@ -1784,6 +1839,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	if err != nil {
 		return nil, err
 	}
+	previousBranch := current.Branch
 	if current.Issue == "" {
 		switch current.State {
 		case StateWorking, StateStalled, StateReviewNeeded:
@@ -1930,6 +1986,17 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// Verify the worktree is actually on the expected branch
 	if actual, err := polecatGit.CurrentBranch(); err == nil && actual != branchName {
 		return nil, fmt.Errorf("branch mismatch after checkout: expected %s, got %s", branchName, actual)
+	}
+
+	// Delete the polecat's previous local branch now that it's no longer
+	// checked out anywhere — replacement must never inherit a stale branch.
+	// Local-only (never touches the remote, mirroring nuke's gt-v5ku fix):
+	// the branch's content, if any, has already been superseded by the reuse
+	// decision above (Reusable implies no pending MR / preserved work on it).
+	if previousBranch != "" && previousBranch != branchName {
+		if err := polecatGit.DeleteBranch(previousBranch, true); err != nil {
+			style.PrintWarning("could not delete stale branch %s on reuse of %s: %v", previousBranch, name, err)
+		}
 	}
 
 	if err := m.runSetupCommand(clonePath); err != nil {
@@ -2321,7 +2388,7 @@ func (m *Manager) List() ([]*Polecat, error) {
 	return polecats, nil
 }
 
-// FindIdlePolecat returns the first idle polecat in the rig, or nil if none.
+// FindIdlePolecat returns the first idle, reusable polecat in the rig, or nil if none.
 // Idle means no hook, no active session, and no pending completion/MR cleanup state.
 // isReuseCandidateState reports whether a polecat's lifecycle state makes it
 // eligible to be considered for reuse. It mirrors DecideWorkstate, which lets
@@ -2331,10 +2398,27 @@ func isReuseCandidateState(s State) bool {
 }
 
 func (m *Manager) FindIdlePolecat() (*Polecat, error) {
+	candidates, err := m.FindIdlePolecats()
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	return candidates[0], nil
+}
+
+// FindIdlePolecats returns every idle, reusable polecat in the rig, in List()
+// order. Callers that need to reuse an identity should try candidates in
+// order and fall through to the next one if a candidate fails or loses a
+// race to a concurrent dispatcher — trying only the first candidate throws
+// away known-reusable identities and forces an unnecessary new allocation.
+func (m *Manager) FindIdlePolecats() ([]*Polecat, error) {
 	polecats, err := m.List()
 	if err != nil {
 		return nil, err
 	}
+	var idle []*Polecat
 	for _, p := range polecats {
 		// gt-nz5x: StateDone is a reuse candidate, not a terminal state. gt done
 		// sets agent_state=done on completion ("done means gone", gt-4ac), so a
@@ -2353,10 +2437,10 @@ func (m *Manager) FindIdlePolecat() (*Polecat, error) {
 			continue
 		}
 		if m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
-			return p, nil
+			idle = append(idle, p)
 		}
 	}
-	return nil, nil
+	return idle, nil
 }
 
 // ReuseDecisionForPolecat exposes the same reuse verdict used by FindIdlePolecat
