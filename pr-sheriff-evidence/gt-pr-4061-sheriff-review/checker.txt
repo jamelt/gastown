@@ -1,0 +1,242 @@
+PR Sheriff independent verification commands and output — PR #4061
+Bead: gt-pr-4061-sheriff-review
+Run at: 2026-08-19T11:30:00Z
+
+$ git remote -v
+origin    https://github.com/jamelt/gastown.git (fetch/push)
+upstream  https://github.com/gastownhall/gastown.git (fetch), push DISABLED
+
+$ gh pr view 4061 --repo gastownhall/gastown --json state,mergedAt,mergeCommit,mergeable,labels,statusCheckRollup,comments,title,author,baseRefName,headRefName,additions,deletions,changedFiles,body,isDraft,reviews
+state=CLOSED mergedAt=null mergeCommit=null mergeable=UNKNOWN isDraft=false
+title="fix: gt polecat prune --remote misses squash/rebase merges (uses IsAncestor instead of patch-equivalence)"
+author=esciara (Emmanuel Sciara) baseRefName=main headRefName=issue-hunter/3779-gt-polecat-prune-remote-misses-squash-re
+additions=133 deletions=5 changedFiles=2
+labels: kind/bug, priority/p2
+body: "Closes #3779" — proposes replacing IsAncestor with `git cherry`
+  patch-id comparison in internal/cmd/polecat.go; adds three tests to
+  internal/git/git_test.go.
+statusCheckRollup: Test/Lint/Integration Tests/Windows Smoke Test all
+  SUCCESS at the time the PR's own diff was last evaluated (2026-05-19),
+  plus housekeeping label-automation checks — CI was green against this
+  PR's own branch, unlike the #4067 precedent.
+Three comments:
+  1. codecov-commenter (2026-05-19): patch coverage 0% on the 7 changed
+     lines in polecat.go; no failed tests.
+  2. Bella-Giraffety (2026-06-09, PR-sheriff workflow record): full 15
+     research legs + 5 pre-implementation reviews + 5 post-implementation
+     reviews recorded inline; identifies the multi-commit-squash gap in
+     the PR's own single-commit-only `git cherry` counting approach and
+     the missing use of exact push-remote hashes (vs. stale local
+     tracking refs); says "Implementation has been ported on the sheriff
+     branch for merge-queue submission."
+  3. Bella-Giraffety (2026-07-09, close): "Closed as superseded by
+     replacement PR #4447, merged as
+     2f6f14071afb49b71c0a41e03545b14158e7012c. Original contribution
+     attribution was preserved in the squash merge with
+     Co-authored-by: Emmanuel Sciara <emmanuel.sciara@gmail.com>."
+
+$ gh pr view 4447 --repo gastownhall/gastown --json state,mergedAt,mergeCommit,title,author,baseRefName,headRefName,additions,deletions,changedFiles,body,statusCheckRollup
+state=MERGED mergedAt=2026-07-09T13:55:48Z mergeCommit.oid=2f6f14071afb49b71c0a41e03545b14158e7012c
+title="fix: prune patch-equivalent remote polecat branches"
+author=Bella-Giraffety headRefName=polecat/brahmin/gt-oae2+f5e75e
+additions=506 deletions=55 changedFiles=4
+body: "Replacement/fixup for #4061 by Emmanuel Sciara. Preserves
+  attribution via commit trailer and PR reference." Describes converging
+  remote polecat prune classification through existing git preservation
+  semantics: exact push-remote ref fetch/hash verification, ancestry,
+  merge-tree no-op, and git cherry patch equivalence; leased
+  force-with-lease deletion.
+statusCheckRollup: Block Internal PRs=SKIPPED, add-triage-label=SUCCESS,
+  Reject go.mod replace directives=SUCCESS, remove-triage-label(x4)=SUCCESS,
+  Windows Smoke Test=SUCCESS, Reject issues.jsonl=SUCCESS, Test=SUCCESS,
+  Lint=SUCCESS, Integration Tests=SUCCESS — full green bar at merge.
+
+$ bd search 4061
+Found 5 issues: gt-sc-c69da8e9ed (sling-context, closed),
+  gt-oae2 (brahmin, closed 2026-07-09: fixup worker, produced PR #4447),
+  gt-qdc9 (vault, closed 2026-07-06: initial review, defer_human_review,
+  merge_path_allowed=false, filed follow-up hq-quuic),
+  gt-pr-4061-sheriff-review (this bead, hooked),
+  gt-pr-sheriff-4061 (closed, mayor-request/dispatch).
+
+$ bd show gt-qdc9
+close_reason: "PR Sheriff review complete: defer_human_review,
+  merge_path_allowed=false; no code changes, no refinery/MQ; follow-up
+  hq-quuic remains open for any approved fixup." Design field: 15/15
+  research legs, 5/5 pre-decision reviews approved, post-implementation
+  reviews not_applicable (no code changes in that pass). Key finding:
+  the PR's `git cherry` counting approach as originally written only
+  proves single-commit-per-branch equivalence and needed multi-commit
+  squash coverage and exact push-remote-hash-based ref resolution before
+  being safe to merge/replace.
+
+$ bd show gt-oae2
+close_reason: "Replacement PR #4447 merged as
+  2f6f14071afb49b71c0a41e03545b14158e7012c; original PR #4061 closed as
+  superseded with attribution preserved." Comment
+  "PR-SHERIFF-EVIDENCE: replacement fixup complete" records:
+  head_sha=0bcc9c507ba243d5c697c5cb9634e2c614a45643, verdict=merge_replacement,
+  merge_path_allowed=true, checker gates: 12 pass / 2 not_applicable / 0 fail,
+  research_legs=15/15, pre_reviews=5/5 approved (revised safety proposal),
+  post_reviews=5/5 approved for final head, attribution preserved via PR
+  body and Co-authored-by trailer, required_followup: "after #4447 merges,
+  close #4061 as superseded with attribution preserved" (done, see PR #4061
+  comment 3 above).
+
+$ git fetch upstream main
+(fetched successfully; upstream/main -> 649b832b7672bc7a2dbef26f5983aba6198b819b)
+
+$ git merge-base --is-ancestor 2f6f14071afb49b71c0a41e03545b14158e7012c upstream/main; echo $?
+0
+IS ANCESTOR: yes
+
+$ git show --stat 2f6f14071afb49b71c0a41e03545b14158e7012c
+commit 2f6f14071afb49b71c0a41e03545b14158e7012c
+Author: Bella-Giraffety
+Date:   Thu Jul 9 13:55:48 2026 +0000
+    fix: prune patch-equivalent remote polecat branches
+    Merge PR Sheriff-approved replacement for PR #4061.
+    Refs: https://github.com/gastownhall/gastown/pull/4061
+    Replacement: https://github.com/gastownhall/gastown/pull/4447
+    Co-authored-by: Emmanuel Sciara <emmanuel.sciara@gmail.com>
+    Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+ internal/cmd/polecat.go            |  78 +++++++++-----
+ internal/cmd/polecat_prune_test.go | 203 +++++++++++++++++++++++++
+ internal/git/git.go                |  80 ++++++++++-----
+ internal/git/git_test.go           | 200 +++++++++++++++++++++++++
+ 4 files changed, 506 insertions(+), 55 deletions(-)
+Result: PASS — attribution to Emmanuel Sciara (original author) and the
+  originating PR #4061 preserved via commit trailer/body, matching the
+  close-comment claim.
+
+$ git grep -n 'func.*runPolecatPrune\|IsAncestor\|Cherry(' upstream/main -- internal/cmd/polecat.go internal/git/git.go
+upstream/main:internal/cmd/polecat.go:2197:func runPolecatPrune(...)
+upstream/main:internal/git/git.go:2242:func (g *Git) IsAncestor(ancestor, descendant string) (bool, error)
+upstream/main:internal/git/git.go:2259:func (g *Git) Cherry(upstream, head string) (string, error)
+upstream/main:internal/git/git.go:3257: merged, err := g.IsAncestor(branch, "origin/"+defaultBranch)  [local-branch prune path, distinct from --remote; out of #4061's scope]
+
+$ (content inspection) internal/cmd/polecat.go: pruneRemotePolecatBranches()
+  lists push-remote refs via ListPushRemoteRefsWithHashes("origin",
+  "refs/heads/polecat/"), calls
+  repoGit.PushRemoteRefTargetStatus("origin", ref, target) per branch,
+  deletes only if status.Preserved, via
+  repoGit.DeleteRemoteBranchIfAt("origin", branch, ref.Hash).
+Result: PASS — remote prune is hash-pinned (not stale local tracking
+  refs), matching the exact-push-remote-hash requirement gt-qdc9 flagged.
+
+$ (content inspection) internal/git/git.go: PushRemoteRefTargetStatus()
+  fetches the exact candidate ref from g.pushTarget(remote), verifies the
+  fetched hash equals the expected listed hash (fails closed on mismatch
+  — "candidate %s changed while pruning"), then calls
+  preservationOfRefAgainstRef(): tries IsAncestor first (fast path),
+  falls back to mergeTreeNoopBetweenRefs (whole-tree no-op merge proof —
+  the multi-commit-squash-safe check gt-qdc9's review demanded), falls
+  back to Cherry-based CountCherryUnmergedCommits()==0 (patch-equivalence,
+  the original PR's core idea) last.
+Result: PASS — three-tier classification (ancestor → merge-tree no-op →
+  cherry patch-equivalence) strictly subsumes the original PR's git-cherry
+  idea, adds the multi-commit squash safety net gt-qdc9's review required,
+  and fails closed (skip, don't delete) on any inspect/fetch error.
+
+$ (content inspection) internal/git/git.go: DeleteRemoteBranchIfAt()
+  git push --force-with-lease=<ref>:<expectedHash> <remote> :<ref>
+Result: PASS — deletion is lease-guarded against the exact hash just
+  verified preserved; no unconditional/raw remote branch deletion.
+
+$ git show upstream/main:internal/cmd/polecat_prune_test.go | grep -n '^func Test'
+12:func TestPruneRemotePolecatBranchesDryRunIncludesPatchEquivalentBranch
+33:func TestRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch
+57:func TestPruneRemotePolecatBranchesUsesUpstreamBaseForOriginFork
+
+$ git show upstream/main:internal/git/git_test.go | grep -n '^func Test.*Cherry\|^func Test.*PushRemoteRefTargetStatus'
+3027:func TestPushRemoteRefTargetStatusPreservesRebasedRemoteBranch
+3092:func TestPushRemoteRefTargetStatusPreservesMultiCommitSquashRemoteBranch
+3158:func TestPushRemoteRefTargetStatusKeepsUnmergedSplitPushRemoteBranch
+Result: PASS — regression coverage on upstream/main includes a dedicated
+  multi-commit-squash test (the exact gap gt-qdc9's review flagged in the
+  original PR), a rebase test, and a negative (still-unmerged) test.
+
+$ git worktree add --detach /tmp/gt-pr4061-check upstream/main
+Preparing worktree (detached HEAD 649b832b7)
+
+$ (cd /tmp/gt-pr4061-check && CGO_ENABLED=0 go test ./internal/git ./internal/cmd \
+    -run 'TestPushRemoteRefTargetStatus|TestCountCherryUnmergedCommits|TestPruneRemotePolecatBranches|TestRunPolecatPruneRemote' \
+    -v -count=1)
+=== RUN   TestPushRemoteRefTargetStatusPreservesRebasedRemoteBranch
+--- PASS (0.15s)
+=== RUN   TestPushRemoteRefTargetStatusPreservesMultiCommitSquashRemoteBranch
+--- PASS (0.16s)
+=== RUN   TestPushRemoteRefTargetStatusKeepsUnmergedSplitPushRemoteBranch
+--- PASS (0.19s)
+ok  	github.com/steveyegge/gastown/internal/git	0.517s
+=== RUN   TestPruneRemotePolecatBranchesDryRunIncludesPatchEquivalentBranch
+--- PASS (0.15s)
+=== RUN   TestRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch
+--- PASS (0.15s)
+=== RUN   TestPruneRemotePolecatBranchesUsesUpstreamBaseForOriginFork
+--- PASS (0.22s)
+ok  	github.com/steveyegge/gastown/internal/cmd	0.814s
+Result: PASS — all 6 regression tests pass, run directly against a clean
+  checkout of upstream/main HEAD (649b832b7), not the review branch's own
+  diverged fork tree.
+
+$ (cd /tmp/gt-pr4061-check && CGO_ENABLED=0 go build -o /tmp/gt-pr4061-check/gt-bin ./cmd/gt); echo exit=$?
+exit=0
+Result: PASS — gt builds cleanly on current upstream/main.
+
+$ git worktree remove /tmp/gt-pr4061-check --force
+(removed)
+
+$ gh pr list --repo gastownhall/gastown --search "polecat prune remote in:title" --state all --json number,title,state,author
+-> #4447 (MERGED, the known replacement), #4213 (MERGED, earlier "protect
+   remote polecat prune deletes" iteration), #3847 (CLOSED, [codex] earlier
+   attempt), #4208 (CLOSED, earlier "classify remote polecat prune refs by
+   hash" iteration), #4061 (this PR, CLOSED as superseded). No competing
+   open PR; #4213/#4208/#3847 are earlier iterations already resolved
+   before #4447 landed.
+
+$ gh issue view 3779 --repo gastownhall/gastown --json state,title,body,closedAt
+state=OPEN closedAt=null
+Body matches PR #4061's stated motivation exactly (IsAncestor false-negative
+  on squash/rebase merges); this is the originating issue "Closes #3779" in
+  #4061's PR body referenced.
+Result: OPEN despite the fix being merged — because #4061 itself never
+  merged (closed as superseded), the "Closes #3779" GitHub auto-close
+  keyword never fired, and replacement PR #4447's body does not itself
+  reference #3779 by number. Recommended: close as fixed by #4447.
+
+$ gh issue list --repo gastownhall/gastown --search "polecat prune squash rebase in:title,body" --state all --json number,title,state
+-> #3779 (OPEN, this issue), #3868 (CLOSED, distinct — mq post-merge
+   silent branch-deletion failure, not a classification bug).
+
+$ gh issue list --repo gastownhall/gastown --search "prune rebase in:title,body" --state open --json number,title,state
+-> #3779, #4197 (both on-point), #4145 (Dolt SQL server CPU — unrelated,
+   keyword collision only).
+
+$ gh issue view 4197 --repo gastownhall/gastown --json state,title,body,closedAt
+state=OPEN closedAt=null
+title="Remote branch pruning misses rebased-merged polecat branches that
+  are no longer ancestors of main"
+Body: describes the identical root-cause bug (ancestry-only check missing
+  rebase-merged branches) as #3779, filed independently 2026-06-07 (5.5
+  weeks after #3779, 2026-04-28), citing a separate observation wave.
+Result: duplicate of #3779 / same bug class fixed by PR #4447. Recommended:
+  close as fixed by #4447 (duplicate of #3779).
+
+$ gh issue view 4621 --repo gastownhall/gastown --json body,createdAt
+Body: "gt orphans reports 'N commit(s) ahead of main'..." — a different
+  command (`gt orphans`, not `gt polecat prune --remote`) measuring a
+  different signal (ahead-count display, not merge classification).
+Result: topically adjacent (polecat-branch-lifecycle correctness) but a
+  distinct subsystem/command; not fixed by #4447; no linkage or action
+  owed in this pass.
+
+$ gh issue list --repo gastownhall/gastown --search "4447 in:body" --state all --json number,title,state
+-> [] (no issue references #4447 by number; #3779/#4197 disposition must
+   be recommended manually, not inferred from an existing cross-link)
+
+Branch-hygiene gate (mol-pr-sheriff-patrol §Branch Hygiene Gate):
+  Not applicable in this pass — Sheriff authored no replacement branch,
+  opened no PR, and made no code change; the gate applies only before
+  opening/recommending a new maintainer replacement PR, which did not
+  occur here (the replacement, #4447, was already merged by a prior pass).
