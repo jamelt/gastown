@@ -1475,9 +1475,6 @@ func cleanupStatusReconcileCandidate(status *RecoveryStatus, p *polecat.Polecat,
 	if previous == polecat.CleanupClean {
 		return previous, false
 	}
-	if previous == "" && status.CleanupProvenance != legacyCleanupReadOnlyProvenance {
-		return previous, false
-	}
 	if !legacyCleanupLifecycleDormant(p.State, beads.AgentState(fields.AgentState)) {
 		return previous, false
 	}
