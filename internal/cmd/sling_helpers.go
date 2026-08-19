@@ -425,6 +425,8 @@ func getBeadInfo(beadID string) (*beadInfo, error) {
 // eliminating the race condition where concurrent writers could overwrite each other's fields.
 type beadFieldUpdates struct {
 	Dispatcher       string   // Agent that dispatched the work
+	DispatchContext  string   // Dispatch context (e.g., sling context ID)
+	DispatchActor    string   // Actor that dispatched the work
 	Args             string   // Natural language instructions
 	Vars             []string // Formula variables (key=value pairs)
 	AttachedMolecule string   // Wisp root ID
@@ -436,6 +438,7 @@ type beadFieldUpdates struct {
 	MergeStrategy    string   // Convoy merge strategy: "direct", "mr", "local"
 	ConvoyOwned      bool     // Convoy has gt:owned label (caller-managed lifecycle)
 	FormulaVars      string   // Newline-separated key=value pairs for formula template substitution
+	ClearAttachment  bool     // Clear the attachment if set to true
 }
 
 func buildSlingFieldUpdates(

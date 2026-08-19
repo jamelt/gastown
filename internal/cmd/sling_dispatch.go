@@ -434,7 +434,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		AttachedMolecule: attachedMoleculeID,
 		NoMerge:          params.NoMerge,
 		ReviewOnly:       params.ReviewOnly,
-		Mode:             &params.Mode,
+		Mode:             params.Mode,
 		FormulaVars:      formulaVarsForAttachment,
 	}
 	if params.FormulaName != "" {

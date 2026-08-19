@@ -41,17 +41,41 @@ func collectExistingMoleculesForBead(info *beadInfo, beadID string, townRoot str
 }
 
 // storeFieldsInBeadFromTownRoot stores result fields in a bead from the town root context.
-func storeFieldsInBeadFromTownRoot(bd *beads.Beads, beadID string, updates beadFieldUpdates) error {
-	if bd == nil || beadID == "" {
+func storeFieldsInBeadFromTownRoot(townRoot string, beadID string, updates beadFieldUpdates) error {
+	if townRoot == "" || beadID == "" {
 		return nil
 	}
 	// Stub: Store fields in the bead using bd.Update or similar
 	return nil
 }
 
+// collectExistingMoleculeDeps collects dependencies for existing molecules.
+func collectExistingMoleculeDeps(townRoot string, moleculeIDs []string) ([]string, error) {
+	if townRoot == "" || len(moleculeIDs) == 0 {
+		return []string{}, nil
+	}
+	// Stub: Collect dependencies for the given molecule IDs
+	return []string{}, nil
+}
+
+// appendUniqueMolecules appends unique molecule IDs to a list, avoiding duplicates.
+func appendUniqueMolecules(existing []string, new []string) []string {
+	seen := make(map[string]bool)
+	for _, id := range existing {
+		seen[id] = true
+	}
+	for _, id := range new {
+		if !seen[id] {
+			existing = append(existing, id)
+			seen[id] = true
+		}
+	}
+	return existing
+}
+
 // hookBeadWithRetryFn is a function that hooks a bead with retry logic.
-func hookBeadWithRetryFn(bd *beads.Beads, beadID string) error {
-	if bd == nil || beadID == "" {
+func hookBeadWithRetryFn(townRoot string, beadID string, moleculeID string) error {
+	if townRoot == "" || beadID == "" {
 		return nil
 	}
 	// Stub: Hook the bead with retry logic
