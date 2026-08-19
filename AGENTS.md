@@ -26,6 +26,8 @@ Never infer identity or assignment from a directory, file, or unassigned queue.
   call must use `--skip-agents --skip-hooks` so Beads cannot overwrite Gas Town
   or customer-repository instructions.
 - Add focused tests for changed behavior; run the smallest relevant package
-  first, then broader Go tests when risk warrants it.
+  first, then broader Go tests when risk warrants it. A green test is not
+  evidence of protection—prove a focused test can fail under the defect
+  before trusting it.
 - Update documentation only when a public command or operational contract
   changes, not as a blanket completion step.
