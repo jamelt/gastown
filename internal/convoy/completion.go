@@ -54,10 +54,19 @@ func ClaimCompletionNotification(townRoot, convoyID string) (claimed bool, field
 // claimUnlocked performs the fresh read-check-write of CompletionNotifiedAt.
 // Called with the per-convoy flock held (the common case) or without it as a
 // bounded fallback when the lock could not be acquired in time.
+//
+// --allow-stale is prepended to the show/update args when bd supports it,
+// matching the rest of the refinery's convoy-completion scan (list, dep
+// list, show, close all use it) — without this, a claim on a convoy that
+// only just closed via a stale-tolerant read could itself fail on a lagging
+// Dolt replica, leaving the convoy closed but its completion notification
+// never sent (and never retried, since it's no longer status=open).
 func claimUnlocked(townRoot, convoyID string) (bool, *beads.ConvoyFields, error) {
 	beadsDir := filepath.Join(townRoot, ".beads")
 
-	showCmd := beads.Command(beadsDir, beadsDir, beads.ReadOnlyPinned, "show", convoyID, "--json")
+	readEnv := beads.BuildReadOnlyPinnedBDEnv(os.Environ(), beadsDir)
+	showArgs := beads.MaybePrependAllowStaleWithEnv(readEnv, []string{"show", convoyID, "--json"})
+	showCmd := beads.Command(beadsDir, beadsDir, beads.ReadOnlyPinned, showArgs...)
 	var showOut bytes.Buffer
 	showCmd.Stdout = &showOut
 	if err := showCmd.Run(); err != nil {
@@ -82,7 +91,9 @@ func claimUnlocked(townRoot, convoyID string) (bool, *beads.ConvoyFields, error)
 	fields.CompletionNotifiedAt = time.Now().UTC().Format(time.RFC3339)
 	newDesc := beads.SetConvoyFields(&beads.Issue{Description: convoys[0].Description}, fields)
 
-	updateCmd := beads.Command(beadsDir, beadsDir, beads.MutationPinned, "update", convoyID, "--description="+newDesc)
+	mutationEnv := beads.BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
+	updateArgs := beads.MaybePrependAllowStaleWithEnv(mutationEnv, []string{"update", convoyID, "--description=" + newDesc})
+	updateCmd := beads.Command(beadsDir, beadsDir, beads.MutationPinned, updateArgs...)
 	if err := updateCmd.Run(); err != nil {
 		return false, nil, fmt.Errorf("persisting convoy completion claim for %s: %w", convoyID, err)
 	}

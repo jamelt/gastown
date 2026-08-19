@@ -369,6 +369,12 @@ func QueueLen(townRoot, session string) int {
 // RemoveKindByThread deletes queued nudges for a session that match both the
 // provided kind and thread ID. It only removes queued .json files, leaving any
 // in-flight claimed files alone so concurrent drainers can finish safely.
+//
+// Known gap (gt-gy9x): a nudge already claimed by an in-flight Drain at the
+// moment this runs is not removed and will still be delivered, even if the
+// caller's intent (e.g. a satisfied reply-reminder) has already been met.
+// EnqueueUniqueByKindThread prevents duplicate *enqueues* but does not close
+// this delivery-side race.
 func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 	if kind == "" || threadID == "" {
 		return 0, nil
