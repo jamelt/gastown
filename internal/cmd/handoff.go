@@ -248,7 +248,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the restart command
-	restartCmd, err := buildRestartCommand(targetSession)
+	restartCmd, _, err := buildRestartCommand(targetSession)
 	if err != nil {
 		return err
 	}
@@ -987,38 +987,30 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	return envCmd, workDir, nil
 }
 
-// respawnSessionPane builds the restart command for sessionName and respawns
-// pane with it. If the pane's actual working directory has been deleted
-// (e.g. an orphaned worktree), the restart command is rebuilt targeting the
-// town root instead of the session's usual work directory, and tmux is told
-// to respawn into that same town root via -c.
+// respawnSessionPane builds the restart command and canonical working
+// directory for sessionName, then respawns pane targeting that directory via
+// tmux's native -c flag (RespawnPaneWithWorkDir). If the canonical directory
+// has been deleted (e.g. an orphaned worktree), the town root is used instead.
 //
-// Previously the fallback reused a restartCmd whose embedded `cd <dir> &&`
-// still pointed at the deleted directory while tmux's own -c pointed at the
-// town root; the embedded `cd` failed, `&&` short-circuited, and the pane's
-// shell exited immediately — leaving a dead pane (gt-gd7j). Rebuilding the
-// command with the same directory used for -c keeps both in sync.
+// The restart command never embeds its own `cd`; -c is the single source of
+// truth for the pane's working directory, so it can't drift out of sync with
+// what the command actually runs against (gt-w51h; previously an embedded
+// `cd <dir> &&` could target a different, deleted directory than tmux's -c,
+// fail, and leave a dead pane — gt-gd7j).
 func respawnSessionPane(t *tmux.Tmux, pane, sessionName string, opts buildRestartCommandOpts) error {
-	paneWorkDir, _ := t.GetPaneWorkDir(sessionName)
-	if paneWorkDir != "" {
-		if _, statErr := os.Stat(paneWorkDir); statErr != nil {
-			if townRoot := detectTownRootFromCwd(); townRoot != "" {
-				style.PrintWarning("pane working directory deleted, using town root")
-				opts.WorkDirOverride = townRoot
-				restartCmd, err := buildRestartCommandWithOpts(sessionName, opts)
-				if err != nil {
-					return err
-				}
-				return t.RespawnPaneWithWorkDir(pane, townRoot, restartCmd)
-			}
-		}
-	}
-
-	restartCmd, err := buildRestartCommandWithOpts(sessionName, opts)
+	restartCmd, workDir, err := buildRestartCommandWithOpts(sessionName, opts)
 	if err != nil {
 		return err
 	}
-	return t.RespawnPane(pane, restartCmd)
+	if workDir != "" {
+		if _, statErr := os.Stat(workDir); statErr != nil {
+			if townRoot := detectTownRootFromCwd(); townRoot != "" {
+				style.PrintWarning("working directory deleted, using town root")
+				workDir = townRoot
+			}
+		}
+	}
+	return t.RespawnPaneWithWorkDir(pane, workDir, restartCmd)
 }
 
 // updateSessionEnvForHandoff updates the tmux session environment with the

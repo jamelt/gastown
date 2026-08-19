@@ -9,12 +9,13 @@ import (
 )
 
 type mockAgentFailoverTmux struct {
-	env        map[string]string
-	pane       string
-	respawnCmd string
-	respawnErr error
-	killed     bool
-	cleared    bool
+	env            map[string]string
+	pane           string
+	respawnCmd     string
+	respawnWorkDir string
+	respawnErr     error
+	killed         bool
+	cleared        bool
 }
 
 func (m *mockAgentFailoverTmux) GetEnvironment(_, key string) (string, error) {
@@ -40,7 +41,8 @@ func (m *mockAgentFailoverTmux) ClearHistory(string) error {
 	m.cleared = true
 	return nil
 }
-func (m *mockAgentFailoverTmux) RespawnPane(_, command string) error {
+func (m *mockAgentFailoverTmux) RespawnPaneWithWorkDir(_, workDir, command string) error {
+	m.respawnWorkDir = workDir
 	m.respawnCmd = command
 	return m.respawnErr
 }
@@ -67,8 +69,8 @@ func TestExecuteAgentFailoverChangesRuntimeAndPersistsState(t *testing.T) {
 		FailoverCount:   1,
 	}
 
-	result := executeAgentFailover(tmux, mgr, assignment, time.Hour, func(_, nextAgent string) (string, error) {
-		return "exec " + nextAgent, nil
+	result := executeAgentFailover(tmux, mgr, assignment, time.Hour, func(_, nextAgent string) (string, string, error) {
+		return "exec " + nextAgent, "/town/hq/mayor", nil
 	})
 	if !result.Changed || result.Error != "" {
 		t.Fatalf("result = %+v", result)
@@ -108,8 +110,8 @@ func TestExecuteAgentFailoverRestoresEnvironmentOnRespawnFailure(t *testing.T) {
 		Session: "hq-mayor", CurrentAgent: "claude-opus-5", CurrentProvider: "anthropic", NextAgent: "codex-sol-high", NextProvider: "openai",
 	}
 
-	result := executeAgentFailover(tmux, mgr, assignment, time.Hour, func(_, nextAgent string) (string, error) {
-		return "exec " + nextAgent, nil
+	result := executeAgentFailover(tmux, mgr, assignment, time.Hour, func(_, nextAgent string) (string, string, error) {
+		return "exec " + nextAgent, "/town/hq/mayor", nil
 	})
 	if result.Changed || result.Error == "" {
 		t.Fatalf("result = %+v", result)

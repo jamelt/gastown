@@ -722,7 +722,7 @@ func executeKeychainRotation(
 	// Build restart command with --continue to resume previous conversation.
 	// ContinueSession omits the beacon prompt and adds --continue, so the
 	// agent silently resumes where it left off without a fresh handoff cycle.
-	restartCmd, err := buildRestartCommandWithOpts(session, buildRestartCommandOpts{
+	restartCmd, workDir, err := buildRestartCommandWithOpts(session, buildRestartCommandOpts{
 		ContinueSession: true,
 	})
 	if err != nil {
@@ -764,8 +764,9 @@ func executeKeychainRotation(
 		style.PrintWarning("could not clear history for %s: %v", session, err)
 	}
 
-	// Respawn with same config dir (fresh token already in keychain)
-	if err := t.RespawnPane(pane, restartCmd); err != nil {
+	// Respawn with same config dir (fresh token already in keychain), targeting
+	// the canonical working directory via tmux's native -c flag (gt-w51h).
+	if err := t.RespawnPaneWithWorkDir(pane, workDir, restartCmd); err != nil {
 		result.Error = fmt.Sprintf("respawning pane: %v", err)
 		return result
 	}
