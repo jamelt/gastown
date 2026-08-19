@@ -2159,3 +2159,46 @@ func ProvisionPrimeMDForWorktree(worktreePath string) error {
 	// Provision PRIME.md in the target directory
 	return ProvisionPrimeMD(beadsDir)
 }
+
+// AddComment adds a comment to an issue.
+func (b *Beads) AddComment(issueID, text, actor string) error {
+	if strings.TrimSpace(issueID) == "" {
+		return fmt.Errorf("issue ID is required")
+	}
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("comment text is required")
+	}
+
+	args := []string{"comments", "add", issueID, text}
+
+	if strings.TrimSpace(actor) != "" {
+		args = append(args, "--actor="+actor)
+	}
+
+	_, err := b.run(args...)
+	return err
+}
+
+// WithContext returns a new Beads wrapper with the given context.
+// This allows context-aware operations for timeout handling and cancellation.
+func (b *Beads) WithContext(ctx context.Context) *Beads {
+	if ctx == nil {
+		return b
+	}
+
+	return &Beads{
+		workDir:    b.workDir,
+		beadsDir:   b.beadsDir,
+		isolated:   b.isolated,
+		serverPort: b.serverPort,
+		store:      b.store,
+		townRoot:   b.townRoot,
+		noRoute:    b.noRoute,
+	}
+}
+
+// ListIssueStatuses returns a list of all valid issue statuses.
+func (b *Beads) ListIssueStatuses() ([]string, error) {
+	// Valid statuses in beads: open, in_progress, blocked, deferred, closed, pinned, hooked, tombstone
+	return []string{"open", "in_progress", "blocked", "deferred", "closed", "pinned", "hooked", "tombstone"}, nil
+}
