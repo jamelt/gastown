@@ -70,7 +70,7 @@ func TestVerifyRigDoltLineageAllowsUnregisteredRemote(t *testing.T) {
 	}
 }
 
-func TestVerifyRigDoltLineageRejectsUnverifiedRemote(t *testing.T) {
+func TestVerifyRigDoltLineageAllowsUnverifiedRemote(t *testing.T) {
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, "testrig", ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -90,11 +90,8 @@ func TestVerifyRigDoltLineageRejectsUnverifiedRemote(t *testing.T) {
 	}
 
 	err := verifyRigDoltLineage(townRoot, "testrig")
-	if err == nil {
-		t.Fatal("expected unverified remote to still block dispatch")
-	}
-	if !strings.Contains(err.Error(), "refusing dispatch") {
-		t.Fatalf("unexpected error: %v", err)
+	if err != nil {
+		t.Fatalf("unverified remote should be allowed at dispatch gate (gt-a7o5): %v", err)
 	}
 }
 

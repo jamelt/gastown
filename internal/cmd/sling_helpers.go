@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/formula"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -27,6 +28,55 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+var inspectRigDoltLineageFn = doltserver.InspectLineageSQL
+
+// verifyRigDoltLineage blocks work dispatch when a rig configured for remote
+// Beads sync has a database with independent (diverged) history.
+// remote-unverified (configured but uninitialized remote) is allowed to proceed
+// at dispatch time (gt-a7o5), but no-common-ancestor (truly diverged) is blocked.
+// A rig with no Dolt remote registered at all degrades to local-only and
+// allows dispatch. The check is read-only and runs before polecat creation.
+func verifyRigDoltLineage(townRoot, rigName string) error {
+	if townRoot == "" || rigName == "" {
+		return fmt.Errorf("cannot verify Dolt lineage for rig %q: workspace context unavailable", rigName)
+	}
+	beadsDir := doltserver.FindRigBeadsDir(townRoot, rigName)
+	configData, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // no tracked remote policy; existing database checks still apply
+		}
+		return fmt.Errorf("reading rig %q Beads config for lineage check: %w", rigName, err)
+	}
+	if !configHasSyncRemote(string(configData)) {
+		return nil
+	}
+	dbName := beads.DatabaseNameFromMetadata(beadsDir)
+	if dbName == "" {
+		return fmt.Errorf("rig %q configures Beads remote sync but has no dolt_database metadata; refusing dispatch", rigName)
+	}
+	report, err := inspectRigDoltLineageFn(townRoot, dbName)
+	if err != nil {
+		return fmt.Errorf("cannot verify rig %q Beads lineage: %w; refusing dispatch", rigName, err)
+	}
+	// Block only diverged history (no common ancestor). Allow remote-unverified.
+	if report.State == doltserver.LineageDiverged {
+		return fmt.Errorf("refusing dispatch: %s\nRun 'gt dolt reconcile --db %s' for read-only diagnostics and an approved preservation plan", report.Diagnostic(), dbName)
+	}
+	return nil
+}
+
+func configHasSyncRemote(config string) bool {
+	for _, line := range strings.Split(config, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.HasPrefix(line, "sync.remote:") {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "sync.remote:")), `"'`) != ""
+	}
+	return false
+}
 
 // resolveBeadDir returns the directory to run bd commands for a given bead ID.
 // Uses prefix-based routing (routes.jsonl) to resolve the correct rig's .beads
