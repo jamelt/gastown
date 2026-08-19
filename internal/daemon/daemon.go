@@ -3191,15 +3191,18 @@ func (d *Daemon) processSchedulerWake() {
 
 // dispatchQueuedWork shells out to the daemon's resolved gt executable to dispatch scheduled beads.
 // This avoids circular import between the daemon and cmd packages.
-// Uses a 5m timeout to allow multi-bead dispatch with formula cooking and hook retries.
+// The timeout scales with batch_size: each bead gets ~45s (worktree, branch setup, formula cooking,
+// hook attach, session start) plus ~15s spawn_delay pacing, ~60s margin for the dispatch loop.
+// Minimum timeout: 5m (safe default for single beads). Max timeout: capped to prevent runaway configs.
 //
 // Timeout safety: if the timeout fires mid-dispatch, a bead may be left with
 // metadata written but label not yet swapped (or vice versa). The dispatch flock
 // is released on process death, and dispatchSingleBead's label swap retry logic
-// prevents double-dispatch on the next cycle. The batch_size config (default: 1)
-// limits how many beads are in-flight per heartbeat, reducing the timeout window.
+// prevents double-dispatch on the next cycle.
 func (d *Daemon) dispatchQueuedWork() (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	timeout := d.calculateDispatchTimeout()
+	batchSize := d.getBatchSize()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.gtPath, "scheduler", "run")
 	setSysProcAttr(cmd)
@@ -3207,7 +3210,7 @@ func (d *Daemon) dispatchQueuedWork() (int, error) {
 	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		d.logger.Printf("Scheduler dispatch timed out after 5m")
+		d.logger.Printf("Scheduler dispatch timed out after %v (batch_size=%d)", timeout, batchSize)
 		return 0, ctx.Err()
 	} else if err != nil {
 		d.logger.Printf("Scheduler dispatch failed: %v (output: %s)", err, string(out))
@@ -3216,6 +3219,42 @@ func (d *Daemon) dispatchQueuedWork() (int, error) {
 		d.logger.Printf("Scheduler dispatch: %s", string(out))
 	}
 	return parseSchedulerDispatchCount(string(out)), nil
+}
+
+// getBatchSize returns the configured scheduler batch_size, or 1 if unset.
+func (d *Daemon) getBatchSize() int {
+	opCfg := d.loadOperationalConfig()
+	if opCfg == nil || opCfg.Scheduler == nil {
+		return 1
+	}
+	batchSize := opCfg.Scheduler.GetBatchSize()
+	if batchSize < 1 {
+		return 1
+	}
+	return batchSize
+}
+
+// calculateDispatchTimeout returns a timeout scaled to the configured batch_size.
+// Per-bead budget: 45s for setup (worktree, branch, formula) + 15s spawn_delay + margin.
+// Total = (per_bead_budget * batch_size) + overhead, clamped to [5m, 30m] for safety.
+func (d *Daemon) calculateDispatchTimeout() time.Duration {
+	batchSize := d.getBatchSize()
+
+	// Per-bead budget: 45s setup + 15s spawn_delay = 60s per bead.
+	// Add 60s overhead for the dispatch loop.
+	const perBeadBudget = 60 * time.Second
+	const dispatchOverhead = 60 * time.Second
+	const minTimeout = 5 * time.Minute
+	const maxTimeout = 30 * time.Minute
+
+	calculated := perBeadBudget*time.Duration(batchSize) + dispatchOverhead
+	if calculated < minTimeout {
+		return minTimeout
+	}
+	if calculated > maxTimeout {
+		return maxTimeout
+	}
+	return calculated
 }
 
 func parseSchedulerDispatchCount(output string) int {
