@@ -285,10 +285,7 @@ func runChannelCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	createdBy := os.Getenv("BD_ACTOR")
-	if createdBy == "" {
-		createdBy = "unknown"
-	}
+	createdBy := claimedActor()
 
 	b := beads.New(townRoot)
 
@@ -354,6 +351,11 @@ func runChannelDelete(cmd *cobra.Command, args []string) error {
 func runChannelSubscribe(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
+	// CRITICAL: Must use raw os.Getenv("BD_ACTOR"), NOT claimedActor().
+	// This is a fail-closed state-mutation check: the subscriber identity becomes
+	// the actual channel-subscriber-list entry (permanent state). Using claimedActor()
+	// would let an empty-BD_ACTOR caller silently subscribe as a cwd-guessed identity
+	// instead of erroring. See gt-hax3 for the security rationale.
 	subscriber := os.Getenv("BD_ACTOR")
 	if subscriber == "" {
 		return fmt.Errorf("BD_ACTOR not set - cannot determine subscriber identity")
@@ -394,6 +396,11 @@ func runChannelSubscribe(cmd *cobra.Command, args []string) error {
 func runChannelUnsubscribe(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
+	// CRITICAL: Must use raw os.Getenv("BD_ACTOR"), NOT claimedActor().
+	// This is a fail-closed state-mutation check: the subscriber identity must be
+	// verified before removing from the channel subscription list (permanent state).
+	// Using claimedActor() would let an empty-BD_ACTOR caller silently unsubscribe
+	// as a cwd-guessed identity instead of erroring. See gt-hax3 for rationale.
 	subscriber := os.Getenv("BD_ACTOR")
 	if subscriber == "" {
 		return fmt.Errorf("BD_ACTOR not set - cannot determine subscriber identity")

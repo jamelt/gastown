@@ -215,10 +215,7 @@ func runGroupCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Detect creator
-	createdBy := os.Getenv("BD_ACTOR")
-	if createdBy == "" {
-		createdBy = "unknown"
-	}
+	createdBy := claimedActor()
 
 	b := beads.New(townRoot)
 

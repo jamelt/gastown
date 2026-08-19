@@ -180,10 +180,7 @@ func runWarrantFile(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get filer identity
-	filedBy := os.Getenv("BD_ACTOR")
-	if filedBy == "" {
-		filedBy = "unknown"
-	}
+	filedBy := claimedActor()
 
 	warrant := Warrant{
 		ID:       fmt.Sprintf("warrant-%d", time.Now().UnixMilli()),
