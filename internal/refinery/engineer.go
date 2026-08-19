@@ -572,11 +572,12 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pull from origin/%s: %v (continuing)\n", target, err)
 	}
 
-	// If the submitted head is already contained in the target, the merge below is
-	// a no-op and HEAD would stay at the unrelated target tip. Record it as a no-op
-	// with no merge commit instead of falsely stamping that tip as this MR's merge
-	// commit (gt-v2zr).
-	if e.mrIsNoOpMerge(mergeRef, "HEAD") {
+	// If the submitted head is already contained in the target, the local merge
+	// below is a no-op that leaves HEAD at the unrelated target tip; record it as a
+	// no-op instead of stamping that tip as this MR's merge commit (gt-v2zr). Scoped
+	// to the local merge path: PR-mode merges go through the VCS provider, which
+	// takes its merge SHA from the provider and will not merge an empty PR.
+	if e.config.MergeStrategy != "pr" && e.mrIsNoOpMerge(mergeRef, "HEAD") {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: source branch %s has no commits ahead of %s — nothing to merge (no-op)\n", mr.ID, branch, target)
 		return ProcessResult{Success: true, NoOp: true}
 	}
@@ -1437,6 +1438,7 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 		Target:      mr.Target,
 		SourceIssue: workBeadID,
 		MergeCommit: result.MergeCommit,
+		NoOp:        result.NoOp,
 	})
 
 	// 1.2. Close conflict-resolution tasks that this land has made moot (hq-jnap).

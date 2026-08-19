@@ -482,6 +482,43 @@ func TestProcessBatch_MultipleMRs_AllPass(t *testing.T) {
 	}
 }
 
+// TestProcessBatch_NoOpMRInBatch covers gt-v2zr for the batch path: a batch
+// containing an already-landed (0-commits-ahead) MR alongside a real MR must land
+// cleanly. The no-op MR is handled (not failed) and contributes no commits, so the
+// batch tip reflects only the real MR's work. (Close-reason=no-op on the MR bead is
+// asserted by the Dolt-backed TestEngineerCloseMRWithReasonRecordsNoOp.)
+func TestProcessBatch_NoOpMRInBatch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-real", "real.txt", "real work\n")
+	// No-op MR: branch points at main's tip, so it has 0 commits ahead of target.
+	run(t, workDir, "git", "branch", "feature-noop", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	batch := []*MRInfo{
+		makeMR("mr-noop", "feature-noop", "main"),
+		makeMR("mr-real", "feature-real", "main"),
+	}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	// A no-op is handled successfully, not treated as a failure.
+	if len(result.Merged) != 2 {
+		t.Fatalf("expected 2 handled MRs, got %d: %v", len(result.Merged), stackedIDs(result.Merged))
+	}
+	if len(result.Conflicts) != 0 || len(result.Culprits) != 0 {
+		t.Fatalf("unexpected conflicts=%v culprits=%v", stackedIDs(result.Conflicts), stackedIDs(result.Culprits))
+	}
+	// The real work landed and the no-op branch contributed nothing.
+	run(t, workDir, "git", "checkout", "main")
+	if _, err := os.Stat(filepath.Join(workDir, "real.txt")); os.IsNotExist(err) {
+		t.Error("expected real.txt on main after batch merge")
+	}
+}
+
 func TestProcessBatch_WithConflict(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()

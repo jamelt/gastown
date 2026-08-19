@@ -15,6 +15,7 @@ type mergedWorkBeadCloseRequest struct {
 	SourceIssue string
 	AgentBead   string
 	MergeCommit string
+	NoOp        bool // Branch had no commits ahead of target — nothing merged (gt-v2zr)
 }
 
 type mergedWorkBeadCloseResult struct {
@@ -75,6 +76,11 @@ func closeMergedWorkBead(work workBeadCloser, agent issueReader, out io.Writer, 
 	}
 
 	closeReason := fmt.Sprintf("Merged in %s", req.MRID)
+	if req.NoOp {
+		// A no-op MR merged nothing (branch already contained in target); say so
+		// rather than claiming "Merged in" with no commit_sha (gt-v2zr).
+		closeReason = fmt.Sprintf("Resolved by no-op MR %s (source branch had no commits ahead of %s)", req.MRID, req.Target)
+	}
 	if req.MergeCommit != "" {
 		closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, req.Target, req.MergeCommit)
 	}
