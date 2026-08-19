@@ -366,9 +366,37 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 			wantCanSkip:  true,
 		},
 		{
-			name:         "unknown cleanup still blocks",
+			// gt-daff: a missing/unknown cleanup_status is the case
+			// --reconcile-cleanup exists to backfill. Refusing to ever skip it
+			// made the flag a no-op in exactly that case, since the field it
+			// needed to repair was also the predicate refusing the repair.
+			name:         "closed source with clean git ignores stale unknown cleanup",
 			status:       polecat.CleanupUnknown,
 			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "unknown cleanup still blocks when git is not provably safe",
+			status:       polecat.CleanupUnknown,
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+		},
+		{
+			name:         "closed source with clean git ignores missing cleanup",
+			status:       "",
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "missing cleanup still blocks when work is not terminal",
+			status:       "",
 			hookSafe:     true,
 			activeMRSafe: true,
 			gitSafe:      true,
@@ -437,8 +465,16 @@ func TestFullyIdlePolecatWithProvablyCleanGitCanIgnoreStaleCleanupStatus(t *test
 }
 
 func TestReconcileCleanupStatusIfSafe(t *testing.T) {
-	for _, previous := range []polecat.CleanupStatus{polecat.CleanupUnpushed, polecat.CleanupStash, polecat.CleanupUncommitted} {
-		t.Run(string(previous), func(t *testing.T) {
+	// gt-daff: unknown and missing ("") must reconcile too, without requiring
+	// CleanupProvenance to be pre-populated by the narrower legacy-evidence
+	// path — status.Verdict == SAFE_TO_NUKE is already the authoritative
+	// live-safety signal once DecideWorkstate accounts for them.
+	for _, previous := range []polecat.CleanupStatus{polecat.CleanupUnpushed, polecat.CleanupStash, polecat.CleanupUncommitted, polecat.CleanupUnknown, ""} {
+		name := string(previous)
+		if name == "" {
+			name = "missing"
+		}
+		t.Run(name, func(t *testing.T) {
 			status := &RecoveryStatus{
 				CleanupStatus: previous,
 				Verdict:       "SAFE_TO_NUKE",
