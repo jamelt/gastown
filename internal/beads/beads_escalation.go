@@ -320,7 +320,11 @@ func (b *Beads) ListEscalations() ([]*Issue, error) {
 	return filterEscalationRecords(issues), nil
 }
 
-// ListEscalationsByFingerprint returns open escalation beads matching a stable fingerprint label.
+// ListEscalationsByFingerprint returns escalation beads (any status) matching
+// a stable fingerprint label. Callers that only care about active duplicates
+// should filter by Status themselves; the create-path dedup check needs
+// closed matches too, to distinguish "still open" from "already resolved"
+// (gt-9bzd).
 func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue, error) {
 	if fingerprintLabel == "" {
 		return nil, nil
@@ -328,7 +332,7 @@ func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue,
 	out, err := b.run("list",
 		"--label=gt:escalation",
 		"--label="+fingerprintLabel,
-		"--status=open",
+		"--status=all",
 		"--json",
 	)
 	if err != nil {
