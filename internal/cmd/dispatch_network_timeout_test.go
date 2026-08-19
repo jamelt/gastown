@@ -1,42 +1,14 @@
 package cmd
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
-
-// installHangingGitStubForDispatchTest writes a fake `git` binary that hangs
-// on any invocation whose arguments contain hangOn, and passes everything
-// else through to the real git binary captured before PATH is swapped.
-// Mirrors the equivalent helper in internal/git/network_timeout_test.go —
-// duplicated here since test helpers aren't shared across package
-// boundaries. Named distinctly from that package's installHangingGitStub to
-// avoid any confusion about which package's version is in scope.
-func installHangingGitStubForDispatchTest(t *testing.T, hangOn string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("unix shell stub")
-	}
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatalf("finding real git: %v", err)
-	}
-	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "git")
-	script := "#!/bin/sh\ncase \"$*\" in\n  *" + hangOn + "*)\n    exec sleep 300\n    ;;\n  *)\n    exec " + realGit + " \"$@\"\n    ;;\nesac\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake git: %v", err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
 
 // TestDispatchCycle_RunPlan_BoundedOnSecondRigNetworkHang reproduces gt-vyik
 // end to end at the orchestrator level shared by both `gt scheduler run` and
@@ -51,7 +23,7 @@ func installHangingGitStubForDispatchTest(t *testing.T, hangOn string) {
 // bounded, so RunPlan returns promptly with the first bead dispatched and
 // the second recorded as a bounded failure via OnFailure -- never a hang.
 func TestDispatchCycle_RunPlan_BoundedOnSecondRigNetworkHang(t *testing.T) {
-	installHangingGitStubForDispatchTest(t, "fetch")
+	testutil.InstallHangingBinaryStub(t, "git", "fetch")
 	t.Setenv("GT_GIT_NETWORK_TIMEOUT_SEC", "1")
 
 	dir := t.TempDir()

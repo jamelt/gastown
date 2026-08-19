@@ -1,39 +1,13 @@
 package git
 
 import (
-	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
-)
 
-// installHangingGitStub writes a fake `git` binary that hangs (via exec, so
-// killing the tracked pid actually stops it) on any invocation whose
-// arguments contain hangOn (e.g. "fetch" or "worktree"), and passes
-// everything else through to the real git binary captured before PATH is
-// swapped. Mirrors installFakeGH's PATH-stub pattern in pr_lookup_test.go.
-// Reproduces gt-vyik: a slow/wedged remote hanging a network git operation
-// that previously had no bound.
-func installHangingGitStub(t *testing.T, hangOn string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("unix shell stub")
-	}
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatalf("finding real git: %v", err)
-	}
-	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "git")
-	script := "#!/bin/sh\ncase \"$*\" in\n  *" + hangOn + "*)\n    exec sleep 300\n    ;;\n  *)\n    exec " + realGit + " \"$@\"\n    ;;\nesac\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake git: %v", err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
+	"github.com/steveyegge/gastown/internal/testutil"
+)
 
 // TestFetchBoundedOnHangingRemote reproduces gt-vyik: before the fix, Fetch
 // shelled out via a plain exec.Command with no timeout, so a wedged remote
@@ -43,7 +17,7 @@ func installHangingGitStub(t *testing.T, hangOn string) {
 func TestFetchBoundedOnHangingRemote(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)
-	installHangingGitStub(t, "fetch")
+	testutil.InstallHangingBinaryStub(t, "git", "fetch")
 	t.Setenv("GT_GIT_NETWORK_TIMEOUT_SEC", "1")
 
 	start := time.Now()
@@ -66,7 +40,7 @@ func TestFetchBoundedOnHangingRemote(t *testing.T) {
 func TestWorktreeAddFromRefBoundedOnHang(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)
-	installHangingGitStub(t, "worktree")
+	testutil.InstallHangingBinaryStub(t, "git", "worktree")
 	t.Setenv("GT_GIT_NETWORK_TIMEOUT_SEC", "1")
 
 	start := time.Now()
