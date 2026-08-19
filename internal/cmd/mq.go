@@ -651,28 +651,32 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, publishRemo
 
 	// Deleting a branch with an open PR causes GitHub to auto-close the PR as
 	// "closed" (not "merged"), destroying the PR audit trail. (gas-fk4)
-	var remoteTip string
-	if rigGit.HasOpenPullRequest(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: cleanup.Branch, HeadSHA: expectedHead}) {
+	//
+	// The open-PR lookup must use the branch's current remote tip, not the
+	// MR's recorded commit_sha: a conflict-resolution push after MR submission
+	// moves the branch head, and the fallback PR lookup exact-matches HeadSHA
+	// (pr_lookup.go), so a stale SHA can miss a genuinely open PR and silently
+	// defeat this protection (gt-zr7e; same staleness pattern as the
+	// CAS-delete fix in gt-twuj).
+	tip, err := rigGit.PushRemoteBranchTip(publishRemote, cleanup.Branch)
+	if err != nil {
+		return cleanup, fmt.Errorf("remote branch delete %s: read remote branch tip: %w", cleanup.Branch, err)
+	}
+	remoteTip := strings.TrimSpace(tip)
+	if remoteTip == "" {
+		cleanup.AlreadyGone = true
+	} else if rigGit.HasOpenPullRequest(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: cleanup.Branch, HeadSHA: remoteTip}) {
 		cleanup.OpenPR = true
+	} else if err := rigGit.VerifyPushedCommitReachableFromPushTarget(publishRemote, mr.TargetBranch, remoteTip); err != nil {
+		return cleanup, fmt.Errorf("remote branch delete %s: current tip %s not proven on %s: %w", cleanup.Branch, remoteTip, mr.TargetBranch, err)
+	} else if err := rigGit.DeleteRemoteBranchIfAt(publishRemote, cleanup.Branch, remoteTip); err != nil {
+		// expectedHead (mr.CommitSHA) is captured at MR-submit time and goes
+		// stale if a conflict-resolution push later lands a new commit on the
+		// same branch, so the delete's compare-and-swap must target the
+		// branch's current remote tip instead (gt-twuj).
+		return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, remoteTip, err)
 	} else {
-		tip, err := rigGit.PushRemoteBranchTip(publishRemote, cleanup.Branch)
-		if err != nil {
-			return cleanup, fmt.Errorf("remote branch delete %s: read remote branch tip: %w", cleanup.Branch, err)
-		}
-		remoteTip = strings.TrimSpace(tip)
-		if remoteTip == "" {
-			cleanup.AlreadyGone = true
-		} else if err := rigGit.VerifyPushedCommitReachableFromPushTarget(publishRemote, mr.TargetBranch, remoteTip); err != nil {
-			return cleanup, fmt.Errorf("remote branch delete %s: current tip %s not proven on %s: %w", cleanup.Branch, remoteTip, mr.TargetBranch, err)
-		} else if err := rigGit.DeleteRemoteBranchIfAt(publishRemote, cleanup.Branch, remoteTip); err != nil {
-			// expectedHead (mr.CommitSHA) is captured at MR-submit time and goes
-			// stale if a conflict-resolution push later lands a new commit on the
-			// same branch, so the delete's compare-and-swap must target the
-			// branch's current remote tip instead (gt-twuj).
-			return cleanup, fmt.Errorf("remote branch delete %s at %s: %w", cleanup.Branch, remoteTip, err)
-		} else {
-			cleanup.RemoteDeleted = true
-		}
+		cleanup.RemoteDeleted = true
 	}
 
 	deleteHead := expectedHead

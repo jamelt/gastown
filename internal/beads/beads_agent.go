@@ -774,6 +774,13 @@ func (b *Beads) GetAgentNotificationLevel(id string) (string, error) {
 
 // GetAgentBead retrieves an agent bead by ID.
 // Returns nil if not found.
+//
+// Falls back to the wisps table when the ID isn't in the issues table, so
+// single-ID lookups see the same wisp-only agent beads that ListAgentBeads
+// already finds (e.g. right after MigrateAgentBeadsToWisps moves a live
+// agent bead issues->wisps). The wisps listing is cached per-Beads-instance
+// so repeated not-found lookups (e.g. DetectStalePolecats calling this
+// per-polecat) pay for the full list at most once.
 func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 	if target := b.agentBeadTarget(); target != b {
 		return target.GetAgentBead(id)
@@ -782,7 +789,16 @@ func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 	issue, err := b.Show(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, nil, nil
+			b.wispAgentBeadsOnce.Do(func() {
+				b.wispAgentBeads, _ = b.ListAgentBeadsFromWisps()
+			})
+			wispIssue, ok := b.wispAgentBeads[id]
+			if !ok {
+				return nil, nil, nil
+			}
+			fields := ParseAgentFields(wispIssue.Description)
+			fields.AgentState = ResolveAgentState(wispIssue.Description, wispIssue.AgentState)
+			return wispIssue, fields, nil
 		}
 		return nil, nil, err
 	}
