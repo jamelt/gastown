@@ -380,6 +380,12 @@ func filterEscalationRecords(issues []*Issue) []*Issue {
 
 // ListStaleEscalations returns escalations older than the given threshold.
 // threshold is a duration string like "1h" or "30m".
+//
+// Staleness is measured from the last re-escalation (LastReescalatedAt), or
+// from CreatedAt if the escalation has never been re-escalated. Each
+// re-escalation doubles the effective threshold, so a stuck escalation
+// backs off instead of being re-selected on every patrol cycle once it
+// first goes stale.
 func (b *Beads) ListStaleEscalations(threshold time.Duration) ([]*Issue, error) {
 	// Get all open escalations
 	escalations, err := b.ListEscalations()
@@ -387,7 +393,7 @@ func (b *Beads) ListStaleEscalations(threshold time.Duration) ([]*Issue, error) 
 		return nil, err
 	}
 
-	cutoff := time.Now().Add(-threshold)
+	now := time.Now()
 	var stale []*Issue
 
 	for _, issue := range escalations {
@@ -396,13 +402,24 @@ func (b *Beads) ListStaleEscalations(threshold time.Duration) ([]*Issue, error) 
 			continue
 		}
 
-		// Check if older than threshold
-		createdAt, err := time.Parse(time.RFC3339, issue.CreatedAt)
+		fields := ParseEscalationFields(issue.Description)
+
+		referenceAt := issue.CreatedAt
+		if fields.LastReescalatedAt != "" {
+			referenceAt = fields.LastReescalatedAt
+		}
+
+		reference, err := time.Parse(time.RFC3339, referenceAt)
 		if err != nil {
 			continue // Skip if can't parse
 		}
 
-		if createdAt.Before(cutoff) {
+		effectiveThreshold := threshold
+		for i := 0; i < fields.ReescalationCount; i++ {
+			effectiveThreshold *= 2
+		}
+
+		if reference.Add(effectiveThreshold).Before(now) {
 			stale = append(stale, issue)
 		}
 	}
