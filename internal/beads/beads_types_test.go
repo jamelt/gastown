@@ -858,6 +858,69 @@ func TestEnsureDatabaseInitialized(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("prefix collision with different rig — refuses to init (gt-czpm)", func(t *testing.T) {
+		logPath := installMockBDRecorder(t)
+
+		townDir := t.TempDir()
+		mayorDir := filepath.Join(townDir, "mayor")
+		os.MkdirAll(mayorDir, 0755)
+		os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte("{}"), 0644)
+
+		// "gastown" already owns the "gt-" prefix via routes.jsonl.
+		townBeadsDir := filepath.Join(townDir, ".beads")
+		os.MkdirAll(townBeadsDir, 0755)
+		os.WriteFile(filepath.Join(townBeadsDir, "routes.jsonl"),
+			[]byte(`{"prefix":"gt-","path":"gastown"}`+"\n"), 0644)
+
+		// A stray, unrelated directory with no route/config of its own —
+		// detectPrefix() has nothing to go on and falls back to "gt", which
+		// collides with the already-configured "gastown" rig.
+		strayDir := filepath.Join(townDir, "gastown_src")
+		beadsDir := filepath.Join(strayDir, ".beads")
+		os.MkdirAll(beadsDir, 0755)
+
+		err := ensureDatabaseInitialized(beadsDir)
+		if err == nil {
+			t.Fatal("expected ensureDatabaseInitialized to refuse a colliding prefix, got nil error")
+		}
+
+		logOutput := readMockBDLog(t, logPath)
+		if strings.Contains(logOutput, "init") {
+			t.Fatalf("expected no bd init to run on prefix collision, but log contains: %q", logOutput)
+		}
+	})
+
+	t.Run("canonical mayor/rig layout for an already-registered rig — not falsely blocked (gt-czpm)", func(t *testing.T) {
+		logPath := installMockBDRecorder(t)
+
+		townDir := t.TempDir()
+		mayorDir := filepath.Join(townDir, "mayor")
+		os.MkdirAll(mayorDir, 0755)
+		os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte("{}"), 0644)
+
+		// "myrig" is already registered with its own "mr-" prefix, using the
+		// canonical <rig>/mayor/rig/.beads layout — whose immediate parent
+		// directory is always literally named "rig", not the rig's name.
+		// A naive basename-only comparison would treat this as an unknown
+		// rig named "rig" and falsely refuse to (re-)init its own database.
+		townBeadsDir := filepath.Join(townDir, ".beads")
+		os.MkdirAll(townBeadsDir, 0755)
+		os.WriteFile(filepath.Join(townBeadsDir, "routes.jsonl"),
+			[]byte(`{"prefix":"mr-","path":"myrig/mayor/rig"}`+"\n"), 0644)
+
+		beadsDir := filepath.Join(townDir, "myrig", "mayor", "rig", ".beads")
+		os.MkdirAll(beadsDir, 0755)
+
+		if err := ensureDatabaseInitialized(beadsDir); err != nil {
+			t.Fatalf("expected ensureDatabaseInitialized to proceed for the rig's own database, got error: %v", err)
+		}
+
+		logOutput := readMockBDLog(t, logPath)
+		if !strings.Contains(logOutput, "--prefix mr") {
+			t.Fatalf("expected bd init with the rig's own prefix 'mr', got log: %q", logOutput)
+		}
+	})
 }
 
 func mustReadFile(t *testing.T, path string) []byte {

@@ -2287,6 +2287,55 @@ func TestIssuePrefixForRigInit_FallsBackToRigName(t *testing.T) {
 	}
 }
 
+func TestEnsureRigIssuePrefix_RefusesPrefixCollision(t *testing.T) {
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// "gastown" already owns the "gt-" prefix.
+	routes := []byte(`{"prefix":"gt-","path":"gastown"}` + "\n")
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), routes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stray rig explicitly requesting the already-claimed "gt" prefix
+	// (gt-czpm: this is how a second database can end up minting the same
+	// bead-id prefix as an existing rig) must be refused before any Dolt
+	// server interaction — no server is running in this test, so a server
+	// dial attempt would fail with an unrelated error if the guard didn't
+	// short-circuit first.
+	err := EnsureRigIssuePrefix(townRoot, "gastown_src", true, "gt")
+	if err == nil {
+		t.Fatal("expected EnsureRigIssuePrefix to refuse a colliding prefix, got nil error")
+	}
+	if !strings.Contains(err.Error(), "already used by") {
+		t.Fatalf("expected prefix-collision error, got: %v", err)
+	}
+}
+
+func TestEnsureRigIssuePrefix_HQSelfReinitNotBlocked(t *testing.T) {
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// "hq" is the town-level rig, routed under path "." (see install.go's
+	// AppendRoute calls), not a path starting with "hq". An idempotent
+	// re-init of hq's own database (e.g. InitRig's "already exists on disk"
+	// repair branch, or a repeat 'gt install') must not be mistaken for a
+	// different rig colliding with hq's own "hq-" prefix.
+	routes := []byte(`{"prefix":"hq-","path":"."}` + "\n")
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), routes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := EnsureRigIssuePrefix(townRoot, "hq", true, "hq")
+	if err != nil && strings.Contains(err.Error(), "refusing to initialize database") {
+		t.Fatalf("expected hq's own idempotent re-init not to be blocked by the prefix-collision guard, got: %v", err)
+	}
+}
+
 func TestInitRigSeedsIssuePrefixEmbedded(t *testing.T) {
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("dolt binary not available")

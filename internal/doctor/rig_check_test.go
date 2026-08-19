@@ -107,6 +107,51 @@ func TestBeadsRedirectCheck_FixInitBeadsUsesCanonicalDatabase(t *testing.T) {
 	}
 }
 
+func TestBeadsRedirectCheck_FixRefusesPrefixCollision(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock bd arg logging is shell-specific")
+	}
+	installMockBdInitOnly(t)
+
+	tmpDir := t.TempDir()
+	// An unregistered rig name — not present in rigs.json — so
+	// config.GetRigPrefix falls back to "gt", the exact prefix already
+	// claimed by "gastown" via routes.jsonl (gt-czpm).
+	rigName := "gastown_src"
+	rigDir := filepath.Join(tmpDir, rigName)
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	townBeadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townBeadsDir, "routes.jsonl"),
+		[]byte(`{"prefix":"gt-","path":"gastown"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	argsLog := filepath.Join(t.TempDir(), "bd-args.log")
+	t.Setenv("BD_ARGS_LOG", argsLog)
+
+	check := NewBeadsRedirectCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	err := check.Fix(ctx)
+	if err == nil {
+		t.Fatal("expected Fix to refuse a colliding prefix, got nil error")
+	}
+
+	if logData, readErr := os.ReadFile(argsLog); readErr == nil {
+		t.Fatalf("expected no bd init to run on prefix collision, but log contains: %q", string(logData))
+	}
+}
+
 func TestNewBeadsRedirectCheck(t *testing.T) {
 	check := NewBeadsRedirectCheck()
 
