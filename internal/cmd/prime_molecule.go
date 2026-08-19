@@ -127,8 +127,9 @@ func showFormulaSteps(formulaName, label, townRoot, rigName string, extraVars ..
 	fmt.Println()
 	fmt.Printf("**%s** (%d steps from %s):\n", label, len(f.Steps), formulaName)
 	for i, step := range f.Steps {
+		title := applyFormulaVars(step.Title, varMap)
 		desc := applyFormulaVars(step.Description, varMap)
-		fmt.Printf("  %d. **%s** — %s\n", i+1, step.Title, truncateDescription(desc, 120))
+		fmt.Printf("  %d. **%s** — %s\n", i+1, title, truncateDescription(desc, 120))
 	}
 	fmt.Println()
 }
