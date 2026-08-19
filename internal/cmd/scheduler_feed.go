@@ -32,7 +32,7 @@ var (
 
 var schedulerFeedCmd = &cobra.Command{
 	Use:   "feed",
-	Short: "Survey ready beads across rigs and schedule eligible work into the queue",
+	Short: "Survey ready beads across rigs and town, schedule eligible work into the queue",
 	Long: `Feed connects 'bd ready' to the scheduler.
 
 Without this command, the scheduler only dispatches work that has already
@@ -40,25 +40,23 @@ been explicitly scheduled (via 'gt sling' or 'gt scheduler run'). Nothing
 surveys ready work and pulls it into the queue when capacity frees up, so
 dispatch runs only as long as a human keeps hand-slinging beads.
 
-Feed surveys ready beads across every rig, skips ineligible ones (already
-scheduled, blocked, deferred, epics/convoys, hq-1s4w hard-prohibition
-categories — production, trading-money-policy, credentials, destructive
-migrations, human-decision — signaled via labels like "human", "risk:money",
-"area:security", "gt:needs-human", beads requiring a platform this host
-doesn't have), and schedules up to --max-per-rig eligible beads per rig,
-bounded by town-wide free polecat capacity. Every decision — fed or
-skipped, and why — is logged.
+Feed surveys ready beads across every rig and the town-level database,
+skips ineligible ones (already scheduled, blocked, deferred, epics/convoys,
+hq-1s4w hard-prohibition categories — production, trading-money-policy,
+credentials, destructive migrations, human-decision — signaled via labels
+like "human", "risk:money", "area:security", "gt:needs-human", beads
+requiring a platform this host doesn't have), and schedules up to
+--max-per-rig eligible beads per rig, bounded by town-wide free polecat
+capacity. Every decision — fed or skipped, and why — is logged.
 
 Feed only acts when the scheduler is in deferred-dispatch mode
 (scheduler.max_polecats > 0); in direct-dispatch mode there is no queue to
-feed. Feed surveys only rig databases, never the town-level (hq-*) store —
-not as a temporary gap but by construction: dispatch ends in spawning a
-rig-scoped polecat, and town beads have no owning rig or polecat pool, so a
-fed town context could never be dispatched (it would just fail every cycle
-until it circuit-breaks). Genuine engineering work misfiled in the town
-database is surfaced instead by 'gt doctor' (the town-unfed-work check),
-whose remedy is to route each bead to its owning rig with 'gt bead move' or
-close it if it is coordination-only.
+feed. Town-level (hq-*) ready beads are surveyed and reported with an explicit
+diagnostic: they are visible but not dispatchable (dispatch ends in spawning a
+rig-scoped polecat, and town beads have no owning rig or polecat pool). To
+dispatch town-level work, route each bead to its owning rig with 'gt bead move',
+or close it if it is coordination-only. Every town-level ready bead receives a
+decision entry — never silence.
 
   gt scheduler feed              # Feed eligible ready beads
   gt scheduler feed --dry-run    # Preview without scheduling
@@ -263,6 +261,42 @@ func runSchedulerFeed(townRoot string, maxPerRig int, dryRun bool) (feedResult, 
 			result.Fed++
 			fedThisRig++
 			budget--
+		}
+	}
+
+	townBeadsPath := filepath.Join(townRoot, constants.DirMayor, constants.DirRig, constants.DirBeads)
+	townIssues, err := readyIssuesForSource(townRoot, "town", townBeadsPath)
+	if err != nil {
+		result.Decisions = append(result.Decisions, feedDecision{
+			Rig: "town", Action: "skipped", Reason: fmt.Sprintf("ready scan failed: %v", err),
+		})
+	} else {
+		townIds := make([]string, len(townIssues))
+		for i, iss := range townIssues {
+			townIds[i] = iss.ID
+		}
+		townScheduled := areScheduled(townIds)
+		townLabelsByID := batchFetchBeadInfoByIDs(townRoot, townIds)
+
+		for _, issue := range townIssues {
+			if townScheduled[issue.ID] {
+				result.Decisions = append(result.Decisions, feedDecision{
+					ID: issue.ID, Rig: "town", Action: "skipped", Reason: "already scheduled",
+				})
+				continue
+			}
+
+			effective := effectiveIssueForFeed(issue, townLabelsByID)
+			if reason, skip := feedSkipReason(effective); skip {
+				result.Decisions = append(result.Decisions, feedDecision{
+					ID: issue.ID, Rig: "town", Action: "skipped", Reason: reason,
+				})
+				continue
+			}
+
+			result.Decisions = append(result.Decisions, feedDecision{
+				ID: issue.ID, Rig: "town", Action: "skipped", Reason: "town-level bead: no owning rig for dispatch (use 'gt bead move' to route to owning rig)",
+			})
 		}
 	}
 
