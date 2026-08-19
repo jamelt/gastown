@@ -635,6 +635,110 @@ func TestActiveMRBlocker(t *testing.T) {
 	}
 }
 
+// TestSafetyResultFromRecoveryStatus_BlocksOnEveryVerdict verifies gt-it1:
+// checkPolecatSafety's non-force nuke gate now shares polecat.DecideWorkstate
+// with `gt polecat check-recovery`, so it must block on every verdict
+// check-recovery treats as unsafe — not just the narrower hand-rolled
+// predicates the old checkPolecatSafety happened to check itself. This is
+// the exact wiring that closes the reported incident: a polecat check-recovery
+// reports NEEDS_MQ_SUBMIT must now also be refused by plain `gt polecat nuke`.
+func TestSafetyResultFromRecoveryStatus_BlocksOnEveryVerdict(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     RecoveryStatus
+		wantBlock  bool
+		wantReason string
+	}{
+		{
+			name:      "SAFE_TO_NUKE is not blocked",
+			status:    RecoveryStatus{Verdict: "SAFE_TO_NUKE", MQStatus: "not_required"},
+			wantBlock: false,
+		},
+		{
+			name:       "NEEDS_MQ_SUBMIT blocks (gt-it1 incident)",
+			status:     RecoveryStatus{Verdict: "NEEDS_MQ_SUBMIT", MQStatus: "not_submitted", Blockers: []string{"mq_status=not_submitted"}},
+			wantBlock:  true,
+			wantReason: "mq_status=not_submitted",
+		},
+		{
+			name:       "NEEDS_RECOVERY from dirty git blocks",
+			status:     RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{"git_state=has_uncommitted uncommitted_files=1"}},
+			wantBlock:  true,
+			wantReason: "git_state=has_uncommitted uncommitted_files=1",
+		},
+		{
+			name:       "NEEDS_RECOVERY from unpushed commits blocks",
+			status:     RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{"git_state=has_unpushed unpushed_commits=2"}},
+			wantBlock:  true,
+			wantReason: "git_state=has_unpushed unpushed_commits=2",
+		},
+		{
+			name:       "NEEDS_RECOVERY from a stash blocks",
+			status:     RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{"git_state=has_stash stash_count=1"}},
+			wantBlock:  true,
+			wantReason: "git_state=has_stash stash_count=1",
+		},
+		{
+			name:       "NEEDS_RECOVERY from an active hook blocks and surfaces HookBead",
+			status:     RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{"has work on hook (gt-abc123)"}},
+			wantBlock:  true,
+			wantReason: "has work on hook (gt-abc123)",
+		},
+		{
+			name:       "PENDING_MR (open MR) blocks",
+			status:     RecoveryStatus{Verdict: "PENDING_MR", Blockers: []string{"active_mr=hq-wisp-1 status=open"}},
+			wantBlock:  true,
+			wantReason: "active_mr=hq-wisp-1 status=open",
+		},
+		{
+			name: "multiple simultaneous blockers all surface",
+			status: RecoveryStatus{Verdict: "NEEDS_RECOVERY", Blockers: []string{
+				"git_state=has_uncommitted uncommitted_files=1",
+				"git_state=has_stash stash_count=1",
+			}},
+			wantBlock: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := safetyResultFromRecoveryStatus("gastown/toast", tt.status)
+			if result.Blocked != tt.wantBlock {
+				t.Errorf("Blocked = %v, want %v (reasons: %v)", result.Blocked, tt.wantBlock, result.Reasons)
+			}
+			if tt.wantReason != "" {
+				found := false
+				for _, r := range result.Reasons {
+					if r == tt.wantReason {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Reasons %v missing %q", result.Reasons, tt.wantReason)
+				}
+			}
+			if len(tt.status.Blockers) != len(result.Reasons) {
+				t.Errorf("Reasons = %v, want exactly the disposition's Blockers %v", result.Reasons, tt.status.Blockers)
+			}
+		})
+	}
+}
+
+// TestSafetyResultFromRecoveryStatus_CarriesHookBead verifies the hook_bead
+// id computePolecatRecoveryStatus records on RecoveryStatus.HookBead is
+// carried through to SafetyCheckResult.HookBead for display.
+func TestSafetyResultFromRecoveryStatus_CarriesHookBead(t *testing.T) {
+	result := safetyResultFromRecoveryStatus("gastown/toast", RecoveryStatus{
+		Verdict:  "NEEDS_RECOVERY",
+		HookBead: "gt-xyz789",
+		Blockers: []string{"has work on hook (gt-xyz789)"},
+	})
+	if result.HookBead != "gt-xyz789" {
+		t.Errorf("HookBead = %q, want %q", result.HookBead, "gt-xyz789")
+	}
+}
+
 func TestFormatSafetyCheckBlockers(t *testing.T) {
 	blocked := []*SafetyCheckResult{
 		{Polecat: "gastown/fury", Reasons: []string{"cleanup_status=unknown", "active_mr=hq-wisp-1 status=open"}},
