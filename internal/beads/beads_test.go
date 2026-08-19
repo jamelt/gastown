@@ -5618,3 +5618,89 @@ func TestWithContextBoundsRetryAttempt(t *testing.T) {
 		t.Fatalf("call took %v, want bounded by the ~500ms WithContext deadline (not the 20s per-call timeout)", elapsed)
 	}
 }
+
+func TestIsMoleculeContainerOrStep(t *testing.T) {
+	tests := []struct {
+		name  string
+		issue *Issue
+		want  bool
+	}{
+		{
+			name:  "nil issue",
+			issue: nil,
+			want:  false,
+		},
+		{
+			name:  "ordinary task is dispatchable",
+			issue: &Issue{ID: "gt-1", Type: "task"},
+			want:  false,
+		},
+		{
+			name:  "molecule container itself",
+			issue: &Issue{ID: "gt-vf2u", Type: "molecule"},
+			want:  true,
+		},
+		{
+			name:  "molecule type is case-insensitive",
+			issue: &Issue{ID: "gt-vf2u", Type: "Molecule"},
+			want:  true,
+		},
+		{
+			// The real gt-6va3 shape: a step bead (type=task) whose parent-child
+			// dependency points at a molecule root, as bd show renders it.
+			name: "step bead parented to a molecule (bd show shape)",
+			issue: &Issue{
+				ID:   "gt-nhyl",
+				Type: "task",
+				Dependencies: []IssueDep{
+					{ID: "gt-vf2u", Type: "molecule", DependencyType: "parent-child"},
+				},
+			},
+			want: true,
+		},
+		{
+			// bd ready --json returns a sparse parent-child edge with no parent
+			// issue_type; the predicate must stay inert so it never fires on the
+			// display/ready path (the choke points re-check with full info).
+			name: "sparse ready-path parent-child edge does not fire",
+			issue: &Issue{
+				ID:   "gt-nhyl",
+				Type: "task",
+				Dependencies: []IssueDep{
+					{DependencyType: "parent-child"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "real task that is a child of an epic is not molecule machinery",
+			issue: &Issue{
+				ID:   "gt-2",
+				Type: "task",
+				Dependencies: []IssueDep{
+					{ID: "gt-epic", Type: "epic", DependencyType: "parent-child"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "non-parent-child edge to a molecule does not fire",
+			issue: &Issue{
+				ID:   "gt-3",
+				Type: "task",
+				Dependencies: []IssueDep{
+					{ID: "gt-vf2u", Type: "molecule", DependencyType: "related"},
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsMoleculeContainerOrStep(tc.issue); got != tc.want {
+				t.Fatalf("IsMoleculeContainerOrStep(%+v) = %v, want %v", tc.issue, got, tc.want)
+			}
+		})
+	}
+}
