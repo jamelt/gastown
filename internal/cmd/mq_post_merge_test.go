@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -122,8 +123,9 @@ func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) 
 	if mgr.postMergeMR != mgr.mr {
 		t.Fatal("PostMerge did not use the verified MR snapshot")
 	}
-	if len(rigGit.verifiedCommits) != 1 || rigGit.verifiedCommits[0] != mgr.mr.CommitSHA {
-		t.Fatalf("verified commits = %v, want [%s]", rigGit.verifiedCommits, mgr.mr.CommitSHA)
+	wantVerified := []string{mgr.mr.CommitSHA, mgr.mr.CommitSHA}
+	if !reflect.DeepEqual(rigGit.verifiedCommits, wantVerified) {
+		t.Fatalf("verified commits = %v, want %v", rigGit.verifiedCommits, wantVerified)
 	}
 	if !cleanup.RemoteDeleted || len(rigGit.deletedBranches) != 1 || rigGit.deletedBranches[0] != mgr.mr.Branch {
 		t.Fatalf("remote delete = cleanup=%+v branches=%v", cleanup, rigGit.deletedBranches)
@@ -133,6 +135,30 @@ func TestRunVerifiedMQPostMerge_VerifiedHeadClosesAndLeaseDeletes(t *testing.T) 
 	}
 	if !cleanup.LocalDeleted || len(rigGit.localDeleted) != 1 || rigGit.localDeleted[0] != mgr.mr.Branch {
 		t.Fatalf("local delete = cleanup=%+v local=%v", cleanup, rigGit.localDeleted)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_StaleCommitSHAUsesFreshRemoteTip covers gt-twuj:
+// a conflict-resolution push after MR submission moves the branch tip without
+// updating the MR bead's recorded commit_sha. The delete's compare-and-swap
+// must target the branch's current remote tip, not the stale submitted head.
+func TestRunVerifiedMQPostMerge_StaleCommitSHAUsesFreshRemoteTip(t *testing.T) {
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	freshTip := "eb20c1f259fresh"
+	rigGit := &fakeMQPostMergeGit{remoteTip: freshTip, localHead: freshTip}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false)
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !cleanup.RemoteDeleted {
+		t.Fatalf("cleanup.RemoteDeleted = false, cleanup=%+v", cleanup)
+	}
+	if len(rigGit.deletedHeads) != 1 || rigGit.deletedHeads[0] != freshTip {
+		t.Fatalf("deleted heads = %v, want [%s] (fresh tip, not stale commit_sha %s)", rigGit.deletedHeads, freshTip, mgr.mr.CommitSHA)
+	}
+	if !cleanup.LocalDeleted || len(rigGit.localDeleted) != 1 || rigGit.localDeleted[0] != mgr.mr.Branch {
+		t.Fatalf("local delete = cleanup=%+v local=%v, want deleted at fresh tip %s", cleanup, rigGit.localDeleted, freshTip)
 	}
 }
 
