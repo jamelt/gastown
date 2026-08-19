@@ -793,3 +793,83 @@ func TestLock_CheckCleansUpStaleLock(t *testing.T) {
 		t.Error("Check() should have removed stale lock file")
 	}
 }
+
+// TestLock_ReleaseDoesNotDeleteReclaimedLock covers gt-lwjh: a stale holder's
+// deferred Release() must not delete a lock file that has since been
+// reclaimed by a different (live) owner.
+func TestLock_ReleaseDoesNotDeleteReclaimedLock(t *testing.T) {
+	tmpDir := t.TempDir()
+	workerDir := filepath.Join(tmpDir, "worker")
+	runtimeDir := filepath.Join(workerDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a lock reclaimed by a different, live-looking owner: PID does
+	// not match ours.
+	newOwner := LockInfo{
+		PID:        os.Getpid() + 1,
+		AcquiredAt: time.Now(),
+		SessionID:  "new-owner",
+	}
+	data, _ := json.Marshal(newOwner)
+	lockPath := filepath.Join(runtimeDir, "agent.lock")
+	if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stale former holder (us) calls Release() on the same lock path.
+	l := New(agentLockPath(workerDir))
+	if err := l.Release(); err != nil {
+		t.Fatalf("Release() error = %v, want nil", err)
+	}
+
+	// The new owner's lock file must still be present, untouched.
+	info, err := l.Read()
+	if err != nil {
+		t.Fatalf("Read() after Release() by non-owner: error = %v, want lock to still exist", err)
+	}
+	if info.PID != newOwner.PID || info.SessionID != newOwner.SessionID {
+		t.Errorf("lock info after Release() by non-owner = %+v, want unchanged %+v", info, newOwner)
+	}
+}
+
+// TestLock_AcquireTTLRemovesStaleLockEvenThoughNotOwner covers the other
+// half of gt-lwjh: reclaiming a stale lock (via acquire's internal cleanup)
+// must still work even though the reclaiming process is not the lock's
+// current PID -- Release()'s new ownership check must not block that path.
+func TestLock_AcquireTTLRemovesStaleLockEvenThoughNotOwner(t *testing.T) {
+	tmpDir := t.TempDir()
+	workerDir := filepath.Join(tmpDir, "worker")
+	runtimeDir := filepath.Join(workerDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A lock held by a live-but-old PID (us), old enough to exceed a short
+	// TTL. Using our own PID keeps IsStaleAfter's liveness check satisfied
+	// while the age check forces reclaim.
+	oldOwner := LockInfo{
+		PID:        os.Getpid(),
+		AcquiredAt: time.Now().Add(-time.Hour),
+		SessionID:  "old-owner",
+	}
+	data, _ := json.Marshal(oldOwner)
+	lockPath := filepath.Join(runtimeDir, "agent.lock")
+	if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := New(agentLockPath(workerDir))
+	if err := l.AcquireTTL("new-session", time.Minute); err != nil {
+		t.Fatalf("AcquireTTL() error = %v, want nil", err)
+	}
+
+	info, err := l.Read()
+	if err != nil {
+		t.Fatalf("Read() after AcquireTTL: error = %v", err)
+	}
+	if info.SessionID != "new-session" {
+		t.Errorf("SessionID after AcquireTTL reclaim = %q, want %q", info.SessionID, "new-session")
+	}
+}

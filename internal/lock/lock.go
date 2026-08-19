@@ -133,8 +133,11 @@ func (l *Lock) acquire(sessionID string, maxAge time.Duration) error {
 	if err == nil {
 		// Lock exists - check if stale
 		if info.IsStaleAfter(maxAge) {
-			// Stale lock - remove it
-			if err := l.Release(); err != nil {
+			// Stale lock, owned by another (dead or expired-TTL) PID - remove
+			// it unconditionally. Release() won't do here: it refuses to
+			// remove a lock we don't own, which is exactly the case for a
+			// stale lock being reclaimed.
+			if err := l.removeUnconditional(); err != nil {
 				return fmt.Errorf("removing stale lock: %w", err)
 			}
 		} else {
@@ -153,8 +156,36 @@ func (l *Lock) acquire(sessionID string, maxAge time.Duration) error {
 	return l.write(sessionID)
 }
 
-// Release releases the lock if we hold it.
+// Release releases the lock if we currently own it (the lock file's PID
+// matches ours). If the lock doesn't exist, this is a no-op. If the lock is
+// held by a different PID -- e.g. it was reclaimed out from under us by
+// AcquireTTL while we were still alive -- Release is also a no-op: a stale
+// holder must not delete a lock it no longer owns. Internal reclaim paths
+// (acquire's stale-lock cleanup, Check, CleanStaleLocks) that need to remove
+// a lock regardless of owner use removeUnconditional instead.
 func (l *Lock) Release() error {
+	info, err := l.Read()
+	if err != nil {
+		if errors.Is(err, ErrNotLocked) {
+			return nil
+		}
+		if errors.Is(err, ErrInvalidLock) {
+			// No PID to verify ownership against; remove it so a corrupt
+			// lock file doesn't wedge the lock forever.
+			return l.removeUnconditional()
+		}
+		return err
+	}
+	if info.PID != os.Getpid() {
+		return nil
+	}
+	return l.removeUnconditional()
+}
+
+// removeUnconditional removes the lock file regardless of which PID owns
+// it. Used by reclaim paths that are intentionally taking over a lock from
+// another (stale) owner.
+func (l *Lock) removeUnconditional() error {
 	if err := os.Remove(l.lockPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing lock file: %w", err)
 	}
@@ -194,8 +225,10 @@ func (l *Lock) Check() error {
 
 	// Check if stale
 	if info.IsStale() {
-		// Clean up stale lock (best-effort cleanup)
-		_ = l.Release()
+		// Clean up stale lock (best-effort cleanup). This lock belongs to a
+		// dead PID, not us, so Release() (which only removes a lock we own)
+		// won't do here.
+		_ = l.removeUnconditional()
 		return nil
 	}
 
@@ -232,7 +265,7 @@ func (l *Lock) Status() string {
 // ForceRelease removes the lock regardless of who holds it.
 // Use with caution - only for doctor --fix scenarios.
 func (l *Lock) ForceRelease() error {
-	return l.Release()
+	return l.removeUnconditional()
 }
 
 // write creates or updates the lock file.
@@ -333,9 +366,11 @@ func CleanStaleLocks(root string) (int, error) {
 				// Session exists - worker is alive, don't clean
 				continue
 			}
-			// Both PID dead AND no session = truly stale
+			// Both PID dead AND no session = truly stale. This lock belongs
+			// to a dead PID, not us, so removeUnconditional (not Release)
+			// is what actually removes it.
 			agentLock := New(filepath.Join(workerDir, ".runtime", "agent.lock"))
-			if err := agentLock.Release(); err == nil {
+			if err := agentLock.removeUnconditional(); err == nil {
 				cleaned++
 			}
 		}
