@@ -261,6 +261,7 @@ func buildPolecatInventoryItemFromEvidenceWithBD(rigName, polecatName string, fi
 	}
 
 	input.State = item.State
+	input.SessionRunning = running
 	applyMQIndexToWorkstateInput(&input, fields, mq)
 	item.Disposition = polecat.DecideWorkstate(input)
 
