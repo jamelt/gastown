@@ -322,7 +322,7 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 		return fmt.Errorf("getting session name: %w", err)
 	}
 
-	restartCmd, err := buildRestartCommand(currentSession)
+	restartCmd, workDir, err := buildRestartCommand(currentSession)
 	if err != nil {
 		return fmt.Errorf("building restart command: %w", err)
 	}
@@ -343,7 +343,7 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 		style.PrintWarning("could not clear history: %v", err)
 	}
 
-	return t.RespawnPane(pane, restartCmd)
+	return t.RespawnPaneWithWorkDir(pane, workDir, restartCmd)
 }
 
 // handleParallelSteps handles executing multiple steps concurrently (fan-out pattern).

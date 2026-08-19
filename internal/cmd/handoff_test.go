@@ -176,7 +176,7 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 		t.Fatalf("chdir witness dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, _, err := buildRestartCommand("gt-witness")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 		t.Fatalf("chdir witness dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, _, err := buildRestartCommand("gt-witness")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
 		t.Fatalf("chdir witness dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, _, err := buildRestartCommand("gt-witness")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	_ = os.Chdir(crewDir)
 
 	t.Run("custom ContinuePrompt overrides default", func(t *testing.T) {
-		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+		cmd, _, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
 			ContinueSession: true,
 			ContinuePrompt:  "Context compacted. Continue your previous task.",
 		})
@@ -406,7 +406,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	})
 
 	t.Run("empty ContinuePrompt falls back to default", func(t *testing.T) {
-		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+		cmd, _, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
 			ContinueSession: true,
 		})
 		if err != nil {
@@ -421,7 +421,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	})
 
 	t.Run("ContinueSession false uses beacon", func(t *testing.T) {
-		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+		cmd, _, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
 			ContinueSession: false,
 		})
 		if err != nil {
@@ -815,7 +815,7 @@ func TestHandoffProcessNames(t *testing.T) {
 		t.Cleanup(func() { os.Chdir(origCwd) })
 
 		// Same-agent restart should preserve existing process names from env
-		cmd, err := buildRestartCommand("gt-crew-propane")
+		cmd, _, err := buildRestartCommand("gt-crew-propane")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -841,7 +841,7 @@ func TestHandoffProcessNames(t *testing.T) {
 		t.Cleanup(func() { os.Chdir(origCwd) })
 
 		// No GT_PROCESS_NAMES in env — should compute from agent config
-		cmd, err := buildRestartCommand("gt-crew-propane")
+		cmd, _, err := buildRestartCommand("gt-crew-propane")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
