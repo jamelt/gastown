@@ -75,8 +75,15 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	// convoy notification subsystem's synthetic actor (convoy/<id>) — the
 	// sole legitimate caller of this flag in the codebase. Any other value
 	// would let a caller impersonate a real agent or the human overseer with
-	// zero verification (gt-p7gu).
-	from, err := resolveSender(mailFrom, detectSender())
+	// zero verification (gt-p7gu). detectSenderVerified additionally rejects
+	// a GT_ROLE claim that disagrees with the tmux session this process is
+	// actually running in, closing the same forgery reachable without --from
+	// at all via a bare `GT_ROLE=<role> gt mail send ...` (gt-9z0y).
+	detected, err := detectSenderVerified()
+	if err != nil {
+		return err
+	}
+	from, err := resolveSender(mailFrom, detected)
 	if err != nil {
 		return err
 	}
