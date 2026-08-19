@@ -2323,13 +2323,36 @@ func (m *Manager) List() ([]*Polecat, error) {
 
 // FindIdlePolecat returns the first idle polecat in the rig, or nil if none.
 // Idle means no hook, no active session, and no pending completion/MR cleanup state.
+// isReuseCandidateState reports whether a polecat's lifecycle state makes it
+// eligible to be considered for reuse. It mirrors DecideWorkstate, which lets
+// StateIdle and StateDone fall through to the real reuse predicates.
+func isReuseCandidateState(s State) bool {
+	return s == StateIdle || s == StateDone
+}
+
 func (m *Manager) FindIdlePolecat() (*Polecat, error) {
 	polecats, err := m.List()
 	if err != nil {
 		return nil, err
 	}
 	for _, p := range polecats {
-		if p.State == StateIdle && m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
+		// gt-nz5x: StateDone is a reuse candidate, not a terminal state. gt done
+		// sets agent_state=done on completion ("done means gone", gt-4ac), so a
+		// polecat that finishes work is StateDone and never StateIdle again —
+		// nothing transitions it back. Accepting only StateIdle here meant no
+		// completed polecat was EVER reused: every dispatch allocated a fresh
+		// worktree until the rig hit its directory cap and dispatch died, while
+		// the fleet reported 21 reusable polecats nobody could use.
+		//
+		// DecideWorkstate already treats both states as candidates and gates on
+		// the real predicates (hook, cleanup_status, git, MR), so this widens the
+		// candidate set without weakening any safety check — reuseDecisionForPolecat
+		// still has the final say, and ReuseIdlePolecat re-verifies before touching
+		// the worktree.
+		if !isReuseCandidateState(p.State) {
+			continue
+		}
+		if m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
 			return p, nil
 		}
 	}
