@@ -105,10 +105,10 @@ func LiveSocketName(townRoot string) string {
 	return base + "-" + hex.EncodeToString(h[:3])
 }
 
-// liveTownRoot resolves GT_ROOT/GT_TOWN_ROOT the same way this repo's
+// LiveTownRoot resolves GT_ROOT/GT_TOWN_ROOT the same way this repo's
 // production code does (see internal/workspace.FindFromCwdOrError's env
 // fallback), returning "" if neither is set.
-func liveTownRoot() string {
+func LiveTownRoot() string {
 	if root := os.Getenv("GT_ROOT"); root != "" {
 		return root
 	}
@@ -141,7 +141,7 @@ func RequireIsolatedSocket(op, socket string) error {
 	if !testing.Testing() {
 		return nil
 	}
-	townRoot := liveTownRoot()
+	townRoot := LiveTownRoot()
 	if townRoot == "" || IsIsolatedSandbox(townRoot) {
 		return nil
 	}
