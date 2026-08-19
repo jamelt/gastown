@@ -1538,6 +1538,14 @@ const (
 	// session stayed alive with an open hook and no fresh heartbeat. This catches
 	// the post-submit/pre-exit ghost idle gap from GH#3055.
 	ZombieSubmittedStillRunning ZombieClassification = "submitted-still-running"
+	// ZombieIdleAtPromptWorking: the live session's tmux pane is idle at its
+	// input prompt while the reported state (heartbeat-effective or raw
+	// agent_state) still says "working". Defense-in-depth for the general
+	// invariant violation class fixed in gt-k2ab, independent of any single
+	// code path that might leak a stale "working" state. Flag-only — a single
+	// pane scrape is a point-in-time snapshot, not proof the session is dead.
+	// (gt-xwdn)
+	ZombieIdleAtPromptWorking ZombieClassification = "idle-at-prompt-working"
 )
 
 // ImpliesActiveWork returns true if this classification indicates the polecat
@@ -1548,11 +1556,32 @@ func (c ZombieClassification) ImpliesActiveWork() bool {
 	switch c {
 	case ZombieStuckInDone, ZombieAgentDeadInSession, ZombieBeadClosedStillRunning,
 		ZombieDoneIntentDead, ZombieSessionDeadActive, ZombieAgentSelfReportedStuck,
-		ZombieNeverHeartbeated:
+		ZombieNeverHeartbeated, ZombieIdleAtPromptWorking:
 		return true
 	default:
 		return false
 	}
+}
+
+// newIdleAtPromptWorkingZombie builds the ZombieResult for the "idle at
+// prompt but agent_state=working" invariant violation. See ZombieIdleAtPromptWorking.
+func newIdleAtPromptWorkingZombie(polecatName, agentState, hookBead, reason string) ZombieResult {
+	return ZombieResult{
+		PolecatName:    polecatName,
+		AgentState:     agentState,
+		Classification: ZombieIdleAtPromptWorking,
+		HookBead:       hookBead,
+		WasActive:      true,
+		Action:         fmt.Sprintf("flagged-for-review (%s)", reason),
+	}
+}
+
+// isIdleAtPromptWorkingAnomaly reports whether the raw agent_state field
+// claims "working" while a point-in-time tmux read says the session is idle
+// at its input prompt. Split from the tmux call so the decision logic is
+// unit-testable without a real session.
+func isIdleAtPromptWorkingAnomaly(agentState string, sessionIdle bool) bool {
+	return beads.AgentState(agentState) == AgentStateWorking && sessionIdle
 }
 
 // ZombieResult describes a detected zombie polecat and the action taken.
@@ -1741,7 +1770,18 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 				}
 				return zombie, true
 
-			case polecat.HeartbeatWorking, polecat.HeartbeatIdle:
+			case polecat.HeartbeatWorking:
+				// gt-xwdn: the heartbeat says working, but if the tmux pane
+				// itself shows the agent idle at its input prompt, the two
+				// disagree — flag the invariant violation instead of trusting
+				// the heartbeat blindly.
+				if t.IsIdle(sessionName) {
+					return newIdleAtPromptWorkingZombie(polecatName, snapState, snapHook,
+						"heartbeat=working but session idle at prompt"), true
+				}
+				return ZombieResult{}, false
+
+			case polecat.HeartbeatIdle:
 				// Fresh heartbeat, healthy state — not a zombie.
 				return ZombieResult{}, false
 			}
@@ -1847,6 +1887,16 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 				}, true
 			}
 		}
+	}
+
+	// gt-xwdn: legacy/no-heartbeat fallback for the same invariant checked
+	// above for fresh v2 heartbeats — raw agent_state says "working" but the
+	// tmux pane shows the session idle at its input prompt. Defense-in-depth
+	// against any code path (see gt-k2ab) that leaves a stale "working" state
+	// behind after the agent actually stopped.
+	if isIdleAtPromptWorkingAnomaly(snapState, t.IsIdle(sessionName)) {
+		return newIdleAtPromptWorkingZombie(polecatName, snapState, snapHook,
+			"session idle at prompt but agent_state=working"), true
 	}
 
 	return ZombieResult{}, false
