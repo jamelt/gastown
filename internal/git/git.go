@@ -1089,6 +1089,12 @@ func sameGitRemoteURL(a, b string) bool {
 	return normalizeGitRemoteURL(a) == normalizeGitRemoteURL(b)
 }
 
+// SameRemoteURL reports whether two git remote URLs refer to the same
+// repository, ignoring scheme, credentials, and .git suffix differences.
+func SameRemoteURL(a, b string) bool {
+	return sameGitRemoteURL(a, b)
+}
+
 func normalizeGitRemoteURL(raw string) string {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimSuffix(s, "/")
