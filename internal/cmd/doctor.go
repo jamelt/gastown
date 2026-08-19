@@ -95,6 +95,7 @@ Formula overlay checks (fixable):
 
 Migration checks:
   - town-claude-md           Check town-root CLAUDE.md matches embedded version (fixable)
+  - role-claude-md-guard     Verify role CLAUDE.md files are absent or exactly @AGENTS.md (fixable)
 
 Session hook checks:
   - session-hooks            Check settings.json use session-start.sh
@@ -294,6 +295,9 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 
 	// Town-root CLAUDE.md version check (migration check for behavioral norms)
 	d.Register(doctor.NewTownCLAUDEmdCheck())
+
+	// Role CLAUDE.md guard check (prevent bd init from polluting source repos)
+	d.Register(doctor.NewRoleClaudeMdCheck())
 
 	// Crew workspace checks
 	d.Register(doctor.NewCrewStateCheck())
