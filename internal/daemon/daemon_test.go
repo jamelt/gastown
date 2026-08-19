@@ -36,6 +36,56 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestDispatchQueuedWorkUsesResolvedGTPath(t *testing.T) {
+	townRoot := t.TempDir()
+	marker := filepath.Join(townRoot, "scheduler-invocation")
+	gtPath := filepath.Join(townRoot, "resolved-gt")
+	if err := os.WriteFile(gtPath, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s' \"$PWD\" \"$1\" \"$2\" \"$GT_DAEMON\" > "+marker+"\n"), 0o755); err != nil {
+		t.Fatalf("write fake gt: %v", err)
+	}
+
+	d := &Daemon{
+		config: DefaultConfig(townRoot),
+		gtPath: gtPath,
+		logger: log.New(io.Discard, "", 0),
+	}
+	d.dispatchQueuedWork()
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read scheduler invocation: %v", err)
+	}
+	want := townRoot + "|scheduler|run|1"
+	if string(got) != want {
+		t.Fatalf("scheduler invocation = %q, want %q", got, want)
+	}
+}
+
+func TestSchedulerWakeMarker(t *testing.T) {
+	townRoot := t.TempDir()
+	RequestSchedulerWake(townRoot)
+	if !schedulerWakeRequested(townRoot) {
+		t.Fatal("scheduler wake marker was not created")
+	}
+	claim, ok := claimSchedulerWake(townRoot)
+	if !ok {
+		t.Fatal("scheduler wake marker was not claimed")
+	}
+	clearSchedulerWake(claim)
+	if schedulerWakeRequested(townRoot) {
+		t.Fatal("scheduler wake marker was not cleared")
+	}
+}
+
+func TestParseSchedulerDispatchCount(t *testing.T) {
+	if got := parseSchedulerDispatchCount("  Dispatching gt-123 → gastown...\n\n✓ Dispatched 3, failed 0 (reason: batch)\n"); got != 3 {
+		t.Fatalf("parseSchedulerDispatchCount = %d, want 3", got)
+	}
+	if got := parseSchedulerDispatchCount("No ready beads scheduled for dispatch"); got != 0 {
+		t.Fatalf("parseSchedulerDispatchCount no-op = %d, want 0", got)
+	}
+}
+
 func TestDaemonPathCandidatesIncludesLaunchdToolDirs(t *testing.T) {
 	home := filepath.Join("Users", "alice")
 	exePath := filepath.Join("opt", "homebrew", "bin", "gt")
@@ -160,7 +210,7 @@ func TestEnsureRefineryRunningSafetyStoppedDoesNotSpawn(t *testing.T) {
 	townRoot := t.TempDir()
 	writeDaemonTownFile(t, townRoot, "mayor/town.json", `{"name":"test"}`)
 	writeDaemonTownFile(t, townRoot, ".beads/metadata.json", `{"prefix":"hq"}`)
-	writeDaemonTownFile(t, townRoot, "events/refinery/pending.event", "{}")
+	writeDaemonTownFile(t, townRoot, "events/refinery-testrig/pending.event", "{}")
 	if err := os.MkdirAll(filepath.Join(townRoot, "testrig"), 0o755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)
 	}
@@ -192,7 +242,7 @@ func TestEnsureRefineryRunningForkRigDoesNotSpawn(t *testing.T) {
 		t.Skip("mock tmux script uses POSIX shell")
 	}
 	townRoot := t.TempDir()
-	writeDaemonTownFile(t, townRoot, "events/refinery/pending.event", "{}")
+	writeDaemonTownFile(t, townRoot, "events/refinery-testrig/pending.event", "{}")
 	writeDaemonTownFile(t, townRoot, "testrig/config.json", `{"upstream_url":"https://github.com/upstream/repo","beads":{"prefix":"gt"}}`)
 
 	binDir := t.TempDir()
@@ -535,6 +585,56 @@ func TestSaveLoadState_Roundtrip(t *testing.T) {
 	// Time comparison with truncation to handle JSON serialization
 	if !loaded.StartedAt.Truncate(time.Second).Equal(original.StartedAt) {
 		t.Errorf("StartedAt mismatch: got %v, want %v", loaded.StartedAt, original.StartedAt)
+	}
+}
+
+// TestSaveLoadState_BinaryCommitRoundtrip covers the case central to gt-if5q:
+// the merged fix being deployed is itself a daemon fix. Detecting that
+// requires the daemon's *own* build commit to survive a save/load cycle so a
+// later process (doctor, gt daemon status) can compare it against the build
+// branch without needing to be the process that built the binary.
+func TestSaveLoadState_BinaryCommitRoundtrip(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	original := &State{
+		Running:      true,
+		PID:          54321,
+		StartedAt:    time.Now().Truncate(time.Second),
+		BinaryCommit: "abc123def456",
+	}
+
+	if err := SaveState(tmpDir, original); err != nil {
+		t.Fatalf("SaveState error: %v", err)
+	}
+
+	loaded, err := LoadState(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadState error: %v", err)
+	}
+	if loaded.BinaryCommit != original.BinaryCommit {
+		t.Errorf("BinaryCommit mismatch: got %q, want %q", loaded.BinaryCommit, original.BinaryCommit)
+	}
+}
+
+// TestLoadState_MissingBinaryCommit verifies old state files (written before
+// BinaryCommit existed) load as an empty string rather than erroring, so
+// staleness checks can detect "unknown" and skip rather than panic.
+func TestLoadState_MissingBinaryCommit(t *testing.T) {
+	tmpDir := t.TempDir()
+	daemonDir := filepath.Join(tmpDir, "daemon")
+	if err := os.MkdirAll(daemonDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(daemonDir, "state.json"), []byte(`{"running":true,"pid":1}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadState(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadState error: %v", err)
+	}
+	if loaded.BinaryCommit != "" {
+		t.Errorf("BinaryCommit = %q, want empty for pre-BinaryCommit state file", loaded.BinaryCommit)
 	}
 }
 

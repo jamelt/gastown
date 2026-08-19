@@ -363,9 +363,16 @@ func runMayorStatus(cmd *cobra.Command, args []string) error {
 		if status.Tmux.Attached {
 			attachedStatus = "attached"
 		}
-		fmt.Printf("%s Mayor (tmux) is %s\n",
-			style.Bold.Render("●"),
-			style.Bold.Render("running"))
+		if status.AgentAlive {
+			fmt.Printf("%s Mayor (tmux) is %s\n",
+				style.Bold.Render("●"),
+				style.Bold.Render("running"))
+		} else {
+			fmt.Printf("%s Mayor (tmux) session exists but agent process is %s\n",
+				style.Bold.Render("⚠"),
+				style.Bold.Render("dead"))
+			fmt.Printf("  Fix with: %s\n", style.Dim.Render("gt mayor attach"))
+		}
 		fmt.Printf("  Status: %s\n", attachedStatus)
 		fmt.Printf("  Created: %s\n", status.Tmux.Created)
 	}

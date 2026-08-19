@@ -19,6 +19,16 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "cleanup-has_unpushed", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed"},
 		},
 		{
+			name: "missing legacy cleanup fails closed without consuming capacity",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: ""},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "cleanup-unknown", NeedsRecovery: true, CountsTowardCapacity: false, ReuseStatus: "idle-recovery-needed", Blockers: []string{"cleanup_status=<missing>"}},
+		},
+		{
+			name: "missing cleanup plus git uncertainty consumes capacity",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: "", GitCheckFailed: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "cleanup-unknown", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"cleanup_status=<missing>", "git_state=unknown"}},
+		},
+		{
 			name: "protected active work fails closed without capacity",
 			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, ActiveWorkBlocker: "assigned_work=gt-blocked status=blocked"},
 			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "active-work", NeedsRecovery: true, CountsTowardCapacity: false, ReuseStatus: "idle-recovery-needed"},

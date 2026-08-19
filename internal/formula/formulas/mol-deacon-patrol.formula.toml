@@ -72,7 +72,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 14
+version = 16
 
 [vars]
 [vars.wisp_type]
@@ -107,6 +107,7 @@ needs = ["heartbeat"]
 description = """
 First, clean up CLOSED wisps from previous cycles:
 ```bash
+bd mol wisp gc --closed --dry-run --json
 bd mol wisp gc --closed --force
 ```
 
@@ -115,6 +116,9 @@ bd mol wisp gc --closed --force
 > age cleanup can reap this molecule's open steps and make the patrol appear
 > complete early. Use closed-only cleanup here; stale open-wisp cleanup belongs
 > outside active patrol molecules.
+
+The JSON preview is the auditable deletion digest. Review it before running the
+forced closed-only cleanup.
 
 Then handle callbacks from agents.
 
@@ -686,14 +690,14 @@ gt escalate -s CRITICAL "Dolt server is down"
 **Commit bloat (commits > 50k in any DB):**
 The compactor dog (`mol-dog-compactor`) may have failed. Dispatch a compactor:
 ```bash
-gt dog dispatch --formula mol-dog-compactor --var db=<db_name>
+gt sling mol-dog-compactor deacon/dogs --var db=<db_name>
 ```
 If no idle dogs, log for next cycle.
 
 **Stale backups:**
 The backup dog (`mol-dog-backup`) may have failed. Dispatch a backup:
 ```bash
-gt dog dispatch --formula mol-dog-backup
+gt sling mol-dog-backup deacon/dogs
 ```
 
 **Zombie processes:**
@@ -1115,20 +1119,22 @@ lumberjack for automatic rotation and is handled separately.
 Log locations: $GT_ROOT/daemon/dolt.log, $GT_ROOT/daemon/dolt-server.log,
 and per-rig .beads/dolt-server.log files.
 
-**Step 2: Prune state.json of dead sessions**
+**Step 2: Assess daemon and session state**
 
-The state.json tracks active sessions. Prune entries for sessions that no longer exist:
+Inspect the daemon heartbeat and live tmux-session inventory, then cross-check the
+registered agent view:
 ```bash
-# Check for stale session entries
 gt daemon status --json 2>/dev/null
+gt status --json --fast
 ```
 
-If state.json references sessions not in tmux:
-- Remove the stale entries
-- The daemon's internal cleanup should handle this, but verify
+In daemon JSON, `sessions` is the live tmux inventory; `last_heartbeat` and
+`binary_newer` show daemon freshness. Compare session names with registered agents
+from `gt status`. If an unexpected session persists, report it for the daemon's
+internal cleanup rather than editing `daemon/state.json` by hand.
 
 **Note**: Log rotation prevents disk bloat from long-running daemons.
-State pruning keeps runtime state accurate."""
+The machine-readable session cross-check keeps runtime state auditable."""
 
 [[steps]]
 id = "patrol-cleanup"
@@ -1172,7 +1178,9 @@ The Deacon runs in a Claude session with finite context. Check if approaching th
 gt context --usage
 ```
 
-If context is high (>80%), prepare for handoff:
+The command reports `Handoff recommended: yes` when usage crosses the supported
+threshold (`GT_CONTEXT_HANDOFF_THRESHOLD`, 80% by default). If it recommends a
+handoff, prepare for one:
 - Summarize current state
 - Note any pending work
 - Write handoff to molecule state

@@ -201,6 +201,9 @@ func gitPathTracked(worktreePath, relPath string) (bool, error) {
 	cmd := exec.Command("git", "-C", worktreePath, "ls-files", "--stage", "--", relPath) //nolint:gosec // argv is fixed; relPath is passed after --.
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if strings.Contains(strings.ToLower(string(out)), "not a git repository") {
+			return false, nil
+		}
 		return false, fmt.Errorf("git ls-files %s: %w%s", relPath, err, gitOutputSuffix(out))
 	}
 	return len(bytes.TrimSpace(out)) > 0, nil
@@ -449,6 +452,44 @@ func SetupRedirect(townRoot, worktreePath string) error {
 		return fmt.Errorf("creating redirect file: %w", err)
 	}
 
+	return nil
+}
+
+// ReconcileRigContainerRedirect makes <rig>/.beads a selector-only container
+// for the authoritative manager worktree database at
+// <rig>/mayor/rig/.beads. Stale metadata/config next to the redirect is removed
+// so bd cannot bind the container's old project_id before following the target.
+// The authoritative target is never initialized, rewritten, or replaced.
+func ReconcileRigContainerRedirect(rigPath string) error {
+	if rigPath == "" {
+		return fmt.Errorf("rig path is required")
+	}
+	canonical := filepath.Join(rigPath, "mayor", "rig", ".beads")
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return fmt.Errorf("authoritative manager beads directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("authoritative manager beads path is not a directory: %s", canonical)
+	}
+
+	container := filepath.Join(rigPath, ".beads")
+	if err := cleanBeadsRuntimeFiles(container); err != nil {
+		return fmt.Errorf("cleaning rig beads container: %w", err)
+	}
+	if err := os.MkdirAll(container, 0755); err != nil {
+		return fmt.Errorf("creating rig beads container: %w", err)
+	}
+	target, err := filepath.Rel(rigPath, canonical)
+	if err != nil || target == "." || target == "" || filepath.IsAbs(target) || target == ".." || strings.HasPrefix(target, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("unsafe rig beads redirect target %q", target)
+	}
+	if err := os.WriteFile(filepath.Join(container, "redirect"), []byte(filepath.ToSlash(target)+"\n"), 0644); err != nil {
+		return fmt.Errorf("writing rig beads redirect: %w", err)
+	}
+	if resolved := ResolveBeadsDir(rigPath); filepath.Clean(resolved) != filepath.Clean(canonical) {
+		return fmt.Errorf("rig beads redirect resolved to %s, want %s", resolved, canonical)
+	}
 	return nil
 }
 

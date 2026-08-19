@@ -176,7 +176,7 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 		t.Fatalf("chdir witness dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, _, err := buildRestartCommand("gt-witness")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 		t.Fatalf("chdir witness dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, _, err := buildRestartCommand("gt-witness")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
 		t.Fatalf("chdir witness dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, _, err := buildRestartCommand("gt-witness")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -377,6 +377,11 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 
 	townSettings := config.NewTownSettings()
 	townSettings.DefaultAgent = "claude"
+	townSettings.Agents["next-agent"] = &config.RuntimeConfig{
+		Provider: "generic",
+		Command:  "next-runtime",
+		Args:     []string{"--safe"},
+	}
 	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
@@ -390,7 +395,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	_ = os.Chdir(crewDir)
 
 	t.Run("custom ContinuePrompt overrides default", func(t *testing.T) {
-		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+		cmd, _, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
 			ContinueSession: true,
 			ContinuePrompt:  "Context compacted. Continue your previous task.",
 		})
@@ -406,7 +411,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	})
 
 	t.Run("empty ContinuePrompt falls back to default", func(t *testing.T) {
-		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+		cmd, _, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
 			ContinueSession: true,
 		})
 		if err != nil {
@@ -421,7 +426,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	})
 
 	t.Run("ContinueSession false uses beacon", func(t *testing.T) {
-		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+		cmd, _, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
 			ContinueSession: false,
 		})
 		if err != nil {
@@ -431,6 +436,102 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 			t.Errorf("expected no --continue flag when ContinueSession is false, got: %q", cmd)
 		}
 	})
+
+	t.Run("agent override uses durable-state startup prompt", func(t *testing.T) {
+		cmd, _, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+			AgentOverride: "next-agent",
+			StartupPrompt: "Provider failover: run gt prime --hook and continue from durable state.",
+		})
+		if err != nil {
+			t.Fatalf("buildRestartCommandWithOpts: %v", err)
+		}
+		if !strings.Contains(cmd, "next-runtime --safe") {
+			t.Errorf("expected override runtime in restart command, got: %q", cmd)
+		}
+		if !strings.Contains(cmd, "GT_AGENT=next-agent") {
+			t.Errorf("expected GT_AGENT override in restart environment, got: %q", cmd)
+		}
+		if !strings.Contains(cmd, "Provider failover") {
+			t.Errorf("expected durable-state startup prompt, got: %q", cmd)
+		}
+		if strings.Contains(cmd, "--continue") {
+			t.Errorf("cross-provider override must not continue provider-specific transcript: %q", cmd)
+		}
+	})
+}
+
+// TestBuildRestartCommand_ReturnsWorkDirSeparately guards against gt-gd7j and
+// gt-16rc: a respawn-pane command whose embedded `cd` targets a directory
+// other than the one tmux's own -c flag points at (or whose embedded `cd`
+// merges with adjacent text because the directory wasn't shell-quoted)
+// leaves the pane running a broken command and can kill it. gt-w51h removes
+// the embedded `cd` entirely — the working directory is returned as its own
+// value so callers pass it straight to tmux's native -c flag
+// (RespawnPaneWithWorkDir), which needs no shell quoting since it isn't
+// parsed by a shell. This test proves workDir tracks the session's
+// canonical directory exactly, and that the directory is never embedded as
+// a `cd` (or any other substring) in the command text — including when the
+// directory contains a space, which would have split an unquoted `cd`.
+func TestBuildRestartCommand_ReturnsWorkDirSeparately(t *testing.T) {
+	setupHandoffTestRegistry(t)
+
+	origCwd, _ := os.Getwd()
+	origGTAgent := os.Getenv("GT_AGENT")
+	origTownRoot := os.Getenv("GT_TOWN_ROOT")
+	origRoot := os.Getenv("GT_ROOT")
+
+	// The town root contains a space to prove the working directory is
+	// never concatenated into a shell command (gt-16rc): if it were, an
+	// unquoted `cd` would split on the space.
+	townRoot := filepath.Join(t.TempDir(), "town root")
+
+	t.Cleanup(func() {
+		_ = os.Chdir(origCwd)
+		_ = os.Setenv("GT_AGENT", origGTAgent)
+		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
+		_ = os.Setenv("GT_ROOT", origRoot)
+	})
+	rigPath := filepath.Join(townRoot, "gastown")
+	crewDir := filepath.Join(rigPath, "crew", "bear")
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
+		t.Fatalf("mkdir crew dir: %v", err)
+	}
+
+	townSettings := config.NewTownSettings()
+	townSettings.DefaultAgent = "claude"
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), config.NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	_ = os.Setenv("GT_AGENT", "")
+	_ = os.Setenv("GT_TOWN_ROOT", "")
+	_ = os.Setenv("GT_ROOT", "")
+	_ = os.Chdir(crewDir)
+
+	cmd, workDir, err := buildRestartCommand("gt-crew-bear")
+	if err != nil {
+		t.Fatalf("buildRestartCommand: %v", err)
+	}
+
+	if workDir != crewDir {
+		t.Errorf("expected workDir %q, got %q", crewDir, workDir)
+	}
+	if strings.Contains(cmd, crewDir) {
+		t.Errorf("expected command to not embed the working directory %q at all, got: %q", crewDir, cmd)
+	}
+	if strings.HasPrefix(cmd, "cd ") {
+		t.Errorf("expected command to not start with a shell cd, got: %q", cmd)
+	}
 }
 
 func TestDetectTownRootFromCwd_EnvFallback(t *testing.T) {
@@ -815,7 +916,7 @@ func TestHandoffProcessNames(t *testing.T) {
 		t.Cleanup(func() { os.Chdir(origCwd) })
 
 		// Same-agent restart should preserve existing process names from env
-		cmd, err := buildRestartCommand("gt-crew-propane")
+		cmd, _, err := buildRestartCommand("gt-crew-propane")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -841,7 +942,7 @@ func TestHandoffProcessNames(t *testing.T) {
 		t.Cleanup(func() { os.Chdir(origCwd) })
 
 		// No GT_PROCESS_NAMES in env — should compute from agent config
-		cmd, err := buildRestartCommand("gt-crew-propane")
+		cmd, _, err := buildRestartCommand("gt-crew-propane")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

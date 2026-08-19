@@ -21,8 +21,10 @@ const (
 	defaultWispMaxAge = 24 * time.Hour
 	// Closed wisps older than this are permanently deleted. Formula var: purge_age.
 	defaultWispDeleteAge = 7 * 24 * time.Hour
-	// Alert threshold: if open wisp count exceeds this, the Dog should escalate.
-	// Shared with `gt reaper run` warning. See reaper.DefaultAlertThreshold.
+	// Alert threshold passed to the Dog via the alert_threshold formula var,
+	// used for its reap-candidate-backlog check (not raw open-wisp volume —
+	// see reaper.DefaultAlertThreshold). The inline fallback's own open-wisp
+	// safety-net check uses reaper.DefaultOpenWispSafetyThreshold directly.
 	wispAlertThreshold = reaper.DefaultAlertThreshold
 	// Closed mail older than this is permanently deleted. Formula var: mail_delete_age.
 	defaultMailDeleteAge = 7 * 24 * time.Hour
@@ -195,6 +197,13 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 			}
 			d.logger.Printf("%s, %d open remain", reapSummary, result.OpenRemain)
 		}
+		// Evaluated per database, not against the cross-database sum in Step 5 —
+		// summing first would make this scale with the number of monitored
+		// databases rather than any single database's health.
+		if reaper.ExceedsOpenWispSafetyThreshold(result.OpenRemain) {
+			d.logger.Printf("wisp_reaper: %s: WARNING: %d open wisps exceed safety threshold %d — possible stuck-parent leak",
+				dbName, result.OpenRemain, reaper.DefaultOpenWispSafetyThreshold)
+		}
 	}
 	if reapErrors > 0 {
 		mol.failStep("reap", fmt.Sprintf("%d databases had reap errors", reapErrors))
@@ -322,11 +331,11 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		mol.closeStep("auto-close")
 	}
 
-	// Step 5: Report
-	if totalOpen > wispAlertThreshold {
-		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
-			totalOpen, wispAlertThreshold)
-	}
+	// Step 5: Report. Per-database safety-threshold warnings were already
+	// logged in the reap loop above (see ExceedsOpenWispSafetyThreshold) —
+	// checking the cross-database totalOpen sum here would scale the check
+	// with the number of monitored databases rather than any single
+	// database's health.
 	summary := fmt.Sprintf("wisp_reaper: cycle complete — reaped=%d", totalReaped)
 	if totalMoleculeSteps > 0 {
 		summary += fmt.Sprintf(" molecule_steps_closed=%d", totalMoleculeSteps)

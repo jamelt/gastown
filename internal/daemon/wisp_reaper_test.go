@@ -12,6 +12,25 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
+// TestReapWispsInlineSafetyCheckIsPerDatabase is a regression test for
+// gt-reaper-alert-flood-root-cause: the open-wisp safety-net check must be
+// evaluated per database (inside the reap loop), never against a
+// cross-database sum — summing first makes the check scale with the number
+// of monitored databases rather than any single database's health.
+func TestReapWispsInlineSafetyCheckIsPerDatabase(t *testing.T) {
+	data, err := os.ReadFile("wisp_reaper.go")
+	if err != nil {
+		t.Fatalf("read wisp_reaper.go: %v", err)
+	}
+	source := string(data)
+	if strings.Contains(source, "totalOpen > wispAlertThreshold") {
+		t.Fatal("reapWispsInline should not compare a cross-database totalOpen sum against wispAlertThreshold")
+	}
+	if !strings.Contains(source, "reaper.ExceedsOpenWispSafetyThreshold(result.OpenRemain)") {
+		t.Fatal("reapWispsInline should evaluate ExceedsOpenWispSafetyThreshold per database (result.OpenRemain), inside the reap loop")
+	}
+}
+
 func TestWispReaperInterval(t *testing.T) {
 	// Default (now 1h after Dog-driven refactor)
 	if got := wispReaperInterval(nil); got != defaultWispReaperInterval {

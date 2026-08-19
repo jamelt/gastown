@@ -108,7 +108,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 16
+version = 17
 
 [vars]
 [vars.wisp_type]
@@ -187,11 +187,15 @@ default = "gt"
 id = "inbox-check"
 title = "Check refinery mail"
 description = """
-First, clean up wisps from previous cycles (closed wisps + abandoned wisps):
+First, preview and clean up CLOSED wisps from previous cycles:
 ```bash
+bd mol wisp gc --closed --dry-run --json
 bd mol wisp gc --closed --force
-bd mol wisp gc --age 1h --force
 ```
+
+The JSON preview is the auditable deletion digest. Review it before running the
+forced command. Age-based GC is disabled in live patrols pending a Beads
+primitive that proves ownership and excludes all live operational records.
 
 Then check mail for MERGE_READY submissions, escalations, and messages.
 
@@ -1183,13 +1187,14 @@ This must resolve exactly one bead ID. If it fails, STOP and report the error. I
 Then use await-event to subscribe to the refinery event channel with exponential backoff:
 
 ```bash
-gt mol step await-event --channel refinery --agent-bead "$YOUR_AGENT_BEAD" \
+gt mol step await-event --channel refinery-{{rig}} --agent-bead "$YOUR_AGENT_BEAD" \
   --backoff-base 30s --backoff-mult 2 --backoff-max 15m --cleanup \
   --context-check-interval 5m
 ```
 
 This command:
-1. Watches `~/gt/events/refinery/` for event files (polling-based)
+1. Watches `~/gt/events/refinery-{{rig}}/` for event files (polling-based) — the
+   channel is scoped per rig so one rig's events never wake another's refinery (gt-v5d4)
 2. Returns IMMEDIATELY when an event is emitted (MERGE_READY, PATROL_WAKE, MQ_SUBMIT)
 3. If no events, times out with exponential backoff:
    - First timeout: 30s

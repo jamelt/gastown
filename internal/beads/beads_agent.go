@@ -608,6 +608,101 @@ func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool,
 	return true, nil
 }
 
+// ClearAgentActiveMRAndMarkCleanupUnknownIfMatches clears active_mr and marks
+// cleanup_status "unknown" in one atomic update, but only when active_mr
+// still references expectedMR. This lets a merge-close invalidate a stale
+// cleanup_status claim the moment the MR closes, without racing a polecat
+// that has already been redispatched to new work: if active_mr no longer
+// matches, the agent has moved on and its own fresh self-reported
+// cleanup_status is left untouched. Returns true when the update was written.
+func (b *Beads) ClearAgentActiveMRAndMarkCleanupUnknownIfMatches(id string, expectedMR string) (bool, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.ClearAgentActiveMRAndMarkCleanupUnknownIfMatches(id, expectedMR)
+	}
+
+	id = strings.TrimSpace(id)
+	expectedMR = strings.TrimSpace(expectedMR)
+	if id == "" || expectedMR == "" {
+		return false, nil
+	}
+
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	issue, err := b.Show(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !IsAgentBead(issue) {
+		return false, fmt.Errorf("%s is not an agent bead", id)
+	}
+
+	fields := ParseAgentFields(issue.Description)
+	if strings.TrimSpace(fields.ActiveMR) != expectedMR {
+		return false, nil
+	}
+
+	fields.ActiveMR = ""
+	fields.CleanupStatus = "unknown"
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// UpdateAgentCleanupStatusIfMatches sets cleanup_status to newStatus, but
+// only when the bead's current cleanup_status still equals expectedCurrent
+// at write time. This lets a caller invalidate a snapshot it read earlier
+// without clobbering a fresher write that landed in between (e.g. a polecat's
+// own gt done self-report racing a witness zombie-restart's invalidation of
+// the same bead). Returns true when the update was written.
+func (b *Beads) UpdateAgentCleanupStatusIfMatches(id string, expectedCurrent string, newStatus string) (bool, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.UpdateAgentCleanupStatusIfMatches(id, expectedCurrent, newStatus)
+	}
+
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, nil
+	}
+
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	issue, err := b.Show(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !IsAgentBead(issue) {
+		return false, fmt.Errorf("%s is not an agent bead", id)
+	}
+
+	fields := ParseAgentFields(issue.Description)
+	if strings.TrimSpace(fields.CleanupStatus) != strings.TrimSpace(expectedCurrent) {
+		return false, nil
+	}
+
+	fields.CleanupStatus = newStatus
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // UpdateAgentNotificationLevel updates the notification_level field in an agent bead.
 // Valid levels: verbose, normal, muted (DND mode).
 // Pass empty string to reset to default (normal).

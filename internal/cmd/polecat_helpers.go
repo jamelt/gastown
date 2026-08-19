@@ -119,12 +119,16 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			if gitErr != nil {
 				result.Reasons = append(result.Reasons, "cannot check git state")
 			} else if !gitState.Clean {
-				if gitState.UnpushedCommits > 0 {
+				if gitState.DetachedHead {
+					result.Reasons = append(result.Reasons, "detached HEAD has no branch custody target")
+				} else if gitState.UnpushedCommits > 0 {
 					result.Reasons = append(result.Reasons, fmt.Sprintf("has %d unpushed commit(s)", gitState.UnpushedCommits))
 				} else if len(gitState.UncommittedFiles) > 0 {
 					result.Reasons = append(result.Reasons, fmt.Sprintf("has %d uncommitted file(s)", len(gitState.UncommittedFiles)))
 				} else if gitState.StashCount > 0 {
 					result.Reasons = append(result.Reasons, fmt.Sprintf("has %d stash(es)", gitState.StashCount))
+				} else {
+					result.Reasons = append(result.Reasons, "live git state reports work at risk")
 				}
 			}
 		}
@@ -144,6 +148,25 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			gitState, _ = getGitState(polecatInfo.ClonePath)
 			result.GitState = gitState
 			gitStateLoaded = true
+		}
+		// cleanup_status is advisory. Always inspect the live worktree so dry-run
+		// and execution reject new risk discovered after a previous status report.
+		loadGitState()
+		if gitState == nil {
+			result.Reasons = append(result.Reasons, "cannot check live git state")
+		} else if gitState.DetachedHead {
+			result.Reasons = append(result.Reasons, "detached HEAD has no branch custody target")
+		} else if !gitState.Clean {
+			switch {
+			case gitState.UnpushedCommits > 0:
+				result.Reasons = append(result.Reasons, fmt.Sprintf("has %d unpushed commit(s)", gitState.UnpushedCommits))
+			case len(gitState.UncommittedFiles) > 0:
+				result.Reasons = append(result.Reasons, fmt.Sprintf("has %d uncommitted file(s)", len(gitState.UncommittedFiles)))
+			case gitState.StashCount > 0:
+				result.Reasons = append(result.Reasons, fmt.Sprintf("has %d stash(es)", gitState.StashCount))
+			default:
+				result.Reasons = append(result.Reasons, "live git state reports work at risk")
+			}
 		}
 		activeMRAssessment := polecat.ActiveMRAssessment{}
 		if fields.ActiveMR != "" {

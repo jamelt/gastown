@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +17,8 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func setupPolecatCapacityTestTown(t *testing.T, maxPolecats int) string {
@@ -51,6 +55,74 @@ func setupPolecatCapacityRig(t *testing.T, maxPolecats int) string {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
 	return townRoot
+}
+
+func TestCountActivePolecatsRequiresInventoryEntry(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "polecats", "real"), 0o755); err != nil {
+		t.Fatalf("create real polecat inventory: %v", err)
+	}
+	registry := session.NewPrefixRegistry()
+	registry.Register("gt", "gastown")
+	oldRegistry := session.DefaultRegistry()
+	session.SetDefaultRegistry(registry)
+	t.Cleanup(func() { session.SetDefaultRegistry(oldRegistry) })
+
+	isolated := tmux.NewTmux()
+	liveSocket := fmt.Sprintf("gt-test-capacity-live-%d-%d", os.Getpid(), time.Now().UnixNano())
+	live := tmux.NewTmuxWithSocket(liveSocket)
+	if err := live.NewSessionWithCommand("live-sentinel", "", "sleep 30"); err != nil {
+		t.Fatalf("create live sentinel: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = exec.CommandContext(ctx, "tmux", "-L", liveSocket, "kill-server").Run()
+		cancel()
+		_ = os.Remove(filepath.Join(tmux.SocketDir(), liveSocket))
+	})
+
+	names := []string{"gt-real", "gt-test-nudge-1", "gt-test-modeA-2", "gt-witness"}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(names))
+	for _, name := range names {
+		name := name
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := isolated.NewSessionWithCommand(name, "", "sleep 30"); err != nil {
+				errs <- fmt.Errorf("create %s: %w", name, err)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		name := name
+		t.Cleanup(func() { _ = isolated.KillSessionWithProcesses(name) })
+	}
+
+	if got := countActivePolecats(townRoot); got != 1 {
+		t.Fatalf("countActivePolecats = %d, want only the inventory-backed session", got)
+	}
+	liveSessions, err := live.ListSessions()
+	if err != nil {
+		t.Fatalf("list live sentinel socket: %v", err)
+	}
+	if len(liveSessions) != 1 || liveSessions[0] != "live-sentinel" {
+		t.Fatalf("isolated concurrent sessions leaked to live socket: %v", liveSessions)
+	}
+	for _, leakedName := range []string{"test-nudge-1", "test-modeA-2"} {
+		if _, err := os.Stat(filepath.Join(townRoot, "gastown", "polecats", leakedName)); !os.IsNotExist(err) {
+			t.Fatalf("test session created inventory entry %q: %v", leakedName, err)
+		}
+	}
 }
 
 func TestCapacitySnapshotCleansStaleReservations(t *testing.T) {
@@ -325,7 +397,7 @@ func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			snapshot := polecatCapacitySnapshot{}
-			applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "synth", tt.fields, tt.activeWork, nil)
+			applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "synth", tt.fields, tt.activeWork, nil, polecatMQIndex{})
 			if snapshot.Working != tt.want.Working || snapshot.RecoveryBlocked != tt.want.RecoveryBlocked || snapshot.ReusableIdle != tt.want.ReusableIdle || snapshot.PendingMR != tt.want.PendingMR || snapshot.capacityUsed != tt.want.capacityUsed {
 				t.Fatalf("snapshot = %+v, want %+v", snapshot, tt.want)
 			}
@@ -349,6 +421,21 @@ func TestCapacitySnapshotRecoveryBlockedDoesNotAlwaysConsumeFreeCapacity(t *test
 
 	if snapshot.RecoveryBlocked != 2 || snapshot.capacityUsed != 1 || snapshot.Free != 2 {
 		t.Fatalf("snapshot = %+v, want recovery=2 capacityUsed=1 free=2", snapshot)
+	}
+}
+
+func TestCapacitySnapshotLegacyMissingCleanupCannotExhaustScheduler(t *testing.T) {
+	snapshot := polecatCapacitySnapshot{Max: 3}
+	for i := 0; i < 36; i++ {
+		item := buildPolecatInventoryItem("gastown", fmt.Sprintf("legacy-%d", i), &beads.AgentFields{
+			AgentState: string(beads.AgentStateDone),
+		}, nil, nil, polecatMQIndex{})
+		applyWorkstateDispositionToCapacitySnapshot(&snapshot, item.State, item.Disposition)
+	}
+	snapshot.Free = snapshot.Max - snapshot.occupied()
+
+	if snapshot.RecoveryBlocked != 36 || snapshot.capacityUsed != 0 || snapshot.Free != 3 {
+		t.Fatalf("snapshot = %+v, want 36 recovery-visible legacy entries without capacity deadlock", snapshot)
 	}
 }
 

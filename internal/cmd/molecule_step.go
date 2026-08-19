@@ -322,11 +322,6 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 		return fmt.Errorf("getting session name: %w", err)
 	}
 
-	restartCmd, err := buildRestartCommand(currentSession)
-	if err != nil {
-		return fmt.Errorf("building restart command: %w", err)
-	}
-
 	fmt.Printf("\n%s Respawning for next step...\n", style.Bold.Render("🔄"))
 
 	t := tmux.NewTmux()
@@ -343,7 +338,9 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 		style.PrintWarning("could not clear history: %v", err)
 	}
 
-	return t.RespawnPane(pane, restartCmd)
+	// respawnSessionPane targets the canonical working directory via tmux's
+	// native -c flag, falling back to the town root if it's been deleted.
+	return respawnSessionPane(t, pane, currentSession, buildRestartCommandOpts{})
 }
 
 // handleParallelSteps handles executing multiple steps concurrently (fan-out pattern).

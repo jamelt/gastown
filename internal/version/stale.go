@@ -2,13 +2,16 @@
 package version
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // These variables are set at build time via ldflags in cmd package.
@@ -55,6 +58,15 @@ func resolveCommitHash() string {
 	return ""
 }
 
+// CurrentCommit returns the build commit of the running process: the
+// ldflags-injected Commit if set, otherwise the VCS revision embedded by `go
+// build`. Empty for a dev build with neither available. Exported so other
+// packages (e.g. the daemon, to record its own build commit at startup) don't
+// need to duplicate this resolution order.
+func CurrentCommit() string {
+	return resolveCommitHash()
+}
+
 // Describe returns a one-line, human-readable staleness summary for a stale
 // binary, using subject as the leading noun so callers can vary it
 // ("Binary" for gt doctor, "gt binary" for the startup warning):
@@ -96,19 +108,44 @@ func commitsMatch(a, b string) bool {
 	return strings.HasPrefix(a, b[:minLen]) || strings.HasPrefix(b, a[:minLen])
 }
 
-// CheckStaleBinary compares the binary's embedded commit with a build-branch
-// ref. It returns staleness info including whether the binary needs rebuilding.
-// This check is designed to be fast and non-blocking - errors are captured but
-// don't interrupt normal operation.
+// CheckStaleBinary compares the running process's own embedded commit with a
+// build-branch ref. It returns staleness info including whether the binary
+// needs rebuilding. This check is designed to be fast and non-blocking -
+// errors are captured but don't interrupt normal operation.
 func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
+	return CheckStaleBinaryForCommit(repoDir, resolveCommitHash())
+}
+
+// CheckStaleBinaryForCommit is CheckStaleBinary for a caller-supplied binary
+// commit, for checking the staleness of a binary other than the one currently
+// running (e.g. a long-lived daemon process checking itself from a separate,
+// possibly-fresher CLI invocation, using a commit the daemon recorded at its
+// own startup).
+func CheckStaleBinaryForCommit(repoDir, binaryCommit string) *StaleBinaryInfo {
 	info := &StaleBinaryInfo{}
 
-	// Get binary commit
-	info.BinaryCommit = resolveCommitHash()
+	info.BinaryCommit = binaryCommit
 	if info.BinaryCommit == "" {
 		info.Error = fmt.Errorf("cannot determine binary commit (dev build?)")
 		return info
 	}
+
+	// A verified `gt activate` receipt is authoritative: activation fetches,
+	// merge-base-verifies, and builds this exact SHA against the real
+	// jamelt/gastown origin/main in its own isolated clone. If the binary
+	// matches that receipt, it's provably current regardless of what any
+	// local worktree's branch tip says — that worktree (e.g. the Mayor's
+	// rig) is never touched by activation and can lag the origin activation
+	// just verified against, producing a false stale warning immediately
+	// after a successful activation. Checked before touching repoDir at all
+	// so it works from any town/rig/worker CWD and is unaffected by which
+	// repo GetRepoRoot happened to resolve.
+	if activatedSHA, ok := currentActivationSHA(); ok && commitsMatch(info.BinaryCommit, activatedSHA) {
+		info.RepoCommit = activatedSHA
+		info.CompareRef = "activated main"
+		return info
+	}
+
 	if !isGitRepo(repoDir) {
 		info.Error = fmt.Errorf("source repo %q is not a git worktree", repoDir)
 		return info
@@ -301,21 +338,29 @@ func singleBranchRef(repoDir, pattern string) (buildBranchRef, bool) {
 // Crew rigs also contain cmd/gt/main.go but have different HEADs,
 // so we prefer the gastown repo over CWD-based git toplevel detection.
 func GetRepoRoot() (string, error) {
+	cwd, _ := os.Getwd()
+	return resolveRepoRoot(os.Getenv("GT_ROOT"), os.Getenv("HOME"), cwd)
+}
+
+// resolveRepoRoot is the pure, dependency-injected core of GetRepoRoot,
+// separated out so tests can exercise candidate resolution (town-root CWD,
+// a symlinked legacy path, an unrelated git repo, ...) without depending on
+// the real environment.
+func resolveRepoRoot(gtRoot, home, cwd string) (string, error) {
 	// Check if GT_ROOT environment variable is set (agents always have this)
-	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
+	if gtRoot != "" {
 		candidates := []string{
 			gtRoot + "/gastown",
 			gtRoot + "/gastown/mayor/rig",
 		}
 		for _, candidate := range candidates {
-			if hasGtSource(candidate) {
+			if isAuthoritativeGtSource(candidate) {
 				return candidate, nil
 			}
 		}
 	}
 
 	// Try common development paths relative to home
-	home := os.Getenv("HOME")
 	if home != "" {
 		candidates := []string{
 			home + "/gt/gastown",
@@ -326,23 +371,39 @@ func GetRepoRoot() (string, error) {
 			home + "/src/gastown/mayor/rig",
 		}
 		for _, candidate := range candidates {
-			if hasGtSource(candidate) {
+			if isAuthoritativeGtSource(candidate) {
 				return candidate, nil
 			}
 		}
 	}
 
-	// Fall back to current directory's git repo (may be a crew rig)
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	util.SetDetachedProcessGroup(cmd)
-	if output, err := cmd.Output(); err == nil {
-		root := strings.TrimSpace(string(output))
-		if hasGtSource(root) {
-			return root, nil
+	// Fall back to the current directory's git repo (may be a crew rig).
+	// This is the only candidate not rooted at a known Gas Town path, so it
+	// is the one most exposed to CWD accidentally landing inside operational
+	// state (e.g. the town root's own git repo) or an unrelated repository;
+	// isAuthoritativeGtSource's remote check guards it the same as the rest.
+	if cwd != "" {
+		cmd := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel")
+		util.SetDetachedProcessGroup(cmd)
+		if output, err := cmd.Output(); err == nil {
+			root := strings.TrimSpace(string(output))
+			if isAuthoritativeGtSource(root) {
+				return root, nil
+			}
 		}
 	}
 
 	return "", fmt.Errorf("cannot locate gt source repository")
+}
+
+// isAuthoritativeGtSource reports whether dir is both a gt source checkout
+// (has cmd/gt/main.go) and traceable to the authoritative jamelt/gastown
+// remote. File presence alone isn't enough: the town root's own operational
+// git repo, a stale compatibility symlink, or an unrelated repository can
+// all satisfy hasGtSource by coincidence (e.g. a leftover checkout) without
+// being a trustworthy source of Gas Town freshness.
+func isAuthoritativeGtSource(dir string) bool {
+	return hasGtSource(dir) && hasAuthoritativeRemote(dir)
 }
 
 // isGitRepo checks if a directory is a git repository.
@@ -352,6 +413,92 @@ func isGitRepo(dir string) bool {
 	util.SetDetachedProcessGroup(cmd)
 	output, err := cmd.Output()
 	return err == nil && strings.TrimSpace(string(output)) == "true"
+}
+
+// hasAuthoritativeRemote reports whether dir's "origin" or "upstream" remote
+// canonicalizes to util.DefaultGtAuthority (github.com/jamelt/gastown) — the
+// same identity `gt activate` itself requires of its source clone. A repo
+// whose remotes don't match, or that has none configured, is never treated
+// as an authoritative source for staleness comparisons, regardless of what
+// files it happens to contain.
+//
+// internal/activation.DefaultAuthority re-exports the same constant; this
+// package can't import internal/activation directly (it would close an
+// activation -> daemon -> version -> activation import cycle).
+func hasAuthoritativeRemote(dir string) bool {
+	if !isGitRepo(dir) {
+		return false
+	}
+	for _, remote := range []string{"origin", "upstream"} {
+		cmd := exec.Command("git", "remote", "get-url", remote)
+		cmd.Dir = dir
+		util.SetDetachedProcessGroup(cmd)
+		out, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		if util.CanonicalRemote(strings.TrimSpace(string(out))) == util.DefaultGtAuthority {
+			return true
+		}
+	}
+	return false
+}
+
+// activationReceipt mirrors the fields of internal/activation.Receipt this
+// package needs from <town>/.runtime/activation/current.json. Kept as a
+// local subset rather than importing internal/activation, which would close
+// an activation -> daemon -> version -> activation import cycle.
+type activationReceipt struct {
+	Action       string `json:"action"`
+	Result       string `json:"result"`
+	NewSHA       string `json:"new_sha"`
+	SourceRemote string `json:"source_remote"`
+}
+
+// findTownRoot resolves the town root for activation-receipt lookups.
+// A package var (like Commit above) so tests can stub it instead of
+// depending on the real working directory — this package's tests otherwise
+// run inside an actual checkout nested in a real Gas Town installation,
+// which has its own real activation receipt that must never leak into
+// unrelated test assertions.
+var findTownRoot = workspace.FindFromCwdOrError
+
+// currentActivationSHA returns the NewSHA recorded by the most recent
+// successful `gt activate` from the authoritative jamelt/gastown remote,
+// resolving the town from the current working directory so it works from
+// any town/rig/worker CWD. Returns ok=false whenever the receipt can't be
+// found or verified — an untrusted, missing, or divergent source fails
+// closed to "no shortcut available" rather than being trusted.
+func currentActivationSHA() (sha string, ok bool) {
+	townRoot, err := findTownRoot()
+	if err != nil {
+		return "", false
+	}
+	return activationSHAForTown(townRoot)
+}
+
+// activationSHAForTown is the pure core of currentActivationSHA, taking an
+// explicit town root so it can be unit tested without depending on the real
+// working directory.
+func activationSHAForTown(townRoot string) (sha string, ok bool) {
+	data, err := os.ReadFile(filepath.Join(townRoot, ".runtime", "activation", "current.json"))
+	if err != nil {
+		return "", false
+	}
+	var receipt activationReceipt
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return "", false
+	}
+	if receipt.Action != "activate" || receipt.Result != "success" {
+		return "", false
+	}
+	if receipt.SourceRemote != util.DefaultGtAuthority {
+		return "", false
+	}
+	if receipt.NewSHA == "" {
+		return "", false
+	}
+	return receipt.NewSHA, true
 }
 
 // hasGtSource checks if a directory contains the gt source code.

@@ -84,6 +84,13 @@ func isBDTargetEnv(entry string) bool {
 // write to a different database than the selected .beads directory.
 func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
+	// An explicit Gas Town target must win over Beads' contributor planning
+	// store. Newer bd releases can route create to ~/.beads-planning when the
+	// checkout has git config beads.role=contributor, even with BEADS_DIR set.
+	// Override the role for this subprocess only; do not mutate repository or
+	// user git config. Routing-mode subprocesses intentionally do not get this
+	// override because they are asking bd to choose the destination.
+	env = appendGitConfigOverride(env, "beads.role", "maintainer")
 	if beadsDir == "" {
 		return addResolvedDoltConnectionEnv(env, "")
 	}
@@ -94,6 +101,21 @@ func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 		env = append(env, dbEnv)
 	}
 	return addResolvedDoltConnectionEnv(env, beadsDir)
+}
+
+func appendGitConfigOverride(env []string, key, value string) []string {
+	count, err := strconv.Atoi(envValue(env, "GIT_CONFIG_COUNT"))
+	if err != nil || count < 0 {
+		count = 0
+	}
+	env = StripEnvKey(env, "GIT_CONFIG_COUNT")
+	env = StripEnvKey(env, "GIT_CONFIG_KEY_"+strconv.Itoa(count))
+	env = StripEnvKey(env, "GIT_CONFIG_VALUE_"+strconv.Itoa(count))
+	return append(env,
+		"GIT_CONFIG_COUNT="+strconv.Itoa(count+1),
+		"GIT_CONFIG_KEY_"+strconv.Itoa(count)+"="+key,
+		"GIT_CONFIG_VALUE_"+strconv.Itoa(count)+"="+value,
+	)
 }
 
 // BuildRoutingBDEnv returns env for a bd subprocess that intentionally relies on

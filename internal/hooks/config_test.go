@@ -444,8 +444,8 @@ func TestComputeExpected(t *testing.T) {
 	if len(expected.SessionStart) != 1 || expected.SessionStart[0].Hooks[0].Command != "gastown-crew-session" {
 		t.Errorf("expected gastown/crew SessionStart, got %v", expected.SessionStart)
 	}
-	// On-disk base has no PreToolUse, so DefaultBase's 3 pr-workflow guards are
-	// backfilled. The crew override adds Bash(git*), making 4 total.
+	// On-disk base has no PreToolUse, so DefaultBase's guards are backfilled.
+	// The crew override adds Bash(git*), making defaultPTU+1 total.
 	defaultPTU := len(DefaultBase().PreToolUse)
 	if len(expected.PreToolUse) != defaultPTU+1 {
 		t.Errorf("expected %d PreToolUse (default %d + crew 1), got %d", defaultPTU+1, defaultPTU, len(expected.PreToolUse))

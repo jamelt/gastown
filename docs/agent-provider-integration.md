@@ -263,6 +263,73 @@ At each step, the agent name is looked up in:
 
 This means your JSON preset is found automatically — no code change needed.
 
+### Provider-aware backup chains
+
+Backups are ordered aliases, not model-name guesses. Tag each catalog entry
+with the allocation pool it consumes:
+
+```json
+{
+  "name": "codex-sol-high",
+  "quota_provider": "openai",
+  "command": "codex",
+  "args": ["--model", "gpt-5.6-sol"]
+}
+```
+
+Then declare role routes in `settings/config.json`:
+
+```json
+{
+  "role_agents": {
+    "mayor": "claude-opus-5"
+  },
+  "role_agent_backups": {
+    "mayor": ["codex-sol-high", "openrouter-qwen38-max"]
+  },
+  "agent_backups": {
+    "claude-opus-5": ["codex-sol-high", "openrouter-qwen38-max"]
+  },
+  "agent_failover": {
+    "enabled": true,
+    "provider_cooldown": "1h",
+    "max_per_session": 2
+  }
+}
+```
+
+`role_agent_backups` applies to normal role selection. `agent_backups` applies
+when a formula explicitly selects an agent that differs from the session's role
+default. A rig can override either map in its own `settings/config.json`.
+
+`gt quota failover --dry-run` shows the next transitions. Without `--dry-run`,
+only hard quota/usage-limit signals can trigger a restart. The route advances
+strictly forward, skips providers in cooldown, and resumes from durable Gas
+Town state rather than trying to carry a provider-specific transcript across
+runtimes. The opt-in `quota_dog` runs same-provider account rotation first and
+then provider failover for sessions that remain blocked.
+
+**Scheduling and worst-case latency.** `quota_dog` runs on its own ticker and
+goroutine, independent of the daemon's other patrol dogs and the recovery
+heartbeat — a slow or hung sibling (the heartbeat has no per-step timeout and
+can legitimately run for minutes) cannot delay it (gt-yycw). Each cycle runs
+two sequential actions, `rotate` then `failover`, each capped at a fixed
+2-minute internal timeout, so a single cycle takes at most 4 minutes; under
+normal conditions (nothing rate-limited) a cycle completes in sub-second to a
+few seconds. Worst-case latency from a session becoming rate-limited to
+`quota_dog` acting on it is therefore bounded: at most one in-flight cycle
+finishing (≤4m) plus one full subsequent cycle (≤4m) under sustained load —
+roughly 8m in the pathological worst case, independent of the configured
+interval — or one configured interval plus a fast cycle (interval + a few
+seconds) under normal conditions. The interval defaults to 5 minutes
+(`quota_dog.interval` in `mayor/daemon.json`; this town currently configures
+1 minute), so the common-case bound is ~5m out of the box or ~1m as
+currently configured here. Previously this was unbounded — a hung daemon dog
+could stall `quota_dog` indefinitely. The daemon also logs and records a
+`gastown.daemon.dog_overrun.total` metric whenever any patrol dog's cycle
+exceeds `overrun_factor` (default 2x) times its configured interval, so
+scheduling regressions are observable regardless of which dog is slow.
+
 ---
 
 ## Tier 2: Hooks Integration

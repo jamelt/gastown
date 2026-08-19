@@ -1019,10 +1019,16 @@ func DefaultBase() *HooksConfig {
 		PreToolUse: []HookEntry{
 			{
 				Matcher: "Bash(gh pr create*)",
-				Hooks: []Hook{{
-					Type:    "command",
-					Command: gtCommand("gt tap guard pr-workflow"),
-				}},
+				Hooks: []Hook{
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard pr-workflow"),
+					},
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard branch-hygiene"),
+					},
+				},
 			},
 			{
 				Matcher: "Bash(git checkout -b*)",

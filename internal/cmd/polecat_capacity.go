@@ -12,7 +12,9 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -114,7 +116,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 		return nil, polecatCapacitySnapshot{}, err
 	}
 	if max <= 0 {
-		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, nil
+		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}, nil
 	}
 
 	lock, err := acquirePolecatAdmissionLock(townRoot)
@@ -179,7 +181,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 	if err != nil {
 		return polecatCapacitySnapshot{}, err
 	}
-	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}
+	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}
 	if max <= 0 {
 		return snapshot, nil
 	}
@@ -221,12 +223,23 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		if err != nil {
 			return snapshot, fmt.Errorf("listing active polecat work for %s capacity: %w", rigName, err)
 		}
+		inventoryManager := polecat.NewManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), tmuxClient)
 		prefix := beads.GetPrefixForRig(townRoot, rigName)
+		fieldsByName := make(map[string]*beads.AgentFields, len(polecatNames))
 		for _, name := range polecatNames {
 			agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, name)
-			issue := agents[agentID]
-			fields := parsePolecatAgentFields(issue)
-			applyAgentFieldsToCapacitySnapshot(&snapshot, rigName, name, fields, activeWork[name], sessions)
+			fieldsByName[name] = parsePolecatAgentFields(agents[agentID])
+		}
+		mqIndex := buildPolecatMQIndex(rigBeads, fieldsByName)
+		for _, name := range polecatNames {
+			fields := fieldsByName[name]
+			workEvidence := assessPolecatAssignedIssueWork(activeWork[name])
+			item := buildPolecatInventoryItemFromEvidence(rigName, name, fields, workEvidence, sessions, mqIndex)
+			if fields != nil && strings.TrimSpace(fields.CleanupStatus) == "" && !item.SessionRunning && !workEvidence.BlocksCleanup {
+				assessment := inventoryManager.WorkstateDispositionForPolecat(name, item.State, item.Issue)
+				item = applyLegacyCleanupCompatibility(item, fields, workEvidence, assessment)
+			}
+			applyWorkstateDispositionToCapacitySnapshot(&snapshot, item.State, item.Disposition)
 		}
 	}
 
@@ -262,8 +275,8 @@ func listPolecatDirectoryNames(rigPath string) ([]string, error) {
 	return names, nil
 }
 
-func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) {
-	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions)
+func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet, mq polecatMQIndex) {
+	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions, mq)
 	applyWorkstateDispositionToCapacitySnapshot(snapshot, item.State, item.Disposition)
 }
 

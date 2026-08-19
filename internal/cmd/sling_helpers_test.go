@@ -81,6 +81,55 @@ func TestNudgeRefinerySessionName(t *testing.T) {
 	}
 }
 
+func TestNudgeWitnessSessionName(t *testing.T) {
+	setupSlingTestRegistry(t)
+	logPath := filepath.Join(t.TempDir(), "nudge.log")
+	t.Setenv("GT_TEST_NUDGE_LOG", logPath)
+
+	nudgeWitness("gastown", "POLECAT_DONE: test")
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if got, want := string(logBytes), "nudge:gt-witness:POLECAT_DONE: test\n"; got != want {
+		t.Fatalf("nudgeWitness() log = %q, want %q", got, want)
+	}
+}
+
+func TestNudgeWitnessDoesNotEmitEvent(t *testing.T) {
+	t.Setenv("GT_TEST_NUDGE_LOG", "")
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(townRoot, "gastown", "polecats", "test")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	nudgeWitness("gastown", "POLECAT_DONE: test")
+
+	paths, err := filepath.Glob(filepath.Join(townRoot, "events", "witness", "*.event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("witness event files = %v, want none", paths)
+	}
+}
+
 // TestWakeRigAgentsDoesNotNudgeRefinery verifies that wakeRigAgents only
 // nudges the witness, not the refinery. The refinery should only be nudged
 // when an MR is actually created (via nudgeRefinery), not at polecat dispatch time.

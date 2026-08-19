@@ -77,6 +77,13 @@ func runAgentsResolve(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	// An explicit rig selects that rig's database regardless of CWD. Without
+	// this, running from town root searches town state twice and cannot prove
+	// the singleton identity is the authoritative rig-local record.
+	currentBeadsDir, err = resolveAgentsPrimaryBeadsDir(cwd, currentBeadsDir, rig)
+	if err != nil {
+		return err
+	}
 
 	candidates, err := findAgentBeadCandidates(cwd, currentBeadsDir)
 	if err != nil {
@@ -123,6 +130,21 @@ func runAgentsResolve(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintln(cmd.OutOrStdout(), match.ID)
 	return nil
+}
+
+func resolveAgentsPrimaryBeadsDir(cwd, currentBeadsDir, rigName string) (string, error) {
+	if rigName == "" {
+		return currentBeadsDir, nil
+	}
+	townRoot := beads.FindTownRoot(cwd)
+	if townRoot == "" {
+		return "", fmt.Errorf("cannot resolve rig %q outside a Gas Town workspace", rigName)
+	}
+	rigBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, rigName)
+	if !ok {
+		return "", fmt.Errorf("cannot resolve beads database for rig %q", rigName)
+	}
+	return beads.ResolveBeadsDir(rigBeadsDir), nil
 }
 
 func findAgentBeadCandidates(cwd, currentBeadsDir string) ([]agentBeadCandidate, error) {

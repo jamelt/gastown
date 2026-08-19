@@ -743,6 +743,56 @@ func TestRemoveKindByThread(t *testing.T) {
 	}
 }
 
+func TestEnqueueUniqueByKindThreadConcurrent(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-unique-reminder"
+	const writers = 20
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	created := make(chan bool, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			added, err := EnqueueUniqueByKindThread(townRoot, session, QueuedNudge{
+				Sender:   "system",
+				Message:  "reply via mail",
+				Kind:     "reply-reminder",
+				ThreadID: "thread-one",
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			created <- added
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(created)
+
+	for err := range errs {
+		t.Errorf("EnqueueUniqueByKindThread: %v", err)
+	}
+	addedCount := 0
+	for added := range created {
+		if added {
+			addedCount++
+		}
+	}
+	if addedCount != 1 {
+		t.Fatalf("created count = %d, want 1", addedCount)
+	}
+	pending, err := Pending(townRoot, session)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("Pending = %d, want 1", pending)
+	}
+}
+
 // TestDeferredNudgeDeliveredAfterDelay uses a very short DeliverAfter to confirm
 // that the same nudge is skipped on first Drain and delivered on a second Drain
 // after the deadline elapses.

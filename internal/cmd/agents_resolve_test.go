@@ -1,11 +1,43 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
+
+func TestResolveAgentsPrimaryBeadsDirUsesExplicitRigFromTownAndRigContexts(t *testing.T) {
+	townRoot := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(townRoot, "mayor"),
+		filepath.Join(townRoot, ".beads"),
+		filepath.Join(townRoot, "gastown", ".beads"),
+		filepath.Join(townRoot, "gastown", "mayor", "rig"),
+	} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(`{"prefix":"gt-","path":"gastown"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rigBeads := filepath.Join(townRoot, "gastown", ".beads")
+	for _, cwd := range []string{townRoot, filepath.Join(townRoot, "gastown", "mayor", "rig")} {
+		got, err := resolveAgentsPrimaryBeadsDir(cwd, filepath.Join(townRoot, ".beads"), "gastown")
+		if err != nil {
+			t.Fatalf("cwd %s: %v", cwd, err)
+		}
+		if filepath.Clean(got) != filepath.Clean(rigBeads) {
+			t.Fatalf("cwd %s resolved %s, want %s", cwd, got, rigBeads)
+		}
+	}
+}
 
 func TestAgentBeadMatchesDescriptionAndIDFallback(t *testing.T) {
 	tests := []struct {

@@ -107,39 +107,39 @@ func (c *WorktreeGitdirCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusError,
 		Message: fmt.Sprintf("%d worktree(s) with broken gitdir references", len(c.brokenWorktrees)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to re-create broken worktrees from .repo.git",
+		FixHint: "Run 'gt doctor --fix' to safely repair broken worktree links; worktrees with missing Git metadata require manual recovery",
 	}
 }
 
-// checkRigWorktrees checks all worktrees within a single rig.
+// checkRigWorktrees checks all worktrees within a single rig: refinery,
+// polecats, witness, mayor, and crew.
 func (c *WorktreeGitdirCheck) checkRigWorktrees(rigPath, rigName string) {
 	// Check refinery/rig
 	refineryRig := filepath.Join(rigPath, "refinery", "rig")
 	c.checkWorktree(refineryRig, rigPath)
 
 	// Check polecats (both structures: polecats/<name>/<rigname>/ and polecats/<name>/)
+	// A missing polecats dir must not short-circuit the witness/mayor/crew
+	// checks below.
 	polecatsDir := filepath.Join(rigPath, "polecats")
-	polecatEntries, err := os.ReadDir(polecatsDir)
-	if err != nil {
-		return
-	}
+	if polecatEntries, err := os.ReadDir(polecatsDir); err == nil {
+		for _, entry := range polecatEntries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
 
-	for _, entry := range polecatEntries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
+			// Try new structure first: polecats/<name>/<rigname>/
+			newPath := filepath.Join(polecatsDir, entry.Name(), rigName)
+			if c.hasGitFile(newPath) {
+				c.checkWorktree(newPath, rigPath)
+				continue
+			}
 
-		// Try new structure first: polecats/<name>/<rigname>/
-		newPath := filepath.Join(polecatsDir, entry.Name(), rigName)
-		if c.hasGitFile(newPath) {
-			c.checkWorktree(newPath, rigPath)
-			continue
-		}
-
-		// Fall back to old structure: polecats/<name>/
-		oldPath := filepath.Join(polecatsDir, entry.Name())
-		if c.hasGitFile(oldPath) {
-			c.checkWorktree(oldPath, rigPath)
+			// Fall back to old structure: polecats/<name>/
+			oldPath := filepath.Join(polecatsDir, entry.Name())
+			if c.hasGitFile(oldPath) {
+				c.checkWorktree(oldPath, rigPath)
+			}
 		}
 	}
 
@@ -147,6 +147,27 @@ func (c *WorktreeGitdirCheck) checkRigWorktrees(rigPath, rigName string) {
 	witnessRig := filepath.Join(rigPath, "witness", "rig")
 	if c.hasGitFile(witnessRig) {
 		c.checkWorktree(witnessRig, rigPath)
+	}
+
+	// Check mayor/rig
+	mayorRig := filepath.Join(rigPath, "mayor", "rig")
+	if c.hasGitFile(mayorRig) {
+		c.checkWorktree(mayorRig, rigPath)
+	}
+
+	// Check crew/<name> (each crew member is a single-level worktree, unlike
+	// the two-level polecats/<name>/<rigname> layout).
+	crewDir := filepath.Join(rigPath, "crew")
+	if crewEntries, err := os.ReadDir(crewDir); err == nil {
+		for _, entry := range crewEntries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			crewPath := filepath.Join(crewDir, entry.Name())
+			if c.hasGitFile(crewPath) {
+				c.checkWorktree(crewPath, rigPath)
+			}
+		}
 	}
 }
 
@@ -288,7 +309,7 @@ func (c *WorktreeGitdirCheck) buildReason(gitdirTarget, bareRepoPath, correctedB
 
 	// Stale .repo.git path doesn't exist — is this a relocation?
 	if correctedBareRepo != "" {
-		oldPrefix := filepath.Dir(filepath.Dir(bareRepoPath))     // e.g., /Users/bob/gt
+		oldPrefix := filepath.Dir(filepath.Dir(bareRepoPath))      // e.g., /Users/bob/gt
 		newPrefix := filepath.Dir(filepath.Dir(correctedBareRepo)) // e.g., /home/bob/gt
 		return fmt.Sprintf("relocated (%s -> %s), needs worktree re-creation", oldPrefix, newPrefix)
 	}
@@ -306,7 +327,7 @@ func (c *WorktreeGitdirCheck) hasGitFile(path string) bool {
 	return !info.IsDir()
 }
 
-// Fix attempts to re-create broken worktrees.
+// Fix attempts to safely repair broken worktree links.
 func (c *WorktreeGitdirCheck) Fix(ctx *CheckContext) error {
 	var errs []string
 
@@ -340,99 +361,22 @@ func (c *WorktreeGitdirCheck) Fix(ctx *CheckContext) error {
 
 // fixOneWorktree repairs a single broken worktree.
 func (c *WorktreeGitdirCheck) fixOneWorktree(bw brokenWorktree, repoPath string) error {
-	// Remove the broken .git file
-	gitFile := filepath.Join(bw.worktreePath, ".git")
-	if _, err := os.Stat(gitFile); err == nil {
-		if err := os.Remove(gitFile); err != nil {
-			return fmt.Errorf("%s: cannot remove broken .git file: %w", bw.worktreePath, err)
+	// repair must run before removing the .git file or pruning entries: both are
+	// the evidence Git needs to preserve this worktree's branch and index.
+	cmd := exec.Command("git", "-C", repoPath, "worktree", "repair", bw.worktreePath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		repairOutput := strings.TrimSpace(string(output))
+		if strings.Contains(repairOutput, "is not a git command") {
+			return fmt.Errorf("%s: unable to repair worktree links safely: git worktree repair requires Git 2.29 or newer; the worktree was left unchanged and requires manual recovery", bw.worktreePath)
 		}
-	}
-
-	// Prune stale worktree entries
-	pruneCmd := exec.Command("git", "-C", repoPath, "worktree", "prune")
-	_ = pruneCmd.Run()
-
-	// Determine default branch
-	cmd := exec.Command("git", "-C", repoPath, "symbolic-ref", "HEAD")
-	out, err := cmd.Output()
-	branch := "main"
-	if err == nil {
-		ref := strings.TrimSpace(string(out))
-		branch = strings.TrimPrefix(ref, "refs/heads/")
-	}
-
-	// Try git worktree add first (works for empty/non-existent directories)
-	cmd = exec.Command("git", "-C", repoPath, "worktree", "add", "--force", bw.worktreePath, branch)
-	if output, err := cmd.CombinedOutput(); err == nil {
-		return nil // Success
-	} else if !strings.Contains(string(output), "already exists") {
-		return fmt.Errorf("%s: failed to re-create worktree: %v (%s)",
-			bw.worktreePath, err, strings.TrimSpace(string(output)))
-	}
-
-	// Directory already exists with content (common for deacon dogs after rsync).
-	// Manually register the worktree: create the entry in .repo.git/worktrees/
-	// and write a new .git file pointing to it.
-	return c.manualWorktreeRegister(bw.worktreePath, repoPath, branch)
-}
-
-// manualWorktreeRegister creates a worktree registration manually when
-// git worktree add fails because the directory already exists with content.
-//
-// This creates the same structure that git worktree add would:
-//   - .repo.git/worktrees/<name>/gitdir  → path to worktree's .git file
-//   - .repo.git/worktrees/<name>/commondir → ../..
-//   - .repo.git/worktrees/<name>/HEAD → ref: refs/heads/<branch>
-//   - <worktree>/.git → gitdir: path to entry
-func (c *WorktreeGitdirCheck) manualWorktreeRegister(worktreePath, repoPath, branch string) error {
-	// Choose a unique name for the worktree entry
-	baseName := filepath.Base(worktreePath)
-	wtName := baseName
-	worktreesDir := filepath.Join(repoPath, "worktrees")
-
-	// Ensure worktrees directory exists
-	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
-		return fmt.Errorf("%s: cannot create worktrees dir: %w", worktreePath, err)
-	}
-
-	// Find unique name (append _1, _2 etc if needed)
-	entryPath := filepath.Join(worktreesDir, wtName)
-	for i := 1; ; i++ {
-		if _, err := os.Stat(entryPath); os.IsNotExist(err) {
-			break
+		// Git reports the broken link it just repaired as an error on some
+		// versions. Accept it only when Git can subsequently use the worktree.
+		if verifyErr := exec.Command("git", "-C", bw.worktreePath, "status", "--porcelain").Run(); verifyErr == nil {
+			return nil
 		}
-		wtName = fmt.Sprintf("%s_%d", baseName, i)
-		entryPath = filepath.Join(worktreesDir, wtName)
+		return fmt.Errorf("%s: unable to repair worktree links safely; the worktree was left unchanged and requires manual recovery: %s",
+			bw.worktreePath, repairOutput)
 	}
-
-	// Create the worktree entry directory
-	if err := os.MkdirAll(entryPath, 0755); err != nil {
-		return fmt.Errorf("%s: cannot create worktree entry: %w", worktreePath, err)
-	}
-
-	// Write gitdir (back-reference to the worktree's .git file)
-	gitFilePath := filepath.Join(worktreePath, ".git")
-	if err := os.WriteFile(filepath.Join(entryPath, "gitdir"), []byte(gitFilePath+"\n"), 0644); err != nil {
-		return fmt.Errorf("%s: cannot write gitdir: %w", worktreePath, err)
-	}
-
-	// Write commondir (relative path to the shared object database)
-	if err := os.WriteFile(filepath.Join(entryPath, "commondir"), []byte("../..\n"), 0644); err != nil {
-		return fmt.Errorf("%s: cannot write commondir: %w", worktreePath, err)
-	}
-
-	// Write HEAD
-	headContent := fmt.Sprintf("ref: refs/heads/%s\n", branch)
-	if err := os.WriteFile(filepath.Join(entryPath, "HEAD"), []byte(headContent), 0644); err != nil {
-		return fmt.Errorf("%s: cannot write HEAD: %w", worktreePath, err)
-	}
-
-	// Write the worktree's .git file
-	gitdirContent := fmt.Sprintf("gitdir: %s\n", entryPath)
-	if err := os.WriteFile(gitFilePath, []byte(gitdirContent), 0644); err != nil {
-		return fmt.Errorf("%s: cannot write .git file: %w", worktreePath, err)
-	}
-
 	return nil
 }
 

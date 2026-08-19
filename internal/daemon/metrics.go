@@ -23,6 +23,10 @@ type daemonMetrics struct {
 	// polecatSpawns counts polecat session spawns, labeled by rig name.
 	polecatSpawns metric.Int64Counter
 
+	// dogOverrunTotal counts dog cycles that exceeded their overrun
+	// threshold, labeled by dog name.
+	dogOverrunTotal metric.Int64Counter
+
 	// doltMu protects dolt gauge values written by the health check goroutine.
 	doltMu             sync.RWMutex
 	doltConnections    int64
@@ -57,6 +61,13 @@ func newDaemonMetrics() (*daemonMetrics, error) {
 
 	dm.polecatSpawns, err = m.Int64Counter("gastown.polecat.spawns.total",
 		metric.WithDescription("Total number of polecat session spawns"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	dm.dogOverrunTotal, err = m.Int64Counter("gastown.daemon.dog_overrun.total",
+		metric.WithDescription("Total number of dog cycles that exceeded their overrun threshold"),
 	)
 	if err != nil {
 		return nil, err
@@ -144,6 +155,16 @@ func (dm *daemonMetrics) recordPolecatSpawn(ctx context.Context, rigName string)
 	}
 	dm.polecatSpawns.Add(ctx, 1,
 		metric.WithAttributes(attribute.String("rig", rigName)),
+	)
+}
+
+// recordDogOverrun increments the dog-overrun counter, labeled with the dog name.
+func (dm *daemonMetrics) recordDogOverrun(ctx context.Context, dogName string) {
+	if dm == nil {
+		return
+	}
+	dm.dogOverrunTotal.Add(ctx, 1,
+		metric.WithAttributes(attribute.String("dog", dogName)),
 	)
 }
 

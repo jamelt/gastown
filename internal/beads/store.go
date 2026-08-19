@@ -214,10 +214,11 @@ func issueFilterFromListOpts(opts ListOptions) beadsdk.IssueFilter {
 
 	// Prefer Label; fall back to deprecated Type
 	if opts.Label != "" {
-		f.Labels = []string{opts.Label}
+		f.Labels = append(f.Labels, opts.Label)
 	} else if opts.Type != "" {
-		f.Labels = []string{"gt:" + opts.Type}
+		f.Labels = append(f.Labels, "gt:"+opts.Type)
 	}
+	f.Labels = append(f.Labels, opts.Labels...)
 
 	if opts.Priority >= 0 {
 		f.Priority = &opts.Priority
