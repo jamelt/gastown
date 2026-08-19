@@ -476,3 +476,36 @@ func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
 		t.Error("deacon patrol formula must require gt handoff after patrol report")
 	}
 }
+
+// TestCheckRecoverySweepReconcilesCleanupStatus verifies that the witness
+// patrol formula's check-recovery-sweep step passes --reconcile-cleanup on
+// its per-polecat check-recovery call.
+//
+// Without this flag, a polecat whose live verdict is SAFE_TO_NUKE is
+// diagnosed correctly every cycle but its stale persisted cleanup_status
+// bead field is never corrected, so `gt polecat list` and the scheduler's
+// capacity snapshot (which read that persisted field directly, not the live
+// verdict) keep reporting it as idle-recovery-needed forever, leaking
+// reusable capacity. See gt-2ggu.
+func TestCheckRecoverySweepReconcilesCleanupStatus(t *testing.T) {
+	content, err := formulasFS.ReadFile("formulas/mol-witness-patrol.formula.toml")
+	if err != nil {
+		t.Fatalf("reading witness patrol formula: %v", err)
+	}
+
+	f, err := Parse(content)
+	if err != nil {
+		t.Fatalf("parsing witness patrol formula: %v", err)
+	}
+
+	desc := stepDescription(f, "check-recovery-sweep")
+	if desc == "" {
+		t.Fatal("check-recovery-sweep step not found or has empty description")
+	}
+
+	if !strings.Contains(desc, "gt polecat check-recovery {{rig}}/<name> --json --reconcile-cleanup") {
+		t.Error("check-recovery-sweep step must pass --reconcile-cleanup on its " +
+			"check-recovery call, or SAFE_TO_NUKE polecats never have their stale " +
+			"cleanup_status corrected and never become reusable. See gt-2ggu.")
+	}
+}
