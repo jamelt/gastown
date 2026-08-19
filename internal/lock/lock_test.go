@@ -793,3 +793,81 @@ func TestLock_CheckCleansUpStaleLock(t *testing.T) {
 		t.Error("Check() should have removed stale lock file")
 	}
 }
+
+func TestLock_ReleaseRefusesUnownedLock(t *testing.T) {
+	tmpDir := t.TempDir()
+	workerDir := filepath.Join(tmpDir, "worker")
+	runtimeDir := filepath.Join(workerDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a lock file owned by another process (dead or alive)
+	lockPath := agentLockPath(workerDir)
+	otherLock := LockInfo{
+		PID:        999999999, // Non-existent PID to ensure it's not us
+		AcquiredAt: time.Now(),
+		SessionID:  "other-session",
+	}
+	data, _ := json.Marshal(otherLock)
+	if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to release a lock we don't own - should fail
+	l := New(agentLockPath(workerDir))
+	err := l.Release()
+
+	// Release() must refuse to remove a lock owned by another process
+	if !errors.Is(err, ErrLocked) {
+		t.Errorf("Release() of unowned lock: error = %v, want ErrLocked", err)
+	}
+
+	// Verify lock file still exists
+	info, err := l.Read()
+	if err != nil {
+		t.Errorf("Read() after failed Release: error = %v, want lock to still exist", err)
+	}
+	if info.PID != 999999999 {
+		t.Errorf("Lock PID changed after failed Release: %d, want 999999999", info.PID)
+	}
+}
+
+func TestLock_AcquireCleanupStaleLock(t *testing.T) {
+	tmpDir := t.TempDir()
+	workerDir := filepath.Join(tmpDir, "worker")
+	runtimeDir := filepath.Join(workerDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a stale lock (old TTL that would exceed maxAge)
+	lockPath := agentLockPath(workerDir)
+	oldLock := LockInfo{
+		PID:        os.Getpid(), // Our PID
+		AcquiredAt: time.Now().Add(-2 * time.Hour), // Very old
+		SessionID:  "old-session",
+	}
+	data, _ := json.Marshal(oldLock)
+	if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// AcquireTTL should clean up the old lock and allow re-acquisition
+	l := New(agentLockPath(workerDir))
+	err := l.AcquireTTL("new-session", time.Hour) // TTL of 1 hour, lock is 2 hours old
+	if err != nil {
+		t.Errorf("AcquireTTL() with stale lock: error = %v, want nil", err)
+	}
+
+	// Verify we now own the lock with new session
+	info, err := l.Read()
+	if err != nil {
+		t.Fatalf("Read() after AcquireTTL: error = %v", err)
+	}
+	if info.SessionID != "new-session" {
+		t.Errorf("SessionID = %q, want %q", info.SessionID, "new-session")
+	}
+
+	l.Release()
+}

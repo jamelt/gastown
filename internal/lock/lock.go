@@ -133,8 +133,12 @@ func (l *Lock) acquire(sessionID string, maxAge time.Duration) error {
 	if err == nil {
 		// Lock exists - check if stale
 		if info.IsStaleAfter(maxAge) {
-			// Stale lock - remove it
-			if err := l.Release(); err != nil {
+			// Stale lock - remove it directly (we hold flock, so this is safe)
+			// We don't call Release() here because a stale lock by definition
+			// is not owned by us (dead process or old TTL), so Release()'s
+			// ownership check would fail. Direct removal is safe here because
+			// we hold the coordination lock (flock).
+			if err := os.Remove(l.lockPath); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("removing stale lock: %w", err)
 			}
 		} else {
@@ -154,7 +158,22 @@ func (l *Lock) acquire(sessionID string, maxAge time.Duration) error {
 }
 
 // Release releases the lock if we hold it.
+// Returns nil if the lock doesn't exist (idempotent).
+// Returns ErrLocked if another process owns the lock.
 func (l *Lock) Release() error {
+	info, err := l.Read()
+	if err != nil {
+		if errors.Is(err, ErrNotLocked) {
+			return nil
+		}
+		return err
+	}
+
+	// Verify we own the lock before removing it
+	if info.PID != os.Getpid() {
+		return fmt.Errorf("%w: cannot release lock owned by PID %d", ErrLocked, info.PID)
+	}
+
 	if err := os.Remove(l.lockPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing lock file: %w", err)
 	}
@@ -203,8 +222,10 @@ func (l *Lock) Check() error {
 
 	// Check if stale
 	if info.IsStale() {
-		// Clean up stale lock (now safe - we hold the flock)
-		_ = l.Release()
+		// Clean up stale lock directly (we hold flock, so this is safe)
+		// We don't use Release() because a stale lock is not owned by us,
+		// so Release()'s ownership check would fail.
+		_ = os.Remove(l.lockPath)
 		return nil
 	}
 
@@ -343,8 +364,9 @@ func CleanStaleLocks(root string) (int, error) {
 				continue
 			}
 			// Both PID dead AND no session = truly stale
-			agentLock := New(filepath.Join(workerDir, ".runtime", "agent.lock"))
-			if err := agentLock.Release(); err == nil {
+			// Remove directly (not via Release() which requires ownership)
+			lockPath := filepath.Join(workerDir, ".runtime", "agent.lock")
+			if err := os.Remove(lockPath); err == nil {
 				cleaned++
 			}
 		}
