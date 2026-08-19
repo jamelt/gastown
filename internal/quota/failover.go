@@ -229,6 +229,31 @@ func RecordAgentFailover(state *config.QuotaState, assignment AgentFailoverAssig
 	}
 }
 
+// SelectAvailableAgent returns the first agent in route whose quota provider
+// is not currently cooling down per state, so a spawn can go straight to a
+// known-good provider instead of paying a failed attempt against one that
+// quota.json already recorded as limited. substituted is true when the
+// chosen agent differs from route[0], so the caller can log the swap instead
+// of leaving it silent. Falls back to route[0] if every candidate is cooling
+// down (or a provider can't be resolved for a candidate), so this never
+// blocks a spawn outright — it only skips a known-bad first attempt.
+func SelectAvailableAgent(state *config.QuotaState, route []string, now time.Time, providerResolver AgentProviderResolverFunc) (agent, provider string, substituted bool) {
+	if len(route) == 0 {
+		return "", "", false
+	}
+	for i, candidate := range route {
+		p, err := providerResolver(candidate)
+		if err != nil || p == "" || !providerCoolingDown(state, p, now) {
+			return candidate, p, i > 0
+		}
+	}
+	return route[0], "", false
+}
+
+// AgentProviderResolverFunc maps an agent alias to its shared quota provider,
+// without the ScanResult a reactive PlanAgentFailover pass carries.
+type AgentProviderResolverFunc func(agent string) (string, error)
+
 func providerCoolingDown(state *config.QuotaState, provider string, now time.Time) bool {
 	if state == nil {
 		return false

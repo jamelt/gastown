@@ -123,3 +123,68 @@ func TestRecordAgentFailoverPersistsProviderAndSessionState(t *testing.T) {
 		t.Fatalf("cooldown = %q", got)
 	}
 }
+
+func agentProviderMap(providers map[string]string) AgentProviderResolverFunc {
+	return func(agent string) (string, error) {
+		provider, ok := providers[agent]
+		if !ok {
+			return "", errors.New("provider not found")
+		}
+		return provider, nil
+	}
+}
+
+func TestSelectAvailableAgentReturnsFirstWhenNotCoolingDown(t *testing.T) {
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	route := []string{"codex-terra", "claude-sonnet-5"}
+	providerResolver := agentProviderMap(map[string]string{"codex-terra": "openai", "claude-sonnet-5": "anthropic"})
+
+	agent, provider, substituted := SelectAvailableAgent(&config.QuotaState{}, route, now, providerResolver)
+	if agent != "codex-terra" || provider != "openai" || substituted {
+		t.Fatalf("agent=%q provider=%q substituted=%v", agent, provider, substituted)
+	}
+}
+
+func TestSelectAvailableAgentSubstitutesWhenFirstIsCoolingDown(t *testing.T) {
+	now := time.Date(2026, 8, 19, 1, 0, 0, 0, time.UTC)
+	route := []string{"codex-terra", "claude-sonnet-5"}
+	providerResolver := agentProviderMap(map[string]string{"codex-terra": "openai", "claude-sonnet-5": "anthropic"})
+	state := &config.QuotaState{Providers: map[string]config.ProviderQuotaState{
+		"openai": {CooldownUntil: now.Add(time.Hour).Format(time.RFC3339)},
+	}}
+
+	agent, provider, substituted := SelectAvailableAgent(state, route, now, providerResolver)
+	if agent != "claude-sonnet-5" || provider != "anthropic" || !substituted {
+		t.Fatalf("agent=%q provider=%q substituted=%v", agent, provider, substituted)
+	}
+}
+
+func TestSelectAvailableAgentFallsBackToFirstWhenAllCoolingDown(t *testing.T) {
+	now := time.Date(2026, 8, 19, 1, 0, 0, 0, time.UTC)
+	route := []string{"codex-terra", "claude-sonnet-5"}
+	providerResolver := agentProviderMap(map[string]string{"codex-terra": "openai", "claude-sonnet-5": "anthropic"})
+	cooldown := now.Add(time.Hour).Format(time.RFC3339)
+	state := &config.QuotaState{Providers: map[string]config.ProviderQuotaState{
+		"openai":    {CooldownUntil: cooldown},
+		"anthropic": {CooldownUntil: cooldown},
+	}}
+
+	agent, provider, substituted := SelectAvailableAgent(state, route, now, providerResolver)
+	if agent != "codex-terra" || provider != "" || substituted {
+		t.Fatalf("agent=%q provider=%q substituted=%v", agent, provider, substituted)
+	}
+}
+
+func TestSelectAvailableAgentPastCooldownUsesFirst(t *testing.T) {
+	now := time.Date(2026, 8, 19, 3, 0, 0, 0, time.UTC)
+	route := []string{"codex-terra", "claude-sonnet-5"}
+	providerResolver := agentProviderMap(map[string]string{"codex-terra": "openai", "claude-sonnet-5": "anthropic"})
+	state := &config.QuotaState{Providers: map[string]config.ProviderQuotaState{
+		"openai": {CooldownUntil: now.Add(-time.Hour).Format(time.RFC3339)},
+	}}
+
+	agent, _, substituted := SelectAvailableAgent(state, route, now, providerResolver)
+	if agent != "codex-terra" || substituted {
+		t.Fatalf("expected expired cooldown to leave primary agent, got agent=%q substituted=%v", agent, substituted)
+	}
+}
