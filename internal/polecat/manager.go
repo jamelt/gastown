@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/quota"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -858,7 +859,11 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	}
 
 	townRoot := filepath.Dir(m.rig.Path)
-	runtimeConfig := config.ResolveRoleAgentConfig("polecat", townRoot, m.rig.Path)
+	// Best-effort: settings provisioning follows the same cooldown-aware
+	// choice SessionManager.Start will make (gt-lovb); falls back silently
+	// to the plain primary agent if that can't be determined here, since
+	// Start is the authoritative decision point.
+	runtimeConfig := quota.SelectRoleAgentOrDefault("polecat", townRoot, m.rig.Path, time.Now())
 	polecatSettingsDir := config.RoleSettingsDir("polecat", m.rig.Path)
 	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, clonePath, "polecat", runtimeConfig); err != nil {
 		style.PrintWarning("could not install runtime settings: %v", err)
@@ -1070,7 +1075,11 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	// Install runtime settings in the shared polecats parent directory.
 	// Settings are passed to Claude Code via --settings flag.
 	townRoot := filepath.Dir(m.rig.Path)
-	runtimeConfig := config.ResolveRoleAgentConfig("polecat", townRoot, m.rig.Path)
+	// Best-effort: settings provisioning follows the same cooldown-aware
+	// choice SessionManager.Start will make (gt-lovb); falls back silently
+	// to the plain primary agent if that can't be determined here, since
+	// Start is the authoritative decision point.
+	runtimeConfig := quota.SelectRoleAgentOrDefault("polecat", townRoot, m.rig.Path, time.Now())
 	polecatSettingsDir := config.RoleSettingsDir("polecat", m.rig.Path)
 	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, clonePath, "polecat", runtimeConfig); err != nil {
 		// Non-fatal - log warning but continue
