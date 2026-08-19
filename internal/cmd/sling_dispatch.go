@@ -146,6 +146,17 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		return result, fmt.Errorf("bead %s is %s (work already completed)", params.BeadID, info.Status)
 	}
 
+	// hq-1s4w hard-prohibition guard (gt-b2qi). No override here: batch,
+	// convoy, epic sling, and queue dispatch all funnel through executeSling,
+	// and hq-1s4w requires fresh, per-dispatch approval that a bulk operation
+	// covering many beads at once cannot attest. To dispatch this specific
+	// bead, dequeue it (gt scheduler clear) and re-sling it individually with
+	// gt sling <bead> <rig> --confirm-human-approved.
+	if err := checkHardProhibition(info.Title, info.Description, info.Labels, false); err != nil {
+		result.ErrMsg = "hard-prohibition: " + err.Error()
+		return result, fmt.Errorf("%w\nTo dispatch: gt scheduler clear (dequeue), then gt sling %s <rig> --confirm-human-approved", err, params.BeadID)
+	}
+
 	// Save explicit force state before dead-agent auto-force, so the deferred
 	// gate below still requires an explicit --force for deferred beads.
 	explicitForce := params.Force

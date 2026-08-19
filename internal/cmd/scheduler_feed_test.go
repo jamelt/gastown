@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -172,6 +173,96 @@ func TestEffectiveIssueForFeedAppliesBatchLabels(t *testing.T) {
 	if fallback.ID != readyIssue.ID {
 		t.Fatalf("effectiveIssueForFeed with no batch entry = %+v, want unchanged issue", fallback)
 	}
+}
+
+// TestCheckHardProhibition covers the gate gt-b2qi adds to every manual
+// dispatch entry point (scheduleBead, runSling's direct path, executeSling),
+// reusing requiresHumanDecision/platformIncompatible unchanged.
+func TestCheckHardProhibition(t *testing.T) {
+	tests := []struct {
+		name        string
+		title       string
+		description string
+		labels      []string
+		confirmed   bool
+		wantErr     bool
+		wantSubstr  string
+	}{
+		{
+			name:  "ordinary bead dispatches with no confirmation",
+			title: "Fix the widget",
+		},
+		{
+			name:       "human label blocks without confirmation",
+			title:      "Put deploy-only pager secrets in the normal recoverable secret store",
+			labels:     []string{"area:security", "human"},
+			wantErr:    true,
+			wantSubstr: "fresh human approval",
+		},
+		{
+			name:      "human label dispatches once confirmed",
+			title:     "Put deploy-only pager secrets in the normal recoverable secret store",
+			labels:    []string{"area:security", "human"},
+			confirmed: true,
+		},
+		{
+			name:       "risk:money label blocks without confirmation",
+			title:      "Rebalance trader allocations",
+			labels:     []string{"risk:money"},
+			wantErr:    true,
+			wantSubstr: "fresh human approval",
+		},
+		{
+			name:      "risk:money label dispatches once confirmed",
+			title:     "Rebalance trader allocations",
+			labels:    []string{"risk:money"},
+			confirmed: true,
+		},
+		{
+			name:        "human-decision description phrase blocks without confirmation",
+			title:       "Route selection",
+			description: "This requires human approval before proceeding.",
+			wantErr:     true,
+			wantSubstr:  "fresh human approval",
+		},
+		{
+			name:       "mismatched platform label blocks even when confirmed",
+			title:      "macOS gate capture",
+			labels:     []string{"gt:platform:" + oppositeGOOS()},
+			confirmed:  true,
+			wantErr:    true,
+			wantSubstr: "cannot dispatch",
+		},
+		{
+			name:   "alarming title but genuinely safe bead dispatches",
+			title:  "Repair legacy production acknowledgement migration cleanup",
+			labels: []string{"area:testing", "area:ui"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkHardProhibition(tc.title, tc.description, tc.labels, tc.confirmed)
+			if tc.wantErr && err == nil {
+				t.Fatalf("checkHardProhibition(%q, confirmed=%v) = nil, want error", tc.title, tc.confirmed)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("checkHardProhibition(%q, confirmed=%v) = %v, want nil", tc.title, tc.confirmed, err)
+			}
+			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+				t.Fatalf("checkHardProhibition(%q, confirmed=%v) error = %v, want substring %q", tc.title, tc.confirmed, err, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+// oppositeGOOS returns a platform label value guaranteed to mismatch
+// runtime.GOOS, so platformIncompatible's check is exercised deterministically.
+func oppositeGOOS() string {
+	if runtime.GOOS == "windows" {
+		return "linux"
+	}
+	return "windows"
 }
 
 func TestPlatformIncompatibleNoOpWithoutLabel(t *testing.T) {
