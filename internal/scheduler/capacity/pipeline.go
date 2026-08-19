@@ -49,6 +49,15 @@ type SlingContextFields struct {
 // LabelSlingContext is the label used to identify sling context beads.
 const LabelSlingContext = "gt:sling-context"
 
+// LabelSchedulerCleared marks a work bead whose sling context was explicitly
+// removed via `gt scheduler clear`. The feeder must never re-enqueue a bead
+// carrying this label — only an explicit `gt sling` (which creates a fresh
+// sling context directly, not through the feeder) may lift it. Without this
+// marker, closing a sling context is indistinguishable from "never
+// scheduled": the next feed cycle sees the bead as ready and unscheduled and
+// recreates the context it was just cleared from (gt-5ti).
+const LabelSchedulerCleared = "gt:scheduler-cleared"
+
 // Labels that mark inter-agent messaging beads. These are never polecat work
 // and must not be dispatched to rig polecats.
 const (

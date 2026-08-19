@@ -325,6 +325,14 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("creating sling context: %w", err)
 	}
 
+	// A fresh explicit sling is the only thing that may lift a prior
+	// `gt scheduler clear` on this bead (gt-5ti). Best-effort: the context
+	// is already live either way, and RemoveLabels on an absent label is a
+	// no-op for beads without a prior clear.
+	if err := rigBeads.Update(beadID, beads.UpdateOptions{RemoveLabels: []string{capacity.LabelSchedulerCleared}}); err != nil {
+		fmt.Printf("%s Could not clear scheduler-cleared marker on %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
+	}
+
 	// Auto-convoy (unless --no-convoy)
 	if !opts.NoConvoy {
 		existingConvoy := isTrackedByConvoy(beadID)

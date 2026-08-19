@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
 func TestFeedSkipReason(t *testing.T) {
@@ -78,6 +79,17 @@ func TestFeedSkipReason(t *testing.T) {
 			name:  "blocked status is skipped even without a dependency edge",
 			issue: &beads.Issue{ID: "gt-10", Title: "Some task", Status: "blocked"},
 			want:  "status: blocked",
+			skip:  true,
+		},
+		{
+			// gt-5ti: `gt scheduler clear --bead <id>` closes the sling
+			// context but must also stop the feeder from recreating it on
+			// the next cycle. Regression for the exact failure: clearing
+			// closed the context, then the next scheduler pass saw a ready,
+			// unscheduled bead and re-fed it.
+			name:  "scheduler-cleared label is skipped until a fresh sling",
+			issue: &beads.Issue{ID: "gt-11", Title: "Some task", Status: "open", Labels: []string{capacity.LabelSchedulerCleared}},
+			want:  "explicitly cleared from scheduler, needs fresh sling",
 			skip:  true,
 		},
 		// Regression fixtures harvested from the live trader queue 2026-08-19

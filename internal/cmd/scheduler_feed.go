@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -288,6 +289,9 @@ func feedSkipReason(issue *beads.Issue) (string, bool) {
 	// dependency edges, so both must be checked explicitly here.
 	if issue.Status == "blocked" {
 		return "status: blocked", true
+	}
+	if hasLabel(issue.Labels, capacity.LabelSchedulerCleared) {
+		return "explicitly cleared from scheduler, needs fresh sling", true
 	}
 	if isDeferredBead(&beadInfo{
 		Status:      issue.Status,
